@@ -296,6 +296,8 @@ export class LayaRuntime {
  * swallowed, (2) returns the decision untouched until M1 actually assembles context, and (3) isolates
  * its own bookkeeping: a failure in our code is logged and cannot affect the round.
  */
+let pendingPriming: Promise<void> | undefined;
+
 export function preStepMiddleware(
   ctx: PluginContext,
   observer?: StepObserver,
@@ -387,6 +389,8 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // round. `off` skips it entirely. The context window comes from constants for now: `ctx.tokenMeter`'s
   // semantics are not verified yet, and a wrong window would silently distort every budget number.
   let observer: StepObserver | undefined;
+  /** one assemble() per session; awaited by the first pre-step call (a short round can exit before a fire-and-forget promise settles) */
+  let priming: Promise<void> | undefined;
   if (resolved.observation !== 'off') {
     const probeSink =
       resolved.observation === 'tape'
@@ -515,7 +519,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     ctx.logger?.info?.(`[s1cap] observation mode: ${resolved.observation} -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)}${resolved.observation === 'tape' ? ` + tape ${resolveTelemetryPath(resolved.telemetry.tapeJsonl)}` : ''} (prompt untouched)`);
 
 
-    void primeSystemPrompt({
+    pendingPriming = primeSystemPrompt({
       service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
       observer,
       onText: (text, tokens) => observer.setSystemPrompt(text, tokens),
@@ -535,7 +539,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // The only lifecycle hook we register, in the verified middleware shape. `agent/request-error`
   // is deliberately NOT registered: its contract is unverified, and an unverified hook is exactly
   // what took a round down before.
-  ctx.on('agent/pre-step', preStepMiddleware(ctx, observer));
+  ctx.on('agent/pre-step', preStepMiddleware(ctx, observer, priming));
 
   // The `/s1` surface. Registration follows the verified Cordis shape:
   // is ctx.effect(() => ctx.commands.register({ name, description, input, handler })) - all verified

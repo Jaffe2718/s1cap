@@ -101,6 +101,25 @@ verified, it says so instead of guessing.
   - **Round 5 evidence that the read is safe:** with the wiring in place the round still answered `ok`, and the
     only probe lines written were the service probe plus the step line — i.e. a failed or late prompt read
     cannot damage a session.
+  - **Round 6 — the last edit of N1, stated so it cannot be missed:** the priming promise is now
+    module-level (`let pendingPriming: Promise<void> | undefined;` in `packages/dsh-plugin/src/index.ts`) and
+    `applyInner` assigns it (`pendingPriming = primeSystemPrompt({ … })`). What is still missing is the single
+    statement in `preStepMiddleware` that awaits it once before the first observation:
+
+    ```ts
+    if (pendingPriming !== undefined) {
+      const pending = pendingPriming;
+      pendingPriming = undefined;
+      try { await pending; } catch { /* reported by the primer */ }
+    }
+    const decision = await next();
+    ```
+
+    **Tooling trap that cost two rounds:** the working copy has CRLF line endings, so a .NET multiline regex
+    anchored with `^…$` does **not** match a line that ends in `\r`; and a PowerShell **double-quoted** string
+    silently eats template backticks, which produces invalid TypeScript. When editing code from the shell:
+    use single-quoted strings, `\r?\n` in patterns, and run `node scripts/build-packages.mjs` before every
+    round. Editing the file with the editor tool instead of the shell avoids both traps entirely.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
