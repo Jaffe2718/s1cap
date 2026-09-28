@@ -34,7 +34,7 @@ verified, it says so instead of guessing.
 
 ### Next (M1 blocks 3+)
 
-- [~] **N1** Source the system prompt so the pinned block is not empty — plumbing done (systemPrompt input, extractSystemPrompt, pinned block, tests green); the *source* is still open: a real round proved the prompt is not delivered as a session event, so it must come from the dsh-system-prompt service
+- [x] **N1** System prompt sourced: the pinned block and the cache-stable prefix are non-zero (evidence below)
 - [x] **N2** Association-graph upkeep on the asynchronous lane (createUpkeepQueue, session/event subscription, lag bound, /s1 stats)
 - [x] **N3** Replay-parity harness (packages/core/src/replay.ts, synthetic fixture, scripts/replay-tape.mjs, observation: tape recorder)
   - **Round 2 evidence (real session, tape mode):** the tape recorder was verified end to end. A real round
@@ -130,6 +130,20 @@ verified, it says so instead of guessing.
     the problem and the prompt text is in hand; if it still does not appear, the thunk is not being invoked at
     all and the check moves into `preStepMiddleware` itself. Either way the answer arrives in one round, and
     the acceptance test is unchanged: `blocks.pinned > 0` with `prefixTokensStable === blocks.pinned`.
+  - **N1 CLOSED (round 8) — evidence from a real round:**
+    `{"schema":0,"kind":"system-prompt","result":"captured","source":"rendered sections","chars":2734,"interpolated":0,"unresolvedVariables":["model","cwd"]}`
+    followed by the control record
+    `{"type":"assembly",…,"budgetUsed":690,"blocks":{"pinned":684,"stateProxy":0,"recalled":0,"tail":0,"anchor":6},"prefixTokensStable":684,…}`
+    — `blocks.pinned` is 684 and `prefixTokensStable === blocks.pinned`, i.e. both acceptance conditions hold, and
+    `budgetUsed` grew from 6 to 690 because the fixed prefix is finally accounted for.
+  - **How it was closed, in case it regresses:** the service is read lazily on the first pre-step (activation was
+    too early — other plugins had not provided `systemPrompt` yet); `assemble({})` is **async** and returns
+    `{ sections, contexts, tools, variables }` with no rendered text, so `renderSections()` in
+    `packages/dsh-plugin/src/system-prompt.ts` renders it exactly the way the harness's `renderPrompt` does
+    (join non-empty `sections[].text` with `\n\n`, honouring `interpolate === false`), with one deliberate
+    deviation: an unknown `{{…}}` reference is left literal and reported instead of throwing, because a
+    governor must not be able to break a round. Two variables were unresolved in this profile (`model`, `cwd`)
+    — they are listed in the probe line rather than silently replaced.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once

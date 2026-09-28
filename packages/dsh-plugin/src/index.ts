@@ -539,6 +539,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
         observer,
         onText: (text, tokens) => observer.setSystemPrompt(text, tokens),
+        write: (line) => probeSink?.write(line),
         onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
       });
 

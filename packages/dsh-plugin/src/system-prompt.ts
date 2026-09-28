@@ -30,6 +30,8 @@ export interface SystemPromptSourceOptions {
   /** the service, as returned by `ctx.get('systemPrompt')`, or undefined when the context offers none */
   service: unknown;
   observer: Pick<StepObserver, 'probe'>;
+  /** direct report channel: proves the primer ran even when the observer path is in question */
+  write?(line: string): void;
   /** called with the text once (and whenever it changes); never throws into the caller */
   onText(text: string, tokens: number): void;
   onWarn?(message: string): void;
@@ -60,45 +62,110 @@ export function readPromptText(assembly: unknown, minChars: number): { text: str
 }
 
 /**
- * Resolve the prompt once and hand it to the observer. Fire-and-forget by design: the first LLM call may
- * still run with an empty pinned block, and every later one benefits.
+ * Render the prompt the way the harness does, from the structured assembly.
+ *
+ * The packaged source (`dsh-system-prompt`) defines it as:
+ *
+ *   function renderPrompt(assembly) {
+ *     return assembly.sections
+ *       .map((section) => section.interpolate === false
+ *         ? section.text
+ *         : interpolate(section, assembly.variables, 'section'))
+ *       .filter((text) => text.length > 0)
+ *       .join('\n\n');
+ *   }
+ *
+ * One deliberate deviation: the harness *throws* on a malformed or unknown `{{…}}` reference, and a governor
+ * may not throw. An unknown reference is therefore left as written and reported once, so the pinned block
+ * carries the literal reference instead of a wrong value and the report says which name was missing.
+ */
+export function renderSections(
+  assembly: unknown,
+  onUnknown?: (name: string) => void,
+): { text: string; interpolated: number } | undefined {
+  if (assembly === null || typeof assembly !== 'object') return undefined;
+  const record = assembly as { sections?: unknown; variables?: unknown };
+  if (!Array.isArray(record.sections)) return undefined;
+  const variables = (record.variables ?? {}) as Record<string, unknown>;
+  let interpolated = 0;
+
+  const text = record.sections
+    .map((section) => {
+      if (section === null || typeof section !== 'object') return '';
+      const body = (section as { text?: unknown }).text;
+      if (typeof body !== 'string') return '';
+      if ((section as { interpolate?: unknown }).interpolate === false) return body;
+      return body.replace(/\{\{\s*([a-z][a-z0-9_]*)\s*\}\}/g, (match, name: string) => {
+        const value = variables[name];
+        if (typeof value !== 'string') {
+          onUnknown?.(name);
+          return match;
+        }
+        interpolated += 1;
+        return value;
+      });
+    })
+    .filter((body) => body.length > 0)
+    .join('\n\n');
+
+  return text === '' ? undefined : { text, interpolated };
+}
+
+/**
+ * Resolve the prompt once and hand it to the observer.
+ *
+ * Called lazily by the first pre-step, not during activation: at that point other plugins may not have
+ * provided the `systemPrompt` service yet, which is exactly how the pinned block stayed empty for four rounds.
  */
 export async function primeSystemPrompt(opts: SystemPromptSourceOptions): Promise<void> {
+  const report = (line: Record<string, unknown>): void => {
+    if (opts.write !== undefined) opts.write(`${JSON.stringify(line)}\n`);
+    else opts.observer.probe(line);
+  };
   const minChars = opts.minChars ?? 200;
   try {
     const service = opts.service as AssemblyLike | undefined;
     if (service === null || typeof service !== 'object' || typeof service.assemble !== 'function') {
-      opts.observer.probe({ schema: 0, kind: 'system-prompt', result: 'no assemble() on the service' });
+      report({ schema: 0, kind: 'system-prompt', result: 'no assemble() on the service' });
       return;
     }
     const assembly = await (service.assemble({}) as Promise<unknown>);
-    const found = readPromptText(assembly, minChars);
-    if (found === undefined) {
-      opts.observer.probe({
+
+    // Preferred: a direct string field. Fallback: render the structured assembly the way the harness does.
+    const direct = readPromptText(assembly, minChars);
+    const unknown: string[] = [];
+    const rendered =
+      direct === undefined ? renderSections(assembly, (name) => unknown.push(name)) : undefined;
+    const text = direct?.text ?? rendered?.text;
+
+    if (text === undefined) {
+      report({
         schema: 0,
         kind: 'system-prompt',
-        result: 'assembly carries no long string field',
+        result: 'the assembly carries neither a long string field nor renderable sections',
         fields:
           assembly === null || typeof assembly !== 'object'
             ? []
             : Object.keys(assembly as object).slice(0, 24),
       });
       opts.onWarn?.(
-        'the system prompt could not be read from systemPrompt.assemble(); the pinned block stays empty ' +
-          '(render with the package\'s exported renderPrompt once its assembly shape is confirmed)',
+        'the system prompt could not be read from systemPrompt.assemble(); the pinned block stays empty',
       );
       return;
     }
-    opts.onText(found.text, estimateTokens(found.text));
-    opts.observer.probe({
+
+    opts.onText(text, estimateTokens(text));
+    report({
       schema: 0,
       kind: 'system-prompt',
       result: 'captured',
-      field: found.field,
-      chars: found.text.length,
+      source: direct !== undefined ? `string field ${direct.field}` : 'rendered sections',
+      chars: text.length,
+      ...(rendered !== undefined ? { interpolated: rendered.interpolated } : {}),
+      ...(unknown.length > 0 ? { unresolvedVariables: unknown.slice(0, 8) } : {}),
     });
   } catch (err) {
-    opts.observer.probe({ schema: 0, kind: 'system-prompt', result: 'threw', error: String(err) });
+    report({ schema: 0, kind: 'system-prompt', result: 'threw', error: String(err) });
     opts.onWarn?.(`reading the system prompt failed (pinned block stays empty): ${String(err)}`);
   }
 }
