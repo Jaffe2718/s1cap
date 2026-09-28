@@ -222,7 +222,7 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 - `system/message` node 0 + tool schemas → **PINNED**, excluded from the graph.
 - Segment granularity is message-level — never token-level (the user's "语段" requirement).
 
-### 5.2 Association-graph construction (per new segment p)
+### 5.2 Association-graph construction (per new segment p) — S1 association backend
 
 - **Tier 0 (metadata, free):** edges to segments sharing `taskTag`, same tool family, reply-to chain; fixed weight 0.6.
 - **Tier 1 (candidates):** mode `embed` — local embedding + ANN top-k (k=32) cosine; or mode `s1` — one `/v1/systemone` call: `state = p` (≤512 tok), `questions = {"rel_<i>": noul "Does this segment discuss the same task, entity, or topic as the state?"}` over candidate ids, ≤20 questions per call (**context-rot guard**), normalized server-side.
@@ -255,12 +255,12 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 - **Cache-awareness:** the pinned prefix is never reordered; T grows append-only; `updatePolicy: perTask` keeps T byte-stable within a task so the cache invalidation of `[T | recalled | tail | x]` happens at task boundaries, not per turn. The residual cache penalty is *measured*, not assumed (H3).
 - **DSH realization:** model-only rewrite via `surfaceOp {op:'replace'}` — the user-facing transcript is never touched. Non-DSH: the proxy rewrites the messages array before forwarding.
 
-### 5.4 Plan gate (factor S1G on)
+### 5.4 Plan gate (factor S1G on) — S1 decision backend
 
 - Trigger: assistant emits a tool-call batch; if `planGate.on` and >1 plausible plan exists (harness prompted — system addendum asks for ≤`maxPlans` (3) alternative plans as structured JSON when ambiguity is high; default elicitation `on-demand`).
 - **One choice question per plan set:** `state = {task brief, x, T}`; options = plan summaries (≤8; Jev handles 255 natively, Laya caps ~20 at defaults — the cap protects the local path); `criteria` = "Which plan is most likely to complete the task correctly with the least wasted work?"
 - **Normalize probabilities server-side** (Jev invariants not guaranteed, §1.2).
-- **Attempt controller:** execute in probability order; verification oracle = harness-native (tests / build / exit criteria per benchmark); attempt cap m=2; on success, discard remaining plans and log saved-token estimate; abstain (confidence < 0.5) → keep the LLM's own order.
+- **Attempt controller:** execute in probability order; verification oracle = harness-native (tests / build / exit criteria per benchmark); attempt cap **M=2** (candidate plans m ≤ 3); on success, discard remaining plans and log saved-token estimate; abstain (confidence < 0.5) → keep the LLM's own order.
 - Always log per-plan `{prob, confidence, executed, verified, tokensSpent}`.
 
 ### 5.5 Degradation & safety

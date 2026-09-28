@@ -10,13 +10,13 @@
       {
         "id": "selective-context",
         "label": "参与点① 选择性上下文",
-        "focus": ["x-event", "segrec", "rg", "assembler", "s1backend"],
+        "focus": ["x-event", "segrec", "s1assoc", "rg", "assembler"],
         "note": "关联图召回与 TAS 组装——治理上下文生命周期"
       },
       {
         "id": "adaptive-planning",
         "label": "参与点② 自适应规划",
-        "focus": ["llm", "plangate", "s1backend", "execute"],
+        "focus": ["llm", "plangate", "s1decide", "execute"],
         "note": "choice 概率打分与按序执行验证——治理决策优先级"
       }
     ]
@@ -25,43 +25,44 @@
     { "id": "harness", "label": "Harness 会话层" },
     { "id": "control", "label": "S1CAP 治理层" },
     { "id": "s2", "label": "System-2 计算平面" },
-    { "id": "s1", "label": "System-1 决策层" }
+    { "id": "s1", "label": "System-1 后端" }
   ],
   "phases": [
     { "id": "phase-selective", "label": "① 选择性上下文", "fromCol": 0, "toCol": 4, "variant": "emphasis" },
     { "id": "phase-planning", "label": "② 自适应规划", "fromCol": 5, "toCol": 5 }
   ],
-  "mainPath": ["x-event", "segrec", "s1backend", "rg", "assembler", "llm", "plangate", "execute"],
+  "mainPath": ["x-event", "segrec", "s1assoc", "rg", "assembler", "llm", "plangate", "execute"],
   "nodes": [
     { "id": "x-event", "lane": "harness", "col": 0, "type": "external", "label": "会话新事件" },
     { "id": "segrec", "lane": "control", "col": 0, "type": "backend", "label": "分片与召回" },
     { "id": "rg", "lane": "control", "col": 2, "type": "database", "label": "关联图 RG" },
     { "id": "assembler", "lane": "control", "col": 4, "type": "backend", "label": "ASSEMBLER" },
     { "id": "llm", "lane": "s2", "col": 4, "type": "cloud", "label": "System-2 LLM" },
-    { "id": "plangate", "lane": "s1", "col": 5, "type": "backend", "label": "PLAN GATE" },
+    { "id": "plangate", "lane": "control", "col": 5, "type": "backend", "label": "PLAN GATE" },
     { "id": "execute", "lane": "harness", "col": 5, "type": "messagebus", "label": "执行 + 验证" },
-    { "id": "s1backend", "lane": "s1", "col": 2, "type": "cloud", "label": "S1 决策后端" }
+    { "id": "s1assoc", "lane": "s1", "col": 2, "type": "cloud", "label": "S1 关联计算后端", "width": 120 },
+    { "id": "s1decide", "lane": "s1", "col": 4, "type": "cloud", "label": "S1 决策后端", "width": 120 }
   ],
   "edges": [
     { "id": "e1", "from": "x-event", "to": "segrec", "label": "x·工具·轨迹", "role": "main" },
-    { "id": "e2", "from": "segrec", "to": "s1backend", "label": "新片段 × 历史片段", "role": "main" },
+    { "id": "e2", "from": "segrec", "to": "s1assoc", "label": "新片段 × 历史片段", "role": "main" },
     { "id": "e3", "from": "rg", "to": "assembler", "label": "BFS(τ,d)+预算", "role": "main" },
     { "id": "e4", "from": "assembler", "to": "llm", "label": "TAS 注入", "role": "main", "variant": "emphasis" },
     { "id": "e5", "from": "llm", "to": "plangate", "label": "候选方案", "role": "main" },
-    { "id": "e6", "from": "plangate", "to": "s1backend", "label": "choice 打分", "role": "branch", "route": "bottom-channel" },
+    { "id": "e6", "from": "plangate", "to": "s1decide", "label": "choice 打分", "role": "branch", "route": "bottom-channel" },
     { "id": "e7", "from": "plangate", "to": "execute", "label": "概率降序", "role": "main" },
     { "id": "e8", "from": "execute", "to": "x-event", "label": "工具结果回流", "role": "return", "variant": "dashed" },
-    { "id": "e9", "from": "s1backend", "to": "rg", "label": "扩充 RG·权重+衰减", "role": "main" }
+    { "id": "e9", "from": "s1assoc", "to": "rg", "label": "扩充 RG·权重+衰减", "role": "main" }
   ],
   "cards": [
     {
       "dot": "cyan",
       "title": "两个 System-1 参与点",
       "items": [
-        "① Selective Context：消息级分片 + 关联图召回 + TAS 组装 → 治理上下文生命周期",
-        "② Adaptive Planning：choice 概率打分 + 按序执行 → 治理决策优先级",
+        "① Selective Context：分片 → S1 关联计算 → 扩充 RG → TAS 组装，治理上下文生命周期",
+        "② Adaptive Planning：S1 决策后端 choice 打分 → 按序执行验证，治理决策优先级",
         "surface 重写：模型视图重组，用户 transcript 恒时序",
-        "S1 后端可插拔：Jev 云端 · Laya · Kev，统一 /v1/systemone 协议"
+        "两个 S1 后端同协议可插拔：Jev 云端 · Laya · Kev（/v1/systemone）"
       ]
     },
     {

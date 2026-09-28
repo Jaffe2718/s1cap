@@ -51,14 +51,14 @@
 
 ### 3.1 总体架构：System-1 控制平面 / System-2 计算平面
 
-廉价决策模型作为**治理层**（S1CAP 控制平面）运行在 harness 与 LLM 之间，LLM 本体不做任何修改。组件：SEGMENTER（分片）→ S1 关联计算（新片段 × 历史片段，扩充 RG）→ RG STORE（SQLite 关联图）→ ASSEMBLER（预算内 BFS 选择 + TAS 布局）→ PLAN GATE（choice 预排序 + 尝试控制）→ TELEMETRY（版本化 JSONL 遥测）。适配层：DSH 一等插件（`dsh-s1cap`）+ OpenAI-compatible 代理（可移植到 opencode / Claude Code / pi）。
+廉价决策模型作为**治理层**（S1CAP 控制平面）运行在 harness 与 LLM 之间，LLM 本体不做任何修改。组件：SEGMENTER（分片）→ S1 关联计算（新片段 × 历史片段，扩充 RG）→ RG STORE（SQLite 关联图）→ ASSEMBLER（预算内 BFS 选择 + TAS 布局）→ PLAN GATE（S1 决策后端 choice 排序 + 尝试控制）→ TELEMETRY（版本化 JSONL 遥测）。适配层：DSH 一等插件（`dsh-s1cap`）+ OpenAI-compatible 代理（可移植到 opencode / Claude Code / pi）。
 
 ### 3.2 相对初版设计的四个关键修正
 
 1. **两级召回替代"Laya 直接两两打分"**。核实结论：Laya 基座**零样本接近随机**（0.362 vs 随机 0.318；微调后 0.766），且 >20 选项会失败。因此：tier-0 元数据边（免费）→ tier-1 候选生成（本地嵌入 ANN，或 S1 noul 批量问询）→ tier-2 惰性验证（仅对可能进入组装的边做 score 精排）。默认云端 Jev 时 S1 成本为噪声级（每会话约 $0.04）；本地路径用 EdgeJev（322M INT8，324MB，4 核 vCPU 15.6ms/决策）或 M3 微调后的 laya-typed-decisions。
 2. **"x倒置"更正为忠实的 TAS 移植**。论文 T 的可迁移原则是"晚发现的状态信息应在下一轮 pass 中先于上下文可用，**问题永远在最后**"。组装布局：`[pinned（system+工具schema，缓存稳定前缀）| T（状态代理：序列化推理轨迹+任务简报，≤8k 字符，append-only，按任务更新）| 召回块（按 w_eff 降序，最强者在前——Lost in the Middle 的 U 型）| 近尾 K 轮原文 | x+当前状态快照]`。
 3. **缓存经济学作为一等公民**。命中价是未中的 1/50（DeepSeek 峰时），因此：(a) pinned 前缀永不被重排；(b) T 按任务边界更新（`perTask` 默认，`perTurn` 可选）；(c) **H3 假设显式化**——TAS 重排对命中率的净影响必须逐调用测量（引用 arXiv:2601.06007 的结论：缓存感知组装优于朴素缓存）。
-4. **方案闸门加安全栏**。Jev 的概率**不保证归一**（文档示例 P+¬P=1.19）→ 服务端归一；决策模型可被对抗内容牵引 → 传入 S1 的 state 做预过滤（剥离超长代码块/URL）；尝试上限 m=2；置信度 <0.5 时弃权、回退 LLM 自身顺序。
+4. **方案闸门加安全栏**。Jev 的概率**不保证归一**（文档示例 P+¬P=1.19）→ 服务端归一；决策模型可被对抗内容牵引 → 传入 S1 的 state 做预过滤（剥离超长代码块/URL）；尝试上限 M=2（候选方案 m ≤ 3）；置信度 <0.5 时弃权、回退 LLM 自身顺序。
 
 ### 3.3 DSH 原生红利（核实自本机安装与社区插件）
 
