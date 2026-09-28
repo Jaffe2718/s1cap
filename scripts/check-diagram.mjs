@@ -10,6 +10,7 @@
  *
  * Usage: node scripts/check-diagram.mjs   (exit 0 = OK, exit 1 = violations)
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,6 +77,22 @@ for (let i = 0; i < nodes.length; i += 1) {
   }
 }
 
+// The committed SVGs are generated from the HTML above; a stale pair would silently lie in the README.
+const sourceHash = createHash('sha256').update(svg).digest('hex').slice(0, 16);
+for (const name of ['s1cap-technical-route.light.svg', 's1cap-technical-route.dark.svg']) {
+  let text = '';
+  try {
+    text = readFileSync(join(root, 'docs', 'figures', name), 'utf8');
+  } catch {
+    problems.push(`${name} is missing - run: node scripts/build-route-svg.mjs`);
+    continue;
+  }
+  const stamp = text.match(/source sha256:([0-9a-f]{16})/);
+  if (!stamp) problems.push(`${name} carries no generator banner`);
+  else if (stamp[1] !== sourceHash) {
+    problems.push(`${name} was generated from a different revision of ${rel} - run: node scripts/build-route-svg.mjs`);
+  }
+}
 if (problems.length > 0) {
   console.error(`route diagram check FAILED (${rel})`);
   for (const p of problems) console.error(`  - ${p}`);

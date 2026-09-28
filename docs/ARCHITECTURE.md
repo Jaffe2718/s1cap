@@ -15,7 +15,7 @@ Status legend: **✅ implemented (M0)** · **🔜 planned (M1/M2)** · **◻ ext
 
 ---
 
-## 1. Diagram — lane view (Mermaid)
+## 1. Diagram
 
 Five layers, one row per layer, equal width (`block-beta` stretches every row to the same width; a
 flowchart cannot). Rendered reference:
@@ -23,15 +23,10 @@ flowchart cannot). Rendered reference:
 the inner loop's self-edge, the asynchronous tap and the advisory edge back into the loop — is in §2 below
 and in [`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html).
 
-```mermaid
-block-beta
-  columns 1
-  L1["① Harness session — one user turn = many LLM steps<br/>sends session events · act · tool calls — receives the assembled context and the advisory order"]
-  L2["② System-2 compute — one LLM step at a time<br/>receives the assembled view (TAS) · sends candidate plans, when the model offers them"]
-  L3["③ S1CAP control — per-call hook, advisory<br/>ASSEMBLER (BFS τ,d + budget + TAS) · PLAN GATE (order · attempt cap M = 2)"]
-  L4["④ Async RG upkeep — off the critical path<br/>Segment / Recall → RG Upkeep → Association Graph · silent, may lag the session"]
-  L5["⑤ System-1 backends — POST /v1/systemone<br/>S1 assoc (noul relevance) · S1 decide (choice scoring) · Laya or Jev runtime"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./figures/s1cap-technical-route.dark.svg">
+  <img alt="S1CAP technical route - five lanes: harness session (Run + Verify with an inner-loop self-edge, Stop - the model's own call), System-2 LLM step, S1CAP control (ASSEMBLER and PLAN GATE), asynchronous RG upkeep (Association Graph, RG Upkeep), System-1 backends" src="./figures/s1cap-technical-route.light.svg">
+</picture>
 
 ## 2. Connections (edge semantics)
 
