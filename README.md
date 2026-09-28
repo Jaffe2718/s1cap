@@ -98,8 +98,12 @@ Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · a
 ## Development
 
 ```bash
-node --test --experimental-strip-types "packages/*/test/*.test.ts"   # 32 tests, zero deps, offline
+node --test --experimental-strip-types "packages/*/test/*.test.ts"   # 51 tests, zero deps, offline
+node scripts/check-diagram.mjs   # every node box inside its lane band, no overlapping nodes
 ```
+
+The second command guards the hand-authored route diagram: it is drawn by hand, so nothing but this
+check stops a node from drifting out of its lane.
 
 Local Laya backend: `@s1cap/laya-runtime` discovers the Python environment that can `import laya`
 (conda environments are resolved through `conda env list --json`, never by guessing paths), launches
