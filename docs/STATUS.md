@@ -187,6 +187,19 @@ verified, it says so instead of guessing.
     **Acceptance for N4:** in the sandbox web profile (port 19487) a S1CAP section appears in Settings, a key
     typed there survives a restart, and `grep` over the control log, the session log and the plugin output finds
     no plaintext key.
+  - **Round 12 — the credential API is in hand.** After three failed pattern reads, `--members` (a new scanner
+    mode: every declared method name, indentation-agnostic) produced it in one shot:
+    - `dsh-credentials` (the Service) is the **dispatch** layer: `fanOut`, `notifyUpdated`, `notifyRecordUpdated`,
+      `warnListenerFailure` — plus the free helpers `credentialKey(scope, id)`, `parseCredentialKey`,
+      `credentialRef`, and keys are `"<scope>/<id>"` strings;
+    - `dsh-credentials-local` (the provider/store) is the **read-write** layer: `readRecord`, `write`, `resolve`,
+      `set`, `unset`, `deleteRecord`, `describe`, `describeRecord`, `listRecords`, `modifyRecord`,
+      `migrateFlatDocument`, `reconcileFromDisk`, `refresh`, `changedRecords`, `changedRefs`, `dotenvFallback`.
+    **Next read before writing code:** how a stored ref is resolved through the service (the provider registry
+    that layers the process environment, the provider-managed store and a file), i.e.
+    `--members dsh-credentials\lib\index.js` is already done and the missing piece is the registry type the
+    service exposes. Then: `packages/dsh-plugin/src/credentials.ts` reads `s1.apiKey` from that store when the
+    config leaves it empty (env vars stay the fallback), and the browser half writes it.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
