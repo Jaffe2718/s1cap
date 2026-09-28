@@ -73,7 +73,26 @@ Installed and verified here with `laya 0.3.21` on Python 3.13: the package pulls
 (or `bin`) directory.
 
 First launch downloads the Laya checkpoints from Hugging Face. When that endpoint is slow or
-blocked, point the server at a mirror through the `env` map, e.g. `HF_ENDPOINT: https://hf-mirror.com`.
+blocked, point the server at a mirror through the `env` map:
+
+```yaml
+env:
+  HF_ENDPOINT: https://hf-mirror.com
+  HF_HUB_DISABLE_XET: "1"
+```
+
+### Network findings (verified on a connection where huggingface.co is blocked)
+
+| Check | Result |
+|---|---|
+| `https://huggingface.co/api/models/convaiinnovations/laya` | unreachable (curl 000) |
+| `https://hf-mirror.com/api/models/convaiinnovations/laya` | reachable (200) |
+| download with the mirror only | **fails** after 4/5 files: `CAS Client Error: 401 Unauthorized` from `cas-server.xethub.hf.co` — the Xet content-addressed store is not proxied by the mirror |
+| download with `HF_HUB_DISABLE_XET=1` + mirror | **succeeds**; plain HTTPS downloads go through the mirror |
+
+Working combination on this machine: `laya 0.3.21` · Python 3.13.15 · `torch 2.13.0+cu132` ·
+`transformers 5.16.1` · `huggingface_hub 1.29.0`, `english` checkpoint on CPU. A `noul` question
+over the CLI returned `noul: 0.0287, confidence: 0.9713` with `usage.input_tokens: 308`.
 
 ## 5. DSH profile patch
 

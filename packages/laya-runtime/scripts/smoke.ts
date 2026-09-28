@@ -36,6 +36,7 @@ const env: Record<string, string> = {
   LAYA_LOG_LEVEL: arg('log') ?? 'info',
   ...(models ? { LAYA_MODELS: models } : {}),
   ...(process.env.HF_ENDPOINT ? { HF_ENDPOINT: process.env.HF_ENDPOINT } : {}),
+  ...(process.env.HF_HUB_DISABLE_XET ? { HF_HUB_DISABLE_XET: process.env.HF_HUB_DISABLE_XET } : {}),
 };
 
 const cfg: LayaConfig = {

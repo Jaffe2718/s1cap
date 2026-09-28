@@ -77,7 +77,7 @@ Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified*
 
 ## Status & roadmap
 
-Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `@s1cap/laya-runtime` (Python discovery + `laya-serve` launcher), `dsh-s1cap` skeleton, 2×2 cell presets; `node --test` **32/32 offline**. Remaining M0: live-backend smoke against Jev / `laya-serve`. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
+Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `@s1cap/laya-runtime` (Python discovery + `laya-serve` launcher), `dsh-s1cap` skeleton, 2×2 cell presets; `node --test` **34/34 offline**, and a real `laya-serve` round trip verified (`/health` readiness + a `noul` decision over `/v1/systemone`). Remaining M0: live-backend smoke against Jev. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
 
 | M | Scope |
 |---|---|
