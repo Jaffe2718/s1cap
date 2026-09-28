@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = 'D:\\Program Files\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai';
-const NEEDLES = ['agent/pre-step', 'agent/request-error'];
+// needles come from argv so the same scanner answers new questions: node scripts/scan-dsh-asar.cjs "credentials" "settings"
+const NEEDLES = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['agent/pre-step', 'agent/request-error'];
 const hits = [];
 
 function scanFile(p) {
@@ -16,10 +17,10 @@ function scanFile(p) {
   }
   for (const needle of NEEDLES) {
     let from = 0;
-    for (let n = 0; n < 3; n += 1) {
+    for (let n = 0; n < 2; n += 1) {
       const i = text.indexOf(needle, from);
       if (i < 0) break;
-      hits.push({ needle, file: p.replace(ROOT, ''), snippet: text.slice(Math.max(0, i - 600), i + 600) });
+      hits.push({ needle, file: p.replace(ROOT, ''), snippet: text.slice(Math.max(0, i - 380), i + 380) });
       from = i + needle.length;
     }
   }
@@ -47,7 +48,7 @@ function walk(dir, depth) {
 walk(ROOT, 0);
 console.log(`packages scanned under ${ROOT}`);
 console.log(`total hits: ${hits.length}`);
-for (const h of hits.slice(0, 4)) {
+for (const h of hits.slice(0, 8)) {
   console.log(`\n##### ${h.needle} in ${h.file} #####`);
   console.log(h.snippet);
 }
