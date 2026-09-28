@@ -1,10 +1,10 @@
 %% S1CAP technical route - canonical topology (README.md, docs/ARCHITECTURE.md, docs/AGENT_BRIEF.md)
 %%
 %% Three facts the shape has to carry:
-%%   1. ONE user turn is MANY LLM steps (think / act / tool), so the flow is a loop, not a chain:
-%%      Run + verify --next step--> ASSEMBLER --assembled view--> System-2 LLM step.
-%%   2. S1CAP is a HOOK on the LLM-call boundary, not a stage in the loop: it assembles context before
-%%      every call, and it maintains the association graph SILENTLY (async, off the critical path, may lag).
+%%   1. ONE user turn is MANY LLM steps: Run + verify loops back into the next LLM step
+%%      (drawn as a real self-loop) and the ASSEMBLER re-runs before every call.
+%%   2. S1CAP is a HOOK, not a stage: assembly sits on the LLM-call boundary; association-graph
+%%      upkeep lives in its own asynchronous lane and may lag behind the session.
 %%   3. Stopping belongs to the model: no S1CAP output can keep the loop alive or veto the exit.
 flowchart LR
   subgraph HAR["Harness session - one user turn = many LLM steps"]
@@ -13,29 +13,34 @@ flowchart LR
     ST["Stop - the model's own call<br/>S1CAP cannot veto or prolong it"]
   end
 
-  subgraph CTL["S1CAP control - hook, advisory"]
-    ASM["ASSEMBLER<br/>runs before every LLM call"]
-    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
-    GATE["PLAN GATE<br/>orders plans the model gave"]
-  end
-
-  subgraph S2["System-2 compute plane"]
+  subgraph SYNC["Per-call hook (synchronous, bounded)"]
+    ASM["ASSEMBLER<br/>assembles before every LLM call"]
     LLM["System-2 LLM step<br/>think · act · call tools"]
   end
 
-  subgraph S1["System-1 backends (POST /v1/systemone)"]
-    S1A["S1 association backend<br/>noul relevance scoring"]
+  subgraph PLAN["Advisory ordering"]
     S1D["S1 decision backend<br/>choice scoring"]
+    GATE["PLAN GATE<br/>orders plans the model gave"]
+  end
+
+  subgraph UP["Async RG upkeep - off the critical path"]
+    RGU["RG upkeep<br/>scores new session events"]
+    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
+  end
+
+  subgraph S1A["System-1 backends (POST /v1/systemone)"]
+    S1ASSOC["S1 association backend<br/>noul relevance scoring"]
   end
 
   X -->|"input x"| ASM
-  ASM -->|"assembled view (TAS) · per call"| LLM
+  ASM -->|"assembled view (TAS), per call"| LLM
   LLM -->|"act · tool call"| TL
-  TL -.->|"next LLM step · model continues"| ASM
-  TL -->|"model stops"| ST
-  TL -.->|"new events · async tap, off the critical path"| S1A
-  S1A -.->|"weights + decay (may lag)"| RG
-  RG -->|"bounded recall + budget"| ASM
+  TL -.->|"next LLM step · model continues (self-loop)"| TL
+  TL -.->|"model stops"| ST
   LLM -->|"candidate plans (when offered)"| S1D
   S1D -->|"choice scores"| GATE
   GATE -->|"advisory order · never vetoes stop"| TL
+  TL -.->|"new session events"| RGU
+  RGU -.->|"weights + decay (may lag)"| RG
+  RG -->|"bounded recall + budget"| ASM
+  S1ASSOC -.->|"relevance scoring (noul)"| RGU

@@ -19,32 +19,37 @@ flowchart LR
     ST["Stop - the model's own call<br/>S1CAP cannot veto or prolong it"]
   end
 
-  subgraph CTL["S1CAP control - hook, advisory"]
-    ASM["ASSEMBLER<br/>runs before every LLM call"]
-    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
-    GATE["PLAN GATE<br/>orders plans the model gave"]
-  end
-
-  subgraph S2["System-2 compute plane"]
+  subgraph SYNC["Per-call hook (synchronous, bounded)"]
+    ASM["ASSEMBLER<br/>assembles before every LLM call"]
     LLM["System-2 LLM step<br/>think · act · call tools"]
   end
 
-  subgraph S1["System-1 backends (POST /v1/systemone)"]
-    S1A["S1 association backend<br/>noul relevance scoring"]
+  subgraph PLAN["Advisory ordering"]
     S1D["S1 decision backend<br/>choice scoring"]
+    GATE["PLAN GATE<br/>orders plans the model gave"]
+  end
+
+  subgraph UP["Async RG upkeep - off the critical path"]
+    RGU["RG upkeep<br/>scores new session events"]
+    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
+  end
+
+  subgraph S1A["System-1 backends (POST /v1/systemone)"]
+    S1ASSOC["S1 association backend<br/>noul relevance scoring"]
   end
 
   X -->|"input x"| ASM
-  ASM -->|"assembled view (TAS) · per call"| LLM
+  ASM -->|"assembled view (TAS), per call"| LLM
   LLM -->|"act · tool call"| TL
-  TL -.->|"next LLM step · model continues"| ASM
-  TL -->|"model stops"| ST
-  TL -.->|"new events · async tap, off the critical path"| S1A
-  S1A -.->|"weights + decay (may lag)"| RG
-  RG -->|"bounded recall + budget"| ASM
+  TL -.->|"next LLM step · model continues (self-loop)"| TL
+  TL -.->|"model stops"| ST
   LLM -->|"candidate plans (when offered)"| S1D
   S1D -->|"choice scores"| GATE
   GATE -->|"advisory order · never vetoes stop"| TL
+  TL -.->|"new session events"| RGU
+  RGU -.->|"weights + decay (may lag)"| RG
+  RG -->|"bounded recall + budget"| ASM
+  S1ASSOC -.->|"relevance scoring (noul)"| RGU
 ```
 
 ## 2. Connections (edge semantics)
