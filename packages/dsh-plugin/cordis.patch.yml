@@ -20,6 +20,13 @@
         rgMaintenance:
           mode: async
           maxLagTurns: 2
+        # Selective context only keeps the prefix-cache discount while the SELECTION is stable:
+        # a prompt that changes in the middle loses the discount on everything after the change.
+        # perTask freezes the selection inside a task; threshold re-selects only when the
+        # positional/amortized break-even test pays (packages/core/src/cache-policy.ts).
+        cache:
+          reselectPolicy: perTask
+          blockTokens: 64
         tas:
           on: true
           tMaxChars: 8000

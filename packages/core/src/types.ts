@@ -66,6 +66,17 @@ export interface AssemblyPolicy {
    * so the graph may lag the session by up to `maxLagTurns` turns.
    */
   rgMaintenance: { mode: 'async'; maxLagTurns: number };
+  /**
+   * Selective context keeps hitting the prefix cache only while the *selection* is stable:
+   * a prompt that changes in the middle loses the discount on everything after the change.
+   * Docs: docs/FORMULAS.md §6, `packages/core/src/cache-policy.ts`.
+   */
+  cache: {
+    /** perTask freezes the selection inside a task (cache-aligned, default); threshold gates re-selection on the break-even test */
+    reselectPolicy: 'perTask' | 'perTurn' | 'threshold';
+    /** prefix-cache block size in tokens: DeepSeek 64, OpenAI 128, Anthropic counts in 1024-token checkpoints */
+    blockTokens: number;
+  };
   tas: {
     on: boolean;
     /** max chars of the serialized state proxy T */
@@ -156,6 +167,7 @@ export function defaultPolicy(): AssemblyPolicy {
     termination: 'model-owned',
     assemblyDeadlineMs: 250,
     rgMaintenance: { mode: 'async', maxLagTurns: 2 },
+    cache: { reselectPolicy: 'perTask', blockTokens: 64 },
     tas: { on: true, tMaxChars: 8000, updatePolicy: 'perTask' },
     recall: {
       tau: 0.55,

@@ -197,6 +197,56 @@ Substituting the `deepseek-flash` peak prices:
 
 **Interpretation**: the higher the hit rate, the steeper the reorder cost (as $h \to 1$, 49 tokens must be saved per 1 invalidated token to break even) — this is exactly why H3 must be measured per call and why `updatePolicy` must be adjustable, and it is also the axis of the paper's conditional conclusion.
 
+### 6.1 Does selective context still hit the cache?
+
+A selected context is a **subset** of the full history with chronology preserved, so the prompt differs
+from the previous one wherever a segment was dropped. Prefix caches match the longest common prefix of the
+prompts *we actually send*, so three consequences follow:
+
+1. Everything **after the earliest cut** loses its discount; everything before it still hits. Removing an
+   early segment is therefore expensive in a way that removing a late one is not.
+2. The hit rate does not depend on "subset or not" but on **selection stability**: if the assembled prefix
+   repeats, the cache hits; if recall churns, it does not.
+3. A smaller prompt is **miss insurance**: when a miss does happen, the miss bill is proportional to what we
+   sent (100k all-miss = \$0.030 vs 40k all-miss = \$0.012 at `deepseek-flash` peak prices).
+
+**Positional + amortized test.** Cutting $R$ tokens at a point with $A$ tokens after it, of which a fraction
+$h$ were hits, and with $n$ calls left in the task, costs the suffix one re-prefill and saves on every
+remaining call:
+
+$$
+\text{adopt} \iff n \cdot R \cdot \big(h\,p_{\mathrm{hit}} + (1-h)\,p_{\mathrm{miss}}\big) \;>\; A \cdot h \cdot \big(p_{\mathrm{miss}} - p_{\mathrm{hit}}\big)
+\qquad\Longleftrightarrow\qquad
+\frac{R}{h\,A} \;>\; \frac{\rho^{*}}{n}
+$$
+
+The left-hand ratio counts removed tokens per invalidated **hit** token, i.e. the same unit as $\rho^{*}$
+(`packages/core/src/cache-policy.ts`, `decideReselect`). With $h = 0.75$ ($\rho^{*} = 3.70$):
+
+| cut $R$ | tokens after cut $A$ | calls left $n$ | $R/(hA)$ | required $\rho^{*}/n$ | decision |
+|---|---|---|---|---|---|
+| 20k | 6k | 1 | 4.44 | 3.70 | re-select |
+| 20k | 6k | 10 | 4.44 | 0.37 | re-select |
+| 20k | 80k | 1 | 0.33 | 3.70 | keep selection |
+| 20k | 80k | 10 | 0.33 | 0.37 | keep selection (marginal) |
+| 5k | 30k | 10 | 0.22 | 0.37 | keep selection |
+
+**Design rules derived from the model** (and implemented as `AssemblyPolicy.cache`):
+
+- `reselectPolicy: perTask` — freeze the selection inside a task; only the small verbatim tail and $x$
+  change per call, so the prefix keeps hitting. Re-selection then happens where the cache is cold anyway.
+- Put the **large stable material first** (pinned prefix, state proxy $T$, selected blocks) and the **small
+  volatile material last** (recent tail, $x$): a mid-prompt re-selection then invalidates only a few k tokens
+  instead of the whole suffix.
+- Keep $T$ byte-stable within a task (`updatePolicy: perTask`): a state proxy that re-renders per turn
+  invalidates everything behind it.
+- Prune **contiguous runs, latest-first among the candidates**, and `alignToCacheBlocks` the budget
+  (DeepSeek 64 tokens, OpenAI 128, Anthropic counts in 1024-token checkpoints) so a changed boundary does not
+  cost a partial block.
+- Never let per-turn metadata (timestamps, turn ids, cache flags) into the prefix.
+- Measure $h$ per call (already in `llm_call` telemetry) and apply the test above with the measured $h$:
+  the C2-vs-C4 comparison isolates selection's cache effect, which is H3.
+
 ## 7. Time model
 
 $$
