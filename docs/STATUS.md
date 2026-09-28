@@ -73,6 +73,22 @@ verified, it says so instead of guessing.
        the way `dsh-agent-instructions` does (it registers on an agent-scoped context) or move the
        subscription into a scope that actually receives the events. Acceptance for N2 therefore becomes: a
        real round shows `upkeep.enqueued > 0` in `/s1` (today it stays 0), with the lag bound respected.
+  - **Round 4 signature (read from the packaged source with the scanner's new `--grep`):**
+
+    ```js
+    /** @param context - the optional scope and plugin-defined assembly fields.
+     *  @returns the post-waterfall assembly with any complete prompt enforced. */
+    async assemble(context = {}) { … }
+    ```
+
+    So `assemble` is **async** and takes `{ scope, … }`; it returns the *assembly*, not text — the package's
+    exported `renderPrompt(assembly)` turns it into the prompt string. This also explains the round-3 probe:
+    it called `assemble()` synchronously and inspected a **Promise** (`Object.keys(promise)` is `[]`), which is
+    why the assembly looked empty. **Next action:** `const assembly = await ctx.get('systemPrompt').assemble({});`
+    then render it (add `@deepseek-ai/dsh-system-prompt` as a plugin dependency and call its `renderPrompt`, or
+    reproduce the join from the assembly's section list — never guess the string shape). Feed the result into
+    `observer.setSystemPrompt(text)` **before** the first observation (or refresh it when its hash changes).
+    Acceptance: `blocks.pinned > 0` and `prefixTokensStable === blocks.pinned` in a real round.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
