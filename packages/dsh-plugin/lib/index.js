@@ -296,13 +296,26 @@ export class LayaRuntime {
  * swallowed, (2) returns the decision untouched until M1 actually assembles context, and (3) isolates
  * its own bookkeeping: a failure in our code is logged and cannot affect the round.
  */
-let pendingPriming                           ;
+/** one lazy priming thunk per session, run by the first pre-step call (see preStepMiddleware) */
+let primeOnce                                   ;
 
 export function preStepMiddleware(
   ctx               ,
   observer               ,
 )                                                                       {
   return async (payload, next) => {
+    if (primeOnce !== undefined) {
+      // Prime lazily, on the first step: at activation time other plugins may not have provided the
+      // systemPrompt service yet, which is why an earlier attempt read it too early and pinned nothing.
+      // One assemble() per session; the primer reports its own failures, so a rejection is swallowed here.
+      const prime = primeOnce;
+      primeOnce = undefined;
+      try {
+        await prime();
+      } catch {
+        /* reported by the primer */
+      }
+    }
     const decision = await next();
     try {
       // M1 observation mode: segment, recall and assemble for real, record the result in the control
@@ -519,12 +532,15 @@ function applyInner(ctx               , raw                             )       
     ctx.logger?.info?.(`[s1cap] observation mode: ${resolved.observation} -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)}${resolved.observation === 'tape' ? ` + tape ${resolveTelemetryPath(resolved.telemetry.tapeJsonl)}` : ''} (prompt untouched)`);
 
 
-    pendingPriming = primeSystemPrompt({
-      service: (ctx                                       ).get?.('systemPrompt'),
-      observer,
-      onText: (text, tokens) => observer.setSystemPrompt(text, tokens),
-      onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
-    });
+    // The service lookup happens inside the thunk, not here: at activation time the systemPrompt service may
+    // not be provided yet, so it is resolved on the first step instead (see preStepMiddleware).
+    primeOnce = () =>
+      primeSystemPrompt({
+        service: (ctx                                       ).get?.('systemPrompt'),
+        observer,
+        onText: (text, tokens) => observer.setSystemPrompt(text, tokens),
+        onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
+      });
 
     // Asynchronous upkeep lane: session events feed the graph off the critical path. The hook name and its
     // payload shape are verified (`ctx.on("session/event", (session, event) => …)` in dsh-agent-instructions);

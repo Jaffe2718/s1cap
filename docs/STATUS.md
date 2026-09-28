@@ -120,6 +120,16 @@ verified, it says so instead of guessing.
     silently eats template backticks, which produces invalid TypeScript. When editing code from the shell:
     use single-quoted strings, `\r?\n` in patterns, and run `node scripts/build-packages.mjs` before every
     round. Editing the file with the editor tool instead of the shell avoids both traps entirely.
+  - **Round 7 — N1 narrowed to one link.** Done this round (with the editor tool, not the shell): the priming
+    thunk is now lazy (`primeOnce`, run by the first pre-step call, because at activation time other plugins may
+    not have provided the `systemPrompt` service yet) and `onProbe` is wired to the tape sink. Verified: build
+    clean, the real round answers, the control record is written — but `blocks.pinned` is still 0 and **no**
+    `system-prompt` probe appears, so the primer's own report never reaches the tape.
+    **The one link left to test:** give `primeSystemPrompt` a direct `write(line)` callback instead of routing
+    its report through the observer (`opts.observer.probe`). If the direct write appears, the observer path was
+    the problem and the prompt text is in hand; if it still does not appear, the thunk is not being invoked at
+    all and the check moves into `preStepMiddleware` itself. Either way the answer arrives in one round, and
+    the acceptance test is unchanged: `blocks.pinned > 0` with `prefixTokensStable === blocks.pinned`.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
