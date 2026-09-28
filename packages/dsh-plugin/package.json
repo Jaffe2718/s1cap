@@ -10,8 +10,7 @@
     "build": "node ../../scripts/build-packages.mjs"
   },
   "exports": {
-    ".": "./lib/index.js",
-    "./client": "./lib/client.js"
+    ".": "./lib/index.js"
   },
   "dsh": {
     "bundle": {
@@ -21,13 +20,6 @@
       "dshReleases": {
         "0.1.7-rc.2": "supported"
       }
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-connection"
-      ],
-      "platform": "web"
     }
   },
   "dependencies": {

@@ -19,14 +19,44 @@
  */
 window.__ModuleLoader__.load({
   id: 'dsh-s1cap',
-  factory: () => () => {
-    const React = require('react');
-    const e = React.createElement;
+  factory: () => (...args) => {
+    // The loader reads `module.exports`; this scope does not provide `module` and does not provide `require`
+    // (both verified from real page loads: the recorded errors were "ReferenceError: require is not defined"
+    // and an entry that failed even though the factory returned its exports). A working third-party half gets
+    // both from its own bundler runtime, which this repository does not have — so take them from the arguments
+    // when the loader passes them and fall back to a local module object otherwise.
+    const providedRequire = args.find((arg) => typeof arg === 'function');
+    const providedModule = args.find((arg) => arg !== null && typeof arg === 'object' && 'exports' in arg);
+    const module = providedModule ?? { exports: {} };
+    const fail = (err) => {
+      try {
+        window.__S1CAP_CLIENT_ERROR__ = String((err && err.stack) || err);
+      } catch {
+        /* nothing left to do */
+      }
+    };
+    try {
+    const React = (() => {
+      if (providedRequire !== undefined) {
+        try {
+          return providedRequire('react');
+        } catch {
+          return undefined;
+        }
+      }
+      return typeof require === 'function' ? require('react') : undefined;
+    })();
+    const e = React === undefined ? undefined : React.createElement;
 
     /** `<scope>/<id>` — the same ref the host half reads (packages/dsh-plugin/src/credentials.ts). */
     const REF = 's1cap/jev';
     const name = 'dsh-s1cap';
-    const inject = ['slots', 'remote.credentials'];
+    /**
+     * Only `slots` is injected. `remote.credentials` is read at call time instead: a name in `inject` that the
+     * client runtime does not provide leaves the whole entry pending and DSH reports the plugin as failed — the
+     * exact symptom this file produced before. A runtime lookup that fails is caught and shown in the panel.
+     */
+    const inject = ['slots'];
 
     const S = {
       wrap: { display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '640px' },
@@ -140,6 +170,14 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      if (React === undefined) {
+        try {
+          console.warn('[s1cap] settings panel inactive: no React available to the client half');
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
       const Section = makeSection(ctx);
       ctx.slots.inject('settings.section', function* () {
         yield ctx.slots.register(
@@ -149,7 +187,15 @@ window.__ModuleLoader__.load({
       });
     }
 
-    module.exports = { apply, inject, name };
+    const api = { apply, inject, name };
+    // `module` is not guaranteed in the scope the loader evaluates this file in, so it is optional here; the
+    // return value carries the same object for loaders that use it. A failure to publish must never throw.
+    module.exports = api;
     return module.exports;
+    } catch (err) {
+      fail(err);
+      // Degrade to an inert but valid plugin rather than failing the entry.
+      return { name: 'dsh-s1cap', inject: [], apply() {} };
+    }
   },
 });

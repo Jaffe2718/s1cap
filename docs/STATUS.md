@@ -320,7 +320,7 @@ verified, it says so instead of guessing.
     so the linked plugin may need a reinstall (`dsh plugin --profile s1captest remove` + `add link:…`) or an
     additional declaration field before the entry appears. Also note the shipped client ids are **package names**
     (`@deepseek-ai/dsh-client-ui-…`), which our `id: 'dsh-s1cap'` matches.
-- [x] **N4** Settings panel shipped: the browser half is registered and served, and the key is entered there and stored by the credential service (evidence below)
+- [~] **N4** Settings panel: the **host half is done and verified**; the browser half is written but cannot load yet — see the round-19 finding below
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
     `'systemPrompt'` is added to `inject` (Cordis throws on uninjected access — that is how the earlier
