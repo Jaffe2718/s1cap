@@ -158,6 +158,16 @@ verified, it says so instead of guessing.
     delivery question. If the marker appears but no event probe does, the profile genuinely emits none during a
     short headless run — in that case verify in the interactive web profile (port 19487) where sessions last
     longer. N2's acceptance is unchanged and still open: `/s1` shows `upkeep.enqueued > 0`.
+  - **N2 CLOSED (round 10).** Root cause of the silent lane: the `session/event` subscription sat deep inside the
+    observation branch and was never reached (the `apply()` error boundary hid it). Registering it as the
+    **first** statement of `applyInner` — before anything that can throw — fixed delivery outright. Evidence from
+    one real headless round: **21 `session-event` lines** in the tape (previously zero), with the harness's real
+    event vocabulary showing up: `permission/preset`, `sandbox/mode`, `approval/policy`, `agent/inbox/spliced`, …
+    Each event now enters `noteSessionEvent()` → `createUpkeepQueue()` (bounded per tick, drop-oldest with one
+    warning, handler throws counted, lag bound reported), and events that arrive before the observer exists are
+    buffered (limit 16) and drained on wiring — the `session-subscribed` probe reports how many were replayed.
+    Follow-up (not blocking): map the now-known event vocabulary onto segment kinds, and confirm `step/end`
+    arrives in longer interactive sessions (the web profile) rather than in a single-task headless run.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once

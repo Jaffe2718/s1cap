@@ -299,6 +299,17 @@ export class LayaRuntime {
 /** one lazy priming thunk per session, run by the first pre-step call (see preStepMiddleware) */
 let primeOnce: (() => Promise<void>) | undefined;
 
+/**
+ * The session-event lane is wired at the very top of `applyInner`, before anything that can throw, so an
+ * activation failure later in the function cannot silently cost us the lane. These three live at module level
+ * because the observer and the tape sink do not exist yet when the subscription is registered.
+ */
+let activeObserver: StepObserver | undefined;
+let probeOut: ((line: string) => void) | undefined;
+/** events that arrive before observation is wired (bounded; drained once the observer exists) */
+const earlySessionEvents: unknown[] = [];
+const EARLY_EVENT_LIMIT = 16;
+
 export function preStepMiddleware(
   ctx: PluginContext,
   observer?: StepObserver,
@@ -351,6 +362,21 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     ctx.logger?.info?.('[s1cap] not enabled (config.enabled !== true) — inert: no hooks, no commands, no System-1 calls');
     return;
   }
+  // First registration, before anything that can throw, and before the observer exists: events that arrive
+  // early are buffered (bounded) and drained once observation is wired. The marker proves delivery, which is
+  // the difference between "the hook name is wrong" and "this profile emits nothing during the run".
+  ctx.on('session/event', (_session: unknown, event: unknown) => {
+    probeOut?.(
+      JSON.stringify({
+        schema: 0,
+        kind: 'session-event',
+        type: (event as { type?: unknown } | null)?.type ?? typeof event,
+      }) + '\n',
+    );
+    if (activeObserver !== undefined) activeObserver.noteSessionEvent(event);
+    else if (earlySessionEvents.length < EARLY_EVENT_LIMIT) earlySessionEvents.push(event);
+  });
+
   const resolved = resolvePluginConfig(raw);
   const config = resolved.config;
   const layaConfig = config.laya ?? defaultLayaConfig();
@@ -543,15 +569,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
       });
 
-    // Asynchronous upkeep lane: session events feed the graph off the critical path. The hook name and its
-    // payload shape are verified (`ctx.on("session/event", (session, event) => …)` in dsh-agent-instructions);
-    // what each event *contains* is read defensively and every shape without a rule is reported.
-    ctx.on('session/event', (_session: unknown, event: unknown) => {
-      observer?.noteSessionEvent(event);
-    });
-    // Subscription marker: it proves the listener was registered even when no event ever arrives, which is the
-    // difference between "the hook name is wrong" and "this profile emits nothing during the run".
-    observer.probe({ schema: 0, kind: 'session-subscribed' });
+    // Wire the lane that was registered at the top of applyInner: hand it the observer, the tape sink, and the
+    // events that arrived before either existed.
+    activeObserver = observer;
+    probeOut = (line) => probeSink?.write(line);
+    for (const early of earlySessionEvents.splice(0)) observer.noteSessionEvent(early);
+    observer.probe({ schema: 0, kind: 'session-subscribed', drained: earlySessionEvents.length });
   } else {
     ctx.logger?.info?.('[s1cap] observation mode: off');
   }
