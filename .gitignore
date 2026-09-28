@@ -1,0 +1,42 @@
+# Node / TypeScript
+node_modules/
+dist/
+lib/
+build/
+*.tsbuildinfo
+coverage/
+.npm/
+.eslintcache
+
+# Python (local S1 runtimes, bench tooling)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Models & data artifacts (download-on-demand, never commit)
+*.onnx
+*.gguf
+*.safetensors
+models/
+
+# Telemetry & experiment outputs
+telemetry/
+bench/runs/
+bench/results/
+*.sqlite
+*.sqlite3
+*.jsonl
+*.log
+
+# Environment & secrets
+.env
+.env.*
+*.local
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
