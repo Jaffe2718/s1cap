@@ -48,7 +48,10 @@
           serveArgs: []
           host: 127.0.0.1
           port: 8008
-          model: laya-typed-decisions
+          # readiness probe of laya-serve (verified: GET /health); Jev-style servers use /v1/models and are tried as a fallback
+          healthPath: /health
+          # checkpoint name or alias: english | multilingual | typed-decisions ("" lets the router decide)
+          model: ""
           autoStart: true
           startupTimeoutMs: 120000
           pollIntervalMs: 500

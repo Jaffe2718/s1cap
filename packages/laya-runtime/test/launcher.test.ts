@@ -43,15 +43,16 @@ interface Harness {
   deps: LaunchDeps;
   plan: { command?: string; args?: string[]; env?: Record<string, string> };
   fake: FakeChild;
-  setFetch(fn: typeof fetch): void;
-  clock(): { t: number; advance(ms: number): void };
+  fetched: string[];
+  setFetch(fn: (url: string) => Promise<Response>): void;
 }
 
 function harness(opts: { hasConsoleScript?: boolean; platform?: string } = {}): Harness {
   const fake = makeChild();
   const plan: Harness['plan'] = {};
+  const fetched: string[] = [];
   let t = 0;
-  let impl: typeof fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch;
+  let impl = async (_url: string): Promise<Response> => new Response('{}', { status: 200 });
   const deps: LaunchDeps = {
     platform: opts.platform ?? 'win32',
     now: () => t,
@@ -65,16 +66,20 @@ function harness(opts: { hasConsoleScript?: boolean; platform?: string } = {}): 
       plan.env = options.env;
       return fake.child;
     },
-    fetchImpl: ((input: RequestInfo | URL, init?: RequestInit) => impl(input, init)) as typeof fetch,
+    fetchImpl: ((input: RequestInfo | URL) => {
+      const url = String(input);
+      fetched.push(url);
+      return impl(url);
+    }) as typeof fetch,
   };
   return {
     deps,
     plan,
     fake,
+    fetched,
     setFetch(fn) {
       impl = fn;
     },
-    clock: () => ({ get t() { return t; }, advance(ms: number) { t += ms; } }),
   };
 }
 
@@ -83,34 +88,45 @@ test('consoleScriptPath targets the environment layout of each platform', () => 
   assert.equal(consoleScriptPath('/opt/conda/envs/ml/bin/python', 'linux'), '/opt/conda/envs/ml/bin/laya-serve');
 });
 
-test('buildLaunchPlan prefers the console script, falls back to `-m laya serve`, honours overrides', () => {
-  const cfg = { ...defaultLayaConfig(), port: 9001, serveArgs: ['--device', 'cpu'] };
+test('buildLaunchPlan configures Laya through the environment, not CLI flags', () => {
+  const cfg = { ...defaultLayaConfig(), port: 9001, serveArgs: ['--extra'] };
 
   const viaScript = buildLaunchPlan(cfg, PY, 'win32', true);
   assert.equal(viaScript.command, 'D:\\conda_store\\envs\\ml\\Scripts\\laya-serve.exe');
-  assert.deepEqual(viaScript.args, ['--host', '127.0.0.1', '--port', '9001', '--device', 'cpu']);
+  assert.deepEqual(viaScript.args, ['--extra'], 'laya-serve 0.3.21 takes no host/port flags');
+  assert.equal(viaScript.env.LAYA_HOST, '127.0.0.1');
+  assert.equal(viaScript.env.LAYA_PORT, '9001');
 
   const viaModule = buildLaunchPlan(cfg, PY, 'win32', false);
   assert.equal(viaModule.command, PY);
-  assert.deepEqual(viaModule.args, ['-m', 'laya', 'serve', '--host', '127.0.0.1', '--port', '9001', '--device', 'cpu']);
+  assert.deepEqual(viaModule.args, ['-m', 'laya', 'serve', '--extra']);
 
   const viaCommand = buildLaunchPlan({ ...cfg, serveCommand: 'C:\\wrap\\laya.cmd' }, PY, 'win32', true);
   assert.equal(viaCommand.command, 'C:\\wrap\\laya.cmd');
 
-  const env = buildLaunchPlan({ ...cfg, env: { LAYA_THREADS: '8', HF_ENDPOINT: 'https://hf-mirror.com' } }, PY, 'win32', false).env;
+  const env = buildLaunchPlan(
+    { ...cfg, env: { LAYA_THREADS: '8', LAYA_MODELS: 'typed-decisions', HF_ENDPOINT: 'https://hf-mirror.com' } },
+    PY,
+    'win32',
+    false,
+  ).env;
   assert.equal(env.LAYA_THREADS, '8');
+  assert.equal(env.LAYA_MODELS, 'typed-decisions');
   assert.equal(env.HF_ENDPOINT, 'https://hf-mirror.com');
   assert.equal(env.LAYA_PORT, '9001');
 });
 
-test('LayaServer.start spawns, polls /v1/models and reaches ready', async () => {
+test('LayaServer.start spawns, polls GET /health and reaches ready', async () => {
   const h = harness();
-  let polls = 0;
-  h.setFetch((async () => {
-    polls += 1;
-    if (polls < 3) throw new Error('ECONNREFUSED');
-    return new Response('{"data":[]}', { status: 200 });
-  }) as typeof fetch);
+  let healthCalls = 0;
+  h.setFetch(async (url) => {
+    if (url.endsWith('/health')) {
+      healthCalls += 1;
+      if (healthCalls < 3) return new Response('starting', { status: 503 });
+      return new Response('{"status":"ok"}', { status: 200 });
+    }
+    return new Response('not found', { status: 404 });
+  });
 
   const cfg = { ...defaultLayaConfig(), enabled: true, pollIntervalMs: 500, env: { LAYA_THREADS: '8' } };
   const server = new LayaServer(cfg, h.deps);
@@ -120,18 +136,33 @@ test('LayaServer.start spawns, polls /v1/models and reaches ready', async () => 
   assert.equal(result.baseUrl, 'http://127.0.0.1:8008');
   assert.equal(server.status, 'ready');
   assert.equal(server.pid, 4242);
-  assert.equal(polls, 3);
-  assert.deepEqual(h.plan.args, ['-m', 'laya', 'serve', '--host', '127.0.0.1', '--port', '8008']);
+  assert.equal(healthCalls, 3);
+  assert.deepEqual(h.plan.args, ['-m', 'laya', 'serve']);
+  assert.equal(h.plan.env?.LAYA_HOST, '127.0.0.1');
+  assert.equal(h.plan.env?.LAYA_PORT, '8008');
   assert.equal(h.plan.env?.LAYA_THREADS, '8');
+  assert.deepEqual(h.fetched.slice(0, 2), ['http://127.0.0.1:8008/health', 'http://127.0.0.1:8008/v1/models']);
+});
+
+test('LayaServer.waitForReady falls back to /v1/models for Jev-style deployments', async () => {
+  const h = harness();
+  h.setFetch(async (url) =>
+    url.endsWith('/health') ? new Response('nope', { status: 404 }) : new Response('{"data":[]}', { status: 200 }),
+  );
+  const cfg = { ...defaultLayaConfig(), enabled: true, startupTimeoutMs: 1000, pollIntervalMs: 100 };
+  const server = new LayaServer(cfg, h.deps);
+  const result = await server.start(PY);
+
+  assert.equal(result.ok, true);
+  assert.equal(server.status, 'ready');
+  assert.ok(h.fetched.some((u) => u.endsWith('/v1/models')));
 });
 
 test('LayaServer.start reports a startup timeout instead of hanging', async () => {
   const h = harness();
-  let polls = 0;
-  h.setFetch((async () => {
-    polls += 1;
+  h.setFetch(async () => {
     throw new Error('ECONNREFUSED');
-  }) as typeof fetch);
+  });
 
   const cfg = { ...defaultLayaConfig(), enabled: true, startupTimeoutMs: 1000, pollIntervalMs: 500 };
   const server = new LayaServer(cfg, h.deps);
@@ -140,15 +171,15 @@ test('LayaServer.start reports a startup timeout instead of hanging', async () =
   assert.equal(result.ok, false);
   assert.equal(server.status, 'failed');
   assert.match(String(server.error), /timed out/);
-  assert.equal(polls, 2);
+  assert.equal(h.fetched.length, 4, 'two poll rounds, two candidate paths each');
 });
 
 test('LayaServer.start surfaces an early process exit', async () => {
   const h = harness();
-  h.setFetch((async () => {
+  h.setFetch(async () => {
     h.fake.emit('exit', 1);
     throw new Error('ECONNREFUSED');
-  }) as typeof fetch);
+  });
 
   const cfg = { ...defaultLayaConfig(), enabled: true, startupTimeoutMs: 5000, pollIntervalMs: 100 };
   const server = new LayaServer(cfg, h.deps);

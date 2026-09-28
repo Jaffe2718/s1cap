@@ -131,7 +131,7 @@ export class S1Client {
         headers,
         body: JSON.stringify({
           state,
-          ...(this.#model !== undefined ? { model: this.#model } : {}),
+          ...(this.#model ? { model: this.#model } : {}),
           questions,
         }),
         signal: controller.signal,
@@ -157,7 +157,20 @@ export class S1Client {
     }
   }
 
-  /** GET /v1/models — deployment probe used by `/s1 status`. */
+  /**
+   * GET /health — the readiness probe of Laya-style deployments.
+   * Verified: `laya-serve` 0.3.21 exposes `/health` and `/v1/systemone` only.
+   */
+  async health(): Promise<boolean> {
+    try {
+      const res = await this.#fetch(`${this.#baseUrl}/health`);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /** GET /v1/models — available on the hosted Jev deployment, not on `laya-serve`. */
   async models(): Promise<string[]> {
     const headers: Record<string, string> = {};
     if (this.#apiKey) headers.authorization = `Bearer ${this.#apiKey}`;

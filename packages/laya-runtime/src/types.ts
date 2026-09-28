@@ -22,6 +22,8 @@ export interface LayaConfig {
   serveArgs?: string[];
   host: string;
   port: number;
+  /** readiness endpoint polled after spawn (default `/health`, Laya 0.3.21) */
+  healthPath: string;
   /** model id handed to /v1/systemone calls */
   model?: string;
   /** start the server when the plugin loads */
@@ -42,6 +44,7 @@ export function defaultLayaConfig(): LayaConfig {
     preferConsoleScript: true,
     host: '127.0.0.1',
     port: 8008,
+    healthPath: '/health',
     autoStart: true,
     startupTimeoutMs: 120_000,
     pollIntervalMs: 500,

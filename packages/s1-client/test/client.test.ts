@@ -121,6 +121,24 @@ test('models: reads the deployment probe', async () => {
   assert.deepEqual(await client.models(), ['laya-typed-decisions', 'laya-multilingual']);
 });
 
+test('health: Laya readiness probe (laya-serve exposes /health, not /v1/models)', async () => {
+  const captured: Captured[] = [];
+  const up = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008/',
+    fetchImpl: mockFetch(() => new Response('{"status":"ok"}', { status: 200 }), captured),
+  });
+  assert.equal(await up.health(), true);
+  assert.equal(captured[0]?.url, 'http://127.0.0.1:8008/health');
+
+  const down = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    fetchImpl: mockFetch(() => {
+      throw new Error('ECONNREFUSED');
+    }),
+  });
+  assert.equal(await down.health(), false);
+});
+
 test('normalize: repairs non-normalized probabilities (Jev invariant gap)', () => {
   const n = normalize({ refund: 0.7, no_refund: 0.49 });
   assert.ok(Math.abs((n.refund ?? 0) + (n.no_refund ?? 0) - 1) < 1e-9);

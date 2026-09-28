@@ -49,7 +49,8 @@ Candidates are de-duplicated case-insensitively on Windows.
 | `preferConsoleScript` | `true` | use `<env>/Scripts/laya-serve.exe` (Windows) or `<env>/bin/laya-serve` when present |
 | `serveCommand` | — | full launch-command override (wrapper scripts) |
 | `serveArgs` | `[]` | extra arguments appended to the launch command |
-| `host` / `port` | `127.0.0.1` / `8008` | bind address of the local server |
+| `host` / `port` | `127.0.0.1` / `8008` | bind address of the local server (injected as `LAYA_HOST` / `LAYA_PORT`) |
+| `healthPath` | `/health` | readiness endpoint polled after spawn (`/v1/models` is tried as a fallback) |
 | `model` | — | model id sent to `/v1/systemone` (e.g. `laya-typed-decisions`) |
 | `autoStart` | `true` | start the server when the plugin loads |
 | `startupTimeoutMs` | `120000` | readiness budget (first run downloads weights) |
@@ -65,6 +66,11 @@ extra adds the HTTP layer:
 ```bash
 <python> -m pip install "laya[serve]"
 ```
+
+Installed and verified here with `laya 0.3.21` on Python 3.13: the package pulls
+`fastapi`, `uvicorn`, `starlette`, `pydantic` and friends, and installs the console scripts
+`laya`, `laya-serve`, `laya-mcp-server` and `laya-evals` into the environment's `Scripts`
+(or `bin`) directory.
 
 First launch downloads the Laya checkpoints from Hugging Face. When that endpoint is slow or
 blocked, point the server at a mirror through the `env` map, e.g. `HF_ENDPOINT: https://hf-mirror.com`.
@@ -92,13 +98,32 @@ Machine-specific values belong in `~/.dsh/profiles/<profile>/cordis.patch.yml`, 
         LAYA_THREADS: "8"
 ```
 
-## 6. Open verification items
+## 6. Verified behaviour (laya 0.3.21)
 
-- **`laya-serve` flags** — `--host` / `--port` are passed by default and mirrored into
-  `LAYA_HOST` / `LAYA_PORT`; if the released CLI uses different switches, set `serveArgs` or
-  `serveCommand`. (`[VERIFY]` on first real launch.)
-- **Python 3.13 support** — the serving extra must resolve for the interpreter in use.
-- **Warm-up latency** — the first `/v1/systemone` call after `ready` may be slower while weights load.
+Read from the installed `laya/serve.py`, not from documentation:
+
+- **Configuration is environment-only.** `laya-serve` takes no host/port flags; it calls
+  `uvicorn.run(host=os.environ["LAYA_HOST"], port=os.environ["LAYA_PORT"], …)`. The launcher
+  therefore injects `LAYA_HOST` / `LAYA_PORT` and passes no arguments (`serveArgs` remains for
+  releases that do accept flags).
+- **Endpoints:** `GET /health` and `POST /v1/systemone` only — there is **no** `/v1/models`,
+  which is why readiness polls `/health` first.
+- **Environment variables** (defaults in parentheses): `LAYA_HOST` (0.0.0.0), `LAYA_PORT` (8000),
+  `LAYA_DEVICE` (auto), `LAYA_PRELOAD` (1), `LAYA_MODELS` (all checkpoints; `english`,
+  `multilingual`, `typed-decisions`), `LAYA_THREADS` (torch default — keep ≤ physical cores),
+  `LAYA_AUTO_TASK` (0), `LAYA_MAX_LOADED` (2), `LAYA_API_KEY` (none), `LAYA_LOG_LEVEL` (info),
+  `LAYA_MAX_CONCURRENT` (16), `LAYA_MAX_TOKEN_BUDGET` (8192).
+- **Request contract:** the body must be an object containing `questions` (400 otherwise);
+  optional `state`, `model`, `max_len`, `head_max_len`; oversized bodies get 413, and saturation
+  past `LAYA_MAX_CONCURRENT` gets 503 with `Retry-After: 1` instead of queueing.
+- **Startup cost:** with `LAYA_PRELOAD=1` the checkpoints are built *before* uvicorn binds, so a
+  first run that has to download weights can exceed the default 120 s readiness budget — raise
+  `startupTimeoutMs` (the CLI defaults to 600 s) or restrict `LAYA_MODELS` to one checkpoint.
+- **Reproducibility:** `LAYA_REVISION` and `LAYA_SHA256_DIGESTS` pin checkpoint revisions and
+  digests — worth setting for paper artifacts.
+
+Still open: GPU/CPU device behaviour on the target machine (`LAYA_DEVICE`), and whether future
+releases add CLI arguments.
 
 ## 7. Tests
 

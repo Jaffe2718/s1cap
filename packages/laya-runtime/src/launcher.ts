@@ -44,9 +44,13 @@ export function consoleScriptPath(pythonPath: string, platform: string): string 
 /**
  * Build the launch plan.
  *
- * [VERIFY] the exact `laya-serve` flags on first run: host/port are passed as
- * `--host/--port` and mirrored into `LAYA_HOST`/`LAYA_PORT`; if the installed
- * release uses different switches, set `serveArgs` (or `serveCommand`) in config.
+ * Verified against `laya 0.3.21` (`laya/serve.py`): `laya-serve` takes **no CLI
+ * arguments** — host, port, device, preload list and thread caps are read from the
+ * environment (`LAYA_HOST`, `LAYA_PORT`, `LAYA_DEVICE`, `LAYA_MODELS`, `LAYA_THREADS`,
+ * `LAYA_PRELOAD`, `LAYA_AUTO_TASK`, `LAYA_MAX_LOADED`, `LAYA_MAX_CONCURRENT`,
+ * `LAYA_MAX_TOKEN_BUDGET`, `LAYA_API_KEY`, `LAYA_LOG_LEVEL`). Host and port are
+ * therefore injected as environment variables only; `serveArgs` stays available for
+ * releases that do accept flags.
  */
 export function buildLaunchPlan(
   cfg: LayaConfig,
@@ -54,13 +58,13 @@ export function buildLaunchPlan(
   platform: string,
   hasConsoleScript: boolean,
 ): LaunchPlan {
-  const serveArgs = ['--host', cfg.host, '--port', String(cfg.port), ...(cfg.serveArgs ?? [])];
   const env: Record<string, string> = {
     ...(cfg.env ?? {}),
     LAYA_HOST: cfg.host,
     LAYA_PORT: String(cfg.port),
   };
-  const plan: LaunchPlan = { command: pythonPath, args: serveArgs, env };
+  const extraArgs = cfg.serveArgs ?? [];
+  const plan: LaunchPlan = { command: pythonPath, args: extraArgs, env };
   if (cfg.cwd) plan.cwd = cfg.cwd;
 
   if (cfg.serveCommand) {
@@ -69,7 +73,7 @@ export function buildLaunchPlan(
   if (cfg.preferConsoleScript && hasConsoleScript) {
     return { ...plan, command: consoleScriptPath(pythonPath, platform) };
   }
-  return { ...plan, args: ['-m', 'laya', 'serve', ...serveArgs] };
+  return { ...plan, args: ['-m', 'laya', 'serve', ...extraArgs] };
 }
 
 export interface StartResult {
@@ -167,20 +171,24 @@ export class LayaServer {
       return { ok: true, baseUrl };
     }
     this.#state = 'failed';
-    this.#error = this.#error ?? `timed out after ${this.#cfg.startupTimeoutMs}ms waiting for ${baseUrl}/v1/models`;
+    this.#error = this.#error ?? `timed out after ${this.#cfg.startupTimeoutMs}ms waiting for ${baseUrl}${this.#cfg.healthPath}`;
     return { ok: false, baseUrl, error: this.#error };
   }
 
   /** Poll the readiness endpoint until it answers or the startup timeout expires. */
   async waitForReady(): Promise<boolean> {
     const deadline = this.#deps.now() + this.#cfg.startupTimeoutMs;
+    // Laya exposes GET /health; Jev-style deployments expose GET /v1/models.
+    const paths = [this.#cfg.healthPath, '/v1/models'];
     while (this.#deps.now() < deadline) {
       if (this.#state === 'failed') return false;
-      try {
-        const res = await this.#deps.fetchImpl(`${this.baseUrl}/v1/models`);
-        if (res.ok) return true;
-      } catch {
-        // server not up yet
+      for (const path of paths) {
+        try {
+          const res = await this.#deps.fetchImpl(`${this.baseUrl}${path}`);
+          if (res.ok) return true;
+        } catch {
+          // server not up yet
+        }
       }
       await this.#deps.sleep(this.#cfg.pollIntervalMs);
     }
