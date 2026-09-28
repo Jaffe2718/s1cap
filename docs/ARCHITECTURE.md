@@ -73,6 +73,7 @@ flowchart LR
 | **PLAN GATE** | Consume scores; normalize, abstain, cap attempts, order execution | probabilities + confidence | `{order, probs, abstained}` + plan-gate telemetry | normalize `p̂ = p / Σp`; cap `M=2`; plans `m ≤ 3` | no scores or conf < 0.5 → keep model order | ✅ M0 · `packages/core/src/plan-gate.ts` |
 | **Run + verify** | Execute plans in the gate's order; verify each with the benchmark-native oracle; drop the rest on success | ordered plan list | tool calls, verification verdicts, tool results | attempt cap from the gate; approval waits excluded from timing | verification fails and cap not reached → next plan | 🔜 M2 · harness tools + `bench/runners` |
 | **Telemetry** | Versioned JSONL record of the whole loop (cost, latency, quality inputs) | events from every module | JSONL rows, task summaries | schema v1 (fields are add-only); prices per provider | S1 outage recorded as `degraded` flag per call | ✅ M0 · `packages/core/src/telemetry.ts` |
+| **Laya runtime** | Finds the Python environment that can `import laya`, launches `laya-serve`, health-checks `GET /v1/models`, stops it again | interpreter candidates (config → conda envs → PATH → `py -0p`) | running local server + status/logs | `pythonPath`, `condaEnv`, `host/port`, `startupTimeoutMs`, `env` (`LAYA_THREADS`, `HF_ENDPOINT`) | not ready → System-1 calls degrade to tier-0 + recency window | ✅ M0 · `packages/laya-runtime` |
 
 ## 4. The two System-1 intervention points
 

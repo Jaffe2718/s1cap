@@ -34,5 +34,24 @@
           provider: jev
           timeoutMs: 2500
           questionsPerCall: 20
+        # Local Laya backend (docs/LAYA_RUNTIME.md). Enable after installing the
+        # serving extra in the target environment: <python> -m pip install "laya[serve]".
+        # Machine-specific paths (condaPath, pythonPath) belong in the DSH profile patch.
+        laya:
+          enabled: false
+          pythonPath: ""
+          condaEnv: ""
+          condaPath: ""
+          extraCandidates: []
+          preferConsoleScript: true
+          serveCommand: ""
+          serveArgs: []
+          host: 127.0.0.1
+          port: 8008
+          model: laya-typed-decisions
+          autoStart: true
+          startupTimeoutMs: 120000
+          pollIntervalMs: 500
+          env: {}
         telemetry:
           jsonl: ./.s1cap/telemetry.jsonl

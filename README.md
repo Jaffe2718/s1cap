@@ -77,7 +77,7 @@ Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified*
 
 ## Status & roadmap
 
-Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `dsh-s1cap` skeleton, 2×2 cell presets; `node --test` **20/20 offline**. Remaining M0: live-backend smoke against Jev / `laya-serve`. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
+Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `@s1cap/laya-runtime` (Python discovery + `laya-serve` launcher), `dsh-s1cap` skeleton, 2×2 cell presets; `node --test` **32/32 offline**. Remaining M0: live-backend smoke against Jev / `laya-serve`. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
 
 | M | Scope |
 |---|---|
@@ -91,8 +91,14 @@ Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · a
 ## Development
 
 ```bash
-node --test --experimental-strip-types "packages/*/test/*.test.ts"   # 20 tests, zero deps, offline
+node --test --experimental-strip-types "packages/*/test/*.test.ts"   # 32 tests, zero deps, offline
 ```
+
+Local Laya backend: `@s1cap/laya-runtime` discovers the Python environment that can `import laya`
+(conda environments are resolved through `conda env list --json`, never by guessing paths), launches
+`laya-serve` and health-checks `/v1/models`. Install the serving extra once per environment with
+`<python> -m pip install "laya[serve]"`; configuration keys and the DSH profile patch are documented in
+[docs/LAYA_RUNTIME.md](docs/LAYA_RUNTIME.md).
 
 Type-checking needs TypeScript ≥ 5.8 (`erasableSyntaxOnly`): `npm i -D typescript@^5.8 && npm run typecheck`.
 pnpm is the intended workspace manager; on Windows PowerShell call `pnpm.cmd` (the `.ps1` shim is blocked by
@@ -117,6 +123,7 @@ s1cap/
 |---|---|
 | [docs/PROPOSAL.md](docs/PROPOSAL.md) | research proposal — supervisor / cooperator |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module reference: Mermaid diagram, connection semantics, parameters, implementation status |
+| [docs/LAYA_RUNTIME.md](docs/LAYA_RUNTIME.md) | local Laya backend: Python environment discovery, launcher, configuration keys |
 | [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) | implementation brief for coding agents — verified facts base, interfaces, algorithms, milestones |
 | [docs/FORMULAS.md](docs/FORMULAS.md) | formal definitions and formula handbook (Markdown + LaTeX) |
 | [docs/RELATED_WORK.md](docs/RELATED_WORK.md) | verified related-work dossier + novelty audit |

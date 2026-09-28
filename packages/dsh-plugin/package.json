@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@s1cap/core": "workspace:*",
+    "@s1cap/laya-runtime": "workspace:*",
     "@s1cap/s1-client": "workspace:*"
   },
   "devDependencies": {
