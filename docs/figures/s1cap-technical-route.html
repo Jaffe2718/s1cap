@@ -5410,26 +5410,33 @@
     <div class="cards">
       <div class="card">
         <div class="card-header">
-          <div class="card-dot cyan"></div>
-          <h3>两个 System-1 参与点</h3>
+          <div class="card-dot violet"></div>
+          <h3>模块作用（逐模块）</h3>
         </div>
         <ul>
-          <li>&bull; ① Selective Context：S1 关联计算 → 扩充 RG → TAS 组装</li>
-          <li>&bull; ② Adaptive Planning：S1 决策后端打分 → 闸门排序 → 按序执行</li>
-          <li>&bull; surface 重写：模型视图重组，用户 transcript 恒时序</li>
-          <li>&bull; 两个 S1 后端同协议可插拔：Jev 云端 · Laya · Kev（/v1/systemone）</li>
+          <li>&bull; 会话新事件 — 会话事件源：用户输入 x · 工具结果 · 推理轨迹</li>
+          <li>&bull; 分片与召回 — 消息级分片（非 token 级）+ tier-0/1 候选生成</li>
+          <li>&bull; S1 关联计算后端 — 新片段 × 历史片段关联打分（noul 批量问询）</li>
+          <li>&bull; 关联图 RG — 加权边存储，w·exp(−Δt/λ) 时间衰减</li>
+          <li>&bull; ASSEMBLER — BFS(τ,d) 召回 + 预算背包 + TAS 布局组装</li>
+          <li>&bull; System-2 LLM — 被治理的宿主模型，只消费组装后的上下文</li>
+          <li>&bull; S1 决策后端 — 候选方案 choice 打分，输出概率与置信度</li>
+          <li>&bull; PLAN GATE — 概率归一 · 弃权判断 · 尝试上限 M=2 · 执行排序</li>
+          <li>&bull; 执行 + 验证 — 按序尝试并验证，成功即弃备选（详见 docs/MODULES.zh.md）</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>安全 · 降级 · 测量</h3>
+          <h3>参与点 · 安全 · 测量</h3>
         </div>
         <ul>
+          <li>&bull; ① Selective Context：S1 关联计算 → 扩充 RG → TAS 组装</li>
+          <li>&bull; ② Adaptive Planning：S1 打分 → 闸门排序 → 按序执行</li>
+          <li>&bull; surface 重写：模型视图重组，用户 transcript 恒时序</li>
+          <li>&bull; 安全降级：概率归一 · state 预过滤 · S1 超时 → tier-0</li>
           <li>&bull; 遥测 JSONL v1：cache hit/miss · cost · latency · S1 调用</li>
-          <li>&bull; S1 超时 → tier-0 + 近因窗口；方案尝试上限 2 次，成功即弃备选</li>
-          <li>&bull; 概率归一 · state 预过滤（防对抗内容牵引）</li>
           <li>&bull; 成功判据：完成率非劣（−2pp）+ 成本或时间 ≥10% 改善</li>
         </ul>
       </div>
