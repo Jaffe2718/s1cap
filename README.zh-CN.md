@@ -3,6 +3,8 @@
 **S**ystem-1 **S**elective **C**ontext and **A**daptive **P**lanning · [English](./README.md)
 
 > 论文标题（已锁定）：*S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*
+>
+> **作者：** Yuanming Chen · LI Changzhe
 
 ## 这是什么
 

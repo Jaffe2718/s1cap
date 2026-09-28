@@ -5,6 +5,8 @@ Plugin Hub, paper artifact listings) in sync with this file.
 
 Paper title: *S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*
 
+Authors: **Yuanming Chen** · **LI Changzhe** (citation form: `Chen, Yuanming and LI, Changzhe`)
+
 ---
 
 ## 1. GitHub About description — primary (257 chars)

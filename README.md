@@ -6,6 +6,8 @@
 
 **S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents** · [中文说明](./README.zh-CN.md)
 
+**Authors:** Yuanming Chen · LI Changzhe
+
 S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The S1CAP control layer intervenes at exactly **two points**:
 
 1. **Selective Context** *(context lifecycle)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide **what the LLM sees**, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`.
@@ -120,12 +122,12 @@ Requirements: Node ≥ 22.19 (DSH plugin engines contract) · pnpm for the monor
 
 ## Citation
 
-Paper in preparation. Title (locked): *S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*.
+Paper in preparation. Authors: **Yuanming Chen**, **LI Changzhe**. Title (locked): *S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*.
 
 ```bibtex
 @misc{s1cap2026,
   title  = {S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents},
-  author = {Jaffe2718},
+  author = {Chen, Yuanming and LI, Changzhe},
   year   = {2026},
   url    = {https://github.com/Jaffe2718/s1cap},
   note   = {Paper in preparation}

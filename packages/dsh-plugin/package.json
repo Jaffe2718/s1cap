@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "S1CAP for DeepSeek Harness: System-1-governed context lifecycle (association graph recall + Trace-as-State assembly + plan ranking)",
+  "author": "Yuanming Chen and LI Changzhe",
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"
