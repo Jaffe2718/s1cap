@@ -132,7 +132,7 @@ $$
 
 ## 4. 方案闸门（S1 决策后端 + PLAN GATE，因子 S1G 开）
 
-LLM 产出方案集 $\Pi = \{\pi_1,\dots,\pi_m\}$（$m \le 3$），一次 choice 问询返回概率 $p_i$ 与置信度 $\mathrm{conf}_i$。**服务端归一**（Jev 不保证 $\sum p_i = 1$）：
+LLM 产出方案集 $\Pi = \{\pi_1,\dots,\pi_m\}$（$m \le 3$）后，**直接把候选方案交给 S1 决策后端**做一次 choice 打分，取回概率 $p_i$ 与置信度 $\mathrm{conf}_i$；**PLAN GATE 消费打分结果**，只负责归一化、弃权判断、尝试上限与排序。**服务端归一**（Jev 不保证 $\sum p_i = 1$）：
 
 $$
 \hat p_i = \frac{p_i}{\sum_j p_j}

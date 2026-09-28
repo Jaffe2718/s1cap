@@ -258,6 +258,7 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 ### 5.4 Plan gate (factor S1G on) — S1 decision backend
 
 - Trigger: assistant emits a tool-call batch; if `planGate.on` and >1 plausible plan exists (harness prompted — system addendum asks for ≤`maxPlans` (3) alternative plans as structured JSON when ambiguity is high; default elicitation `on-demand`).
+- **Dataflow (topology frozen 2026-09-28):** the LLM's candidate plans go **directly to the S1 decision backend** for the choice scoring; the PLAN GATE consumes the returned probabilities + confidence and applies normalization, abstention, ordering and the attempt cap, then hands the ordered plan to execution. The gate does not make the System-1 call itself.
 - **One choice question per plan set:** `state = {task brief, x, T}`; options = plan summaries (≤8; Jev handles 255 natively, Laya caps ~20 at defaults — the cap protects the local path); `criteria` = "Which plan is most likely to complete the task correctly with the least wasted work?"
 - **Normalize probabilities server-side** (Jev invariants not guaranteed, §1.2).
 - **Attempt controller:** execute in probability order; verification oracle = harness-native (tests / build / exit criteria per benchmark); attempt cap **M=2** (candidate plans m ≤ 3); on success, discard remaining plans and log saved-token estimate; abstain (confidence < 0.5) → keep the LLM's own order.
