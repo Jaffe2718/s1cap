@@ -62,28 +62,38 @@ Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified*
 
 ## Status & roadmap
 
-Pre-alpha — milestone **M0** in progress. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
+Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `dsh-s1cap` skeleton, 2×2 cell presets; `node --test` **20/20 offline**. Remaining M0: live-backend smoke against Jev / `laya-serve`. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
 
 | M | Scope |
 |---|---|
-| M0 | verify open questions, monorepo scaffold, `s1-client` against live Jev/laya-serve, telemetry v1, DSH plugin skeleton |
-| M1 | segmenter + association graph + assembler, proxy MVP, replay-correctness tests |
-| M2 | plan gate, degradation paths, settings UI, Terminal-Bench 10-task cost pilot |
+| M0 | monorepo scaffold, core + `s1-client`, telemetry v1, DSH plugin skeleton — **scaffold done**, live-backend smoke pending |
+| M1 | assembler/recall replay-correctness tests, proxy MVP, DSH hook wiring (`agent/pre-step`, surface ops) |
+| M2 | plan gate wiring, degradation paths, settings UI, Terminal-Bench 10-task cost pilot |
 | M3 | full 2×2 on SWE-bench Verified + τ²-bench (+ TB), optional Laya fine-tune |
 | M4 | Terminal-Bench cells, opencode transfer check, GLM model-swap check |
 | M5 | paper: Pareto + cache-waterfall figures, case studies, LaTeX draft |
 
-## Repository layout (planned, lands with M0)
+## Development
+
+```bash
+node --test --experimental-strip-types "packages/*/test/*.test.ts"   # 20 tests, zero deps, offline
+```
+
+Type-checking needs TypeScript ≥ 5.8 (`erasableSyntaxOnly`): `npm i -D typescript@^5.8 && npm run typecheck`.
+pnpm is the intended workspace manager; on Windows PowerShell call `pnpm.cmd` (the `.ps1` shim is blocked by
+the default execution policy).
+
+## Repository layout
 
 ```
 s1cap/
-  packages/core        # segmenter, association graph, assembler, plan gate (pure TS)
+  packages/core        # segmenter, association graph, assembler, plan gate, telemetry v1
   packages/s1-client   # /v1/systemone client + provider matrix
-  packages/proxy       # OpenAI-compatible middleware (portable across harnesses)
-  packages/dsh-plugin  # dsh-s1cap: first-class DeepSeek Harness plugin
-  bench/               # runners (swe-verified | terminal-bench | tau2), 2x2 cells, stats
-  docs/                # proposal, implementation brief, related-work dossier
-  paper/               # LaTeX
+  packages/proxy       # OpenAI-compatible middleware (M1)
+  packages/dsh-plugin  # dsh-s1cap: first-class DeepSeek Harness plugin (skeleton)
+  bench/               # cells/ presets; runners + stats land with M2
+  docs/                # proposal, implementation brief, related-work dossier, formulas
+  paper/               # LaTeX (M5)
 ```
 
 ## Documentation

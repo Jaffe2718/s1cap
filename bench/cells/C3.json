@@ -1,0 +1,16 @@
+{
+  "_comment": "C3: System-1 governance only — association-graph selection + plan gate, chronological layout.",
+  "cell": "C3",
+  "tas": { "on": false, "tMaxChars": 8000, "updatePolicy": "perTask" },
+  "recall": {
+    "tau": 0.55,
+    "depth": 2,
+    "fanout": 8,
+    "tier1": "embed",
+    "budgetRatio": 0.35,
+    "minRecalledShare": 0.25
+  },
+  "tail": { "k": 3 },
+  "planGate": { "on": true, "maxPlans": 3, "attemptCap": 2, "abstainConfidence": 0.5 },
+  "s1": { "provider": "jev", "timeoutMs": 2500, "questionsPerCall": 20 }
+}

@@ -1,0 +1,38 @@
+# dsh-s1cap — loader patch for DeepSeek Harness profiles.
+#
+# `dsh plugin --profile web add file:./packages/dsh-plugin` appends this bundle to
+# dsh.profile.bundles and composes the insert row below (plugin id: s1cap).
+# Every field mirrors packages/core AssemblyPolicy (docs/AGENT_BRIEF.md §4).
+- insert:
+    - id: s1cap
+      name: dsh-s1cap
+      config:
+        # 2x2 ablation cell: C1 baseline | C2 +TAS | C3 +S1 | C4 full
+        cell: C4
+        tas:
+          on: true
+          tMaxChars: 8000
+          # perTask keeps the state proxy byte-stable inside a task (cache-friendly)
+          updatePolicy: perTask
+        recall:
+          tau: 0.55
+          depth: 2
+          fanout: 8
+          # tier1: embed (local ANN) | s1 (noul batch) | off
+          tier1: embed
+          budgetRatio: 0.35
+          minRecalledShare: 0.25
+        tail:
+          k: 3
+        planGate:
+          on: true
+          maxPlans: 3
+          attemptCap: 2
+          abstainConfidence: 0.5
+        s1:
+          # jev | laya-serve | edgejev | kev | none
+          provider: jev
+          timeoutMs: 2500
+          questionsPerCall: 20
+        telemetry:
+          jsonl: ./.s1cap/telemetry.jsonl

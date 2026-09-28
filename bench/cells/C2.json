@@ -1,0 +1,16 @@
+{
+  "_comment": "C2: Trace-as-State ordering only (state proxy before history, x last); no System-1 selection.",
+  "cell": "C2",
+  "tas": { "on": true, "tMaxChars": 8000, "updatePolicy": "perTask" },
+  "recall": {
+    "tau": 0.55,
+    "depth": 2,
+    "fanout": 8,
+    "tier1": "off",
+    "budgetRatio": 0.35,
+    "minRecalledShare": 0.25
+  },
+  "tail": { "k": 3 },
+  "planGate": { "on": false, "maxPlans": 3, "attemptCap": 2, "abstainConfidence": 0.5 },
+  "s1": { "provider": "jev", "timeoutMs": 2500, "questionsPerCall": 20 }
+}

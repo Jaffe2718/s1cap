@@ -1,0 +1,13 @@
+{
+  "name": "@s1cap/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "S1CAP core: segmenter, association graph, assembler, plan gate, telemetry schema",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types \"test/*.test.ts\""
+  }
+}
