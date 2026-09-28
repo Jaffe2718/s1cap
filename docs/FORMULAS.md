@@ -197,7 +197,7 @@ Substituting the `deepseek-flash` peak prices:
 
 **Interpretation**: the higher the hit rate, the steeper the reorder cost (as $h \to 1$, 49 tokens must be saved per 1 invalidated token to break even) — this is exactly why H3 must be measured per call and why `updatePolicy` must be adjustable, and it is also the axis of the paper's conditional conclusion.
 
-### 6.1 Does selective context still hit the cache?
+### 6.1 Does a selected context still hit the cache?
 
 A selected context is a **subset** of the full history with chronology preserved, so the prompt differs
 from the previous one wherever a segment was dropped. Prefix caches match the longest common prefix of the

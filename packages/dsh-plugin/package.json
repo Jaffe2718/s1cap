@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "S1CAP for DeepSeek Harness: System-1-governed context lifecycle (association graph recall + Trace-as-State assembly + plan ranking)",
+  "description": "S1CAP (System-1 Context-Aware Planning) for DeepSeek Harness: which context an LLM agent sees, and in which order its own plans run",
   "author": "Yuanming Chen and LI Changzhe",
   "main": "lib/index.js",
   "scripts": {

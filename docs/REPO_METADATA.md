@@ -3,7 +3,12 @@
 Canonical public-facing metadata for **s1cap**. Keep every surface (GitHub About, npm, DeepSeek Harness
 Plugin Hub, paper artifact listings) in sync with this file.
 
-Paper title: *S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*
+Paper title: *S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents* (acronym: **S**ystem-**1** **C**ontext-**A**ware **P**lanning)
+
+Canonical expansion — use everywhere the acronym is spelled out: **S1CAP = System-1 Context-Aware
+Planning**: cheap decision models decide (1) *which context* an LLM agent sees and (2) *in which order*
+its own candidate plans run. Do not expand it as "Selective Context and Adaptive Planning" (retired with
+the 2026-09-28 naming erratum).
 
 Authors: **Yuanming Chen** · **LI Changzhe** (citation form: `Chen, Yuanming and LI, Changzhe`)
 

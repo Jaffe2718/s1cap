@@ -458,10 +458,11 @@ Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Ter
 
 ## 11. Paper outline (Technique paper)
 
-- **Title (LOCKED, user decision 2026-09-28):** *S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*
-  - In-paper expansion: "S1CAP (System-1 Selective Context and Adaptive Planning)".
+- **Title (revised 2026-09-28 after the naming erratum; earlier "Selective Context and Adaptive Planning" was wrong):** *S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents*
+  - In-paper expansion: **S1CAP (System-1 Context-Aware Planning)** — `S1` = System-1, `C-A-P` = Context-Aware Planning. Never expand it any other way in prose, slides or abstracts.
+  - The two interventions are **Context Awareness** (which segments the model sees, per LLM call) and **Plan Ordering** (the order the model's own plans run in); the earlier labels "Selective Context" / "Adaptive Planning" are retired with the old expansion.
   - Collision check 2026-09-28: no AI/ML/agent-space collision for "S1CAP" (web-search hits are biomedical false positives — "severe community-acquired pneumonia" literature). npm `s1cap` and `dsh-s1cap` both unregistered (404) — reserved for this project.
-  - Accepted residual flag (user decision): "Selective Context" shares its name with Xiao et al., EMNLP 2023 token-level compression (github.com/liyucheng09/Selective_Context). Mitigation is mandatory in paper §2: cite it and explicitly distinguish — token-level pruning for input compression vs segment-level association-graph recall for agent context lifecycle.
+  - Related work to keep citing in §2 (no longer a name collision): Xiao et al., EMNLP 2023 token-level compression (github.com/liyucheng09/Selective_Context) — distinguish token-level pruning for input compression from segment-level association-graph recall for the agent context lifecycle.
   - Repo/package naming (decided 2026-09-28): repo `s1cap`, npm proxy `s1cap`, DSH plugin `dsh-s1cap` — paper, repo and plugin names aligned. Repository: github.com/Jaffe2718/s1cap
 - 1 Intro: agent-loop context economics (cache-hit ≈ 50× cheaper than miss); Trace-as-State principle; the arrival of decision models.
 - 2 Related work: agent memory (MemGPT, Mem0, Zep, A-Mem, HippoRAG 1/2, MemOS, MESA, GAAMA, EMem); in-loop folding (AgentFold); order sensitivity (Lost in the Middle, Re2, Ok&Lee, CoRe, Racing Thoughts); prompt compression (LLMLingua 1/2); caching (Prompt Cache, CacheGen, Don't Break the Cache); routing/cascades (RouteLLM, FrugalGPT, Hybrid LLM); harness prior art (dsh-command-context-trim, pi-system-one, hermes-jev-skills, dsh-typesafe, laya-jev-GraphRAG); decision models (Jev, Laya, Kev, JevBench). Full verified list: `docs/RELATED_WORK.md`.

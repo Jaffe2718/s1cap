@@ -1,5 +1,5 @@
 /**
- * Cache economics for selective context (docs/FORMULAS.md §6).
+ * Cache economics for context selection (docs/FORMULAS.md §6).
  *
  * Prefix caching matches the longest common prefix of the prompts *we actually send*, so a
  * selected (subset) context still hits — as long as the assembled prefix is stable across

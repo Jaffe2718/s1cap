@@ -1,0 +1,48 @@
+# S1CAP **test profile** patch — throwaway, CLI-managed profile, never the desktop profile.
+#
+# The bundle ships inert (`disabled: true` and `config.enabled: false`, see
+# packages/dsh-plugin/cordis.patch.yml). This profile layer is the *only* place that flips both on,
+# so `/s1`, `/s1-ping` and `/s1-laya` exist here and nowhere else.
+#
+# Laya deliberately does NOT auto-start: activation stays side-effect free, and the local server is
+# started on demand with `/s1-laya start` (first start downloads the checkpoint if it is not cached).
+#
+# Reproduce:
+#   dsh --profile s1captest --from-default-profile web --dump-config
+#   dsh plugin --profile s1captest add link:E:/Coding/TypeScript/system_one/s1cap/packages/dsh-plugin
+#   copy this file to ~/.dsh/profiles/s1captest/cordis.patch.yml
+#   dsh --profile s1captest --port 19487 --no-open
+- id: s1cap
+  disabled: false
+  config:
+    # master switch: without this the plugin registers nothing at all
+    enabled: true
+    cell: C4
+    assemblyDeadlineMs: 250
+    s1:
+      # exactly one System-1 backend is active at a time; enabling Laya requires this provider
+      provider: laya-serve
+      timeoutMs: 2500
+      questionsPerCall: 20
+    laya:
+      enabled: true
+      autoStart: false
+      # resolved through `conda env list --json` — this machine keeps `ml` outside the conda root
+      condaEnv: ml
+      condaPath: D:\ProgramData\miniforge3\Scripts\conda.exe
+      host: 127.0.0.1
+      port: 8008
+      healthPath: /health
+      startupTimeoutMs: 600000
+      pollIntervalMs: 500
+      env:
+        # keep <= physical cores on this machine (8P + 4E)
+        LAYA_THREADS: "8"
+        LAYA_PRELOAD: "1"
+        # this network needs the mirror and must disable Xet (the mirror does not proxy its CAS)
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_HUB_DISABLE_XET: "1"
+    telemetry:
+      # two independent streams; identical paths are rejected by the plugin
+      sessionJsonl: ./.s1cap/session.jsonl
+      controlJsonl: ./.s1cap/control.jsonl

@@ -1,17 +1,17 @@
 # S1CAP
 
-**S**ystem-1 **S**elective **C**ontext and **A**daptive **P**lanning
+**S**ystem-**1** **C**ontext-**A**ware **P**lanning
 
 ![status](https://img.shields.io/badge/status-pre--alpha%20(M0)-orange) ![node](https://img.shields.io/badge/node-%3E%3D22.19-green) ![license](https://img.shields.io/badge/license-TBD-lightgrey)
 
-**S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents**
+**S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents**
 
 **Authors:** Yuanming Chen · LI Changzhe
 
 S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The S1CAP control layer intervenes at exactly **two points**:
 
-1. **Selective Context** *(context lifecycle)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide **what the LLM sees**, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`.
-2. **Adaptive Planning** *(decision priority)* — the LLM's candidate plans go directly to a second System-1 backend that scores them as a **choice question**; **PLAN GATE** normalizes those scores, orders the plans and caps attempts, and execution follows that order under a verification oracle, with unexecuted alternatives discarded on first success.
+1. **Context Awareness** *(what the model sees, per LLM call)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide which segments make it in, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`.
+2. **Plan Ordering** *(the context-aware part of planning)* — the LLM's candidate plans go directly to a second System-1 backend that scores them as a **choice question**; **PLAN GATE** normalizes those scores, orders the plans and caps attempts, and execution follows that order under a verification oracle, with unexecuted alternatives discarded on first success.
 
 Everything is **measured, not assumed**: solve rate, token cost split by prompt-cache **hit/miss** (the dominant cost lever — cache-hit tokens are ~50× cheaper than misses on DeepSeek), and wall time excluding approval waits.
 
@@ -149,7 +149,7 @@ Requirements: Node ≥ 22.19 (DSH plugin engines contract) · pnpm for the monor
 
 ## Name
 
-**S1CAP = System-1 Selective Context and Adaptive Planning.** Note: "Selective Context" is also the name of an unrelated EMNLP 2023 token-level compression work ([Xiao et al.](https://github.com/liyucheng09/Selective_Context)); S1CAP's mechanism is segment-level association-graph recall for agent context lifecycle — the paper cites and explicitly distinguishes the two.
+**S1CAP = System-1 Context-Aware Planning** — `S1` is the System-1 decision model, `C-A-P` is the context-aware planning it performs for an LLM agent. The control layer intervenes at two points: **① Context Awareness** (which segments the model sees) and **② Plan Ordering** (the order its own plans run in).
 
 ## Acknowledgments
 
@@ -157,11 +157,11 @@ Requirements: Node ≥ 22.19 (DSH plugin engines contract) · pnpm for the monor
 
 ## Citation
 
-Paper in preparation. Authors: **Yuanming Chen**, **LI Changzhe**. Title (locked): *S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*.
+Paper in preparation. Authors: **Yuanming Chen**, **LI Changzhe**. Title: *S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents* (revised 2026-09-28 after the naming erratum: the acronym expands to System-1 Context-Aware Planning).
 
 ```bibtex
 @misc{s1cap2026,
-  title  = {S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents},
+  title  = {S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents},
   author = {Chen, Yuanming and LI, Changzhe},
   year   = {2026},
   url    = {https://github.com/Jaffe2718/s1cap},

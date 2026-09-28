@@ -2,7 +2,7 @@
   "name": "s1cap",
   "version": "0.1.0",
   "private": true,
-  "description": "S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents",
+  "description": "S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents",
   "author": "Yuanming Chen and LI Changzhe",
   "type": "module",
   "engines": {

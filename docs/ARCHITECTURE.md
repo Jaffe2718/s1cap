@@ -90,8 +90,11 @@ flowchart LR
 
 ## 4. The two System-1 intervention points
 
-1. **Selective Context (context lifecycle)** — the association graph plus budgeted recall decides **what the model sees**; Trace-as-State ordering decides **in what order** (`[pinned | T | recalled | tail | x]`, `x` always last). The user-facing transcript is never rewritten.
-2. **Adaptive Planning (decision priority)** — the decision backend scores candidate plans; the gate orders them and caps attempts. Unexecuted alternatives are discarded on first verified success.
+The acronym reads **S**ystem-**1** **C**ontext-**A**ware **P**lanning: a System-1 decision model makes the
+agent's planning context-aware. It does that at exactly two points.
+
+1. **Context Awareness** *(what the model sees)* — the association graph plus budgeted recall decides which segments make it in; Trace-as-State ordering decides **in what order** (`[pinned | T | recalled | tail | x]`, `x` always last). The user-facing transcript is never rewritten.
+2. **Plan Ordering** *(which order the model's own plans run in)* — the decision backend scores the candidate plans the model proposed; the gate orders them and caps attempts. Unexecuted alternatives are discarded on first verified success.
 
 ## 5. Ablation mapping (cells ↔ modules)
 
