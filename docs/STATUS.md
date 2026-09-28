@@ -223,6 +223,44 @@ verified, it says so instead of guessing.
     plugin output.
   - **Regression check after the credential wiring:** a real round still reports `blocks.pinned = 684`, so N1
     holds.
+  - **Round 14 — the client-half contract, read verbatim out of a working third-party plugin (`dsh-pet`).** This
+    is the piece that made the panel look hard; it is now mechanical:
+
+    ```js
+    // the client half exports apply/inject/name and registers into named slots
+    const inject = [ /* … */ 'slots' /* … */ ];
+
+    ctx.slots.inject('settings.section', function* () {
+      yield ctx.slots.register(
+        {
+          name: 'settings.section',
+          id: 's1cap-config',        // unique within the slot
+          order: 30,                 // position among the sections
+          label: () => 'S1CAP',      // thunk = locale-aware
+          inject: () => ({ /* props handed to the component */ }),
+        },
+        S1CapConfigSection,          // the React component
+      );
+    });
+
+    module.exports = { apply, inject, name };
+
+    // and the file is a module the client loader picks up:
+    window.__ModuleLoader__.load({ id: 'dsh-s1cap', factory: makeFactory() });
+    ```
+
+    So: slot name **`settings.section`** (the overlay slot is `shell.overlay`), registration is
+    `ctx.slots.register(meta, Component)` inside `ctx.slots.inject(name, generator)`, and the client half loads
+    through `window.__ModuleLoader__`.
+    **One unknown left, and it is the only thing between here and a shipped panel:** how a component obtains
+    React when the half is authored as plain JavaScript (a bundler would have inlined it). Candidates to check
+    in this order: (1) an injectable client service (`inject: ['react']`-style), (2) a module the
+    `@deepseek-ai/dsh-client-runtime` injection exposes, (3) the loader's own registry. Answer it with
+    `--members`/`--grep` on `dsh-client-runtime` and `dsh-client-ui-slots`, then write
+    `packages/dsh-plugin/src/client.js` (built to `lib/client.js`), declare it in `package.json`
+    (`exports["./client"]` + `dsh.client = { inject: ['@deepseek-ai/dsh-client-runtime',
+    '@deepseek-ai/dsh-client-connection'], platform: 'web' }`) and call the credential store's `set`/`write`
+    with ref `s1cap/jev` on save.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
