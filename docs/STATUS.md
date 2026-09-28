@@ -38,6 +38,24 @@ verified, it says so instead of guessing.
 - [x] **N2** Association-graph upkeep on the asynchronous lane (createUpkeepQueue, session/event subscription, lag bound, /s1 stats)
 - [x] **N3** Replay-parity harness (packages/core/src/replay.ts, synthetic fixture, scripts/replay-tape.mjs, observation: tape recorder)
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
+  - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
+    `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
+    `'systemPrompt'` is added to `inject` (Cordis throws on uninjected access — that is how the earlier
+    `command` bug surfaced). Verified public API: `section()`, `context()`, `getSectionOrder()`,
+    `getContextOrder()`, `suppressRuntimeContext()`; the package also exports `renderPrompt`,
+    `renderContextSections`, `joinContextSections`, `renderContextSnapshot`. A real round proved the prompt is
+    **not** delivered as a `session/event` payload. Next: print the rest of the class
+    (`--dump dsh-system-prompt\lib\index.js 366`), take the render method, feed
+    `observer.setSystemPrompt(text)`. Acceptance: `blocks.pinned > 0` and
+    `prefixTokensStable === blocks.pinned` in a real round.
+  - **N4 detail (verified 2026-09-28, round 1):** DSH does **not** auto-render a config form for arbitrary
+    plugins — the settings "plugin inventory" section only reports configuration *status* — so the panel must
+    come from the plugin's own browser half: `exports["./client"]` → `lib/client.js`, `dsh.client =
+    { inject: ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-connection"], platform: "web" }`
+    (the `dsh-pet` precedent, verbatim), slots from `@deepseek-ai/dsh-client-ui-slots`, and the credential
+    service is registered as **`credentials`** (`super(ctx, "credentials")` in `dsh-credentials`). The client
+    half must be plain JavaScript built with `React.createElement` — JSX is not erasable syntax, so Node's
+    type stripper cannot process it and this repository ships no bundler.
 - [ ] **N5** `llm_call` telemetry so cost and cache-hit rate become real numbers
 - [ ] **N6** The actual context rewrite (`decision.messages`), feature-flagged per ablation cell
 
