@@ -14,6 +14,7 @@
 3. Never invent benchmark numbers, API fields, or library names. If you need one not present here, ask the human.
 4. The human owns the research decisions listed in §12. All other implementation decisions within this spec are yours.
 5. Telemetry schemas (§8) are **versioned contracts**: after the first benchmark run starts, changing a field name breaks comparability — add fields, never rename.
+6. **Control-plane isolation is a hard architectural rule** (docs/CONTROL_PLANE_LOGGING.md): System-1 calls, their telemetry and the backend's server logs go to a log stream that is *independent of the session event log*. No control-plane record may become a segment, enter the association graph, or appear in any LLM context or System-1 `state` — otherwise System-1 would end up scoring its own output and call count would compound per turn. Enforced in `packages/core/src/provenance.ts` (type families + runtime guards); do not relax it for convenience.
 
 ---
 
@@ -316,12 +317,18 @@ llm_call    { ts, sessionId, taskId?, cell, model, seq, promptTokens, cacheHitTo
               cacheMissTokens, outputTokens, reasoningTokens?, tReqOut, tFirstTok?, tEnd,
               netLatencyMs, approvalWaitMs, s1Assist: {calls, tokens, ms},
               flags: { tas, sel, planGate, degraded } }
-s1_call     { ts, provider, kind: noul|choice|score, questions, inputTokens, outputTokens, ms }
+s1_call     { ts, provider, role: assoc|decide, kind: noul|choice|score, questions,
+              inputTokens, outputTokens, ms, turnId?, scoredSegmentIds?, routedModel? }
 tool_call   { ts, tool, ms, ok, approvalWaitMs }
 assembly    { ts, seq, candidates, selected, bfsDepth, budgetUsed, blocks: {pinned,T,recalled,tail,x},
               cacheStability: {prefixTokensStable}, fallback? }
 plan_gate   { ts, plans[], probs[], confidence[], order, executed, verified, savedTokensEst }
 ```
+
+**Two sinks, never one.** The records above are the **control-plane log** (`control.jsonl`); the
+harness's own events — the only source of segments — are the **session log** (`session.jsonl`).
+The control log is never segmented, never indexed in the RG and never placed in a System-1 `state`
+(§0.6, docs/CONTROL_PLANE_LOGGING.md).
 
 ### 8.2 Approval-wait exclusion (user requirement)
 

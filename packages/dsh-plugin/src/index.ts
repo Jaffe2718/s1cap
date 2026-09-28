@@ -31,7 +31,12 @@ import {
 } from '@s1cap/laya-runtime';
 
 export interface S1CapPluginConfig extends AssemblyPolicy {
-  telemetry?: { jsonl?: string };
+  /**
+   * Two independent sinks (docs/CONTROL_PLANE_LOGGING.md): the session log is the only
+   * source of segments; the control-plane log records LLM/S1/tool calls and gate
+   * decisions and is never segmented or sent to System-1.
+   */
+  telemetry?: { sessionJsonl?: string; controlJsonl?: string };
   laya?: LayaConfig;
 }
 
@@ -121,6 +126,16 @@ export class LayaRuntime {
       logs: this.#server.logs,
     };
   }
+
+  /**
+   * Compact status for the command surface (docs/CONTROL_PLANE_LOGGING.md §5): the
+   * backend's raw stdout/stderr stays a bounded diagnostic buffer and is never handed
+   * to the agent as command output, so it cannot become a session segment.
+   */
+  summary(): Omit<LayaRuntimeState, 'logs'> & { logLines: number } {
+    const { logs, ...rest } = this.state();
+    return { ...rest, logLines: logs.length };
+  }
 }
 
 export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void {
@@ -174,18 +189,20 @@ export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): voi
         return result;
       }
       if (verb === 'start') {
-        const state = await runtime.start();
+        await runtime.start();
+        const state = runtime.summary();
         ctx.logger?.info(`[s1cap] laya start: ${JSON.stringify(state, null, 2)}`);
         return state;
       }
       if (verb === 'stop') {
-        const state = await runtime.stop();
+        await runtime.stop();
+        const state = runtime.summary();
         ctx.logger?.info(`[s1cap] laya stop: ${JSON.stringify(state, null, 2)}`);
         return state;
       }
-      const state = runtime.state();
+      const state = runtime.summary();
       ctx.logger?.info(
-        `[s1cap] laya status: ${state.status}${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` — ${state.error}` : ''}`,
+        `[s1cap] laya status: ${state.status}${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` - ${state.error}` : ''}${state.logLines ? ` [${state.logLines} diagnostic lines buffered]` : ''}`,
       );
       return state;
     },

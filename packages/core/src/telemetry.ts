@@ -61,6 +61,12 @@ export interface S1CallEvent {
   inputTokens: number;
   outputTokens: number;
   ms: number;
+  /** correlation metadata (ids only, never content) so cost joins to turns */
+  turnId?: string;
+  /** ids of the segments that were scored, for coverage analysis */
+  scoredSegmentIds?: string[];
+  /** checkpoint the backend actually routed to (e.g. Laya's `english` / `typed-decisions`) */
+  routedModel?: string;
 }
 
 export interface ToolCallEvent {

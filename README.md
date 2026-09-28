@@ -124,6 +124,7 @@ s1cap/
 | [docs/PROPOSAL.md](docs/PROPOSAL.md) | research proposal — supervisor / cooperator |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module reference: Mermaid diagram, connection semantics, parameters, implementation status |
 | [docs/LAYA_RUNTIME.md](docs/LAYA_RUNTIME.md) | local Laya backend: Python environment discovery, launcher, configuration keys |
+| [docs/CONTROL_PLANE_LOGGING.md](docs/CONTROL_PLANE_LOGGING.md) | control-plane isolation: two-log design and the invariants that keep System-1 from scoring its own output |
 | [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) | implementation brief for coding agents — verified facts base, interfaces, algorithms, milestones |
 | [docs/FORMULAS.md](docs/FORMULAS.md) | formal definitions and formula handbook (Markdown + LaTeX) |
 | [docs/RELATED_WORK.md](docs/RELATED_WORK.md) | verified related-work dossier + novelty audit |

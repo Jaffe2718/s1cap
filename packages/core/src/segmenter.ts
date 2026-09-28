@@ -4,6 +4,7 @@
  * chunked only when it exceeds the token budget (docs/AGENT_BRIEF.md §5.1).
  */
 import type { Segment, SegmentKind } from './types.ts';
+import { assertSessionEvent } from './provenance.ts';
 
 export const DEFAULT_CHUNK_TOKENS = 512;
 export const DEFAULT_CHUNK_OVERLAP = 64;
@@ -44,6 +45,10 @@ export interface SegmenterOptions {
 
 /** Split one session event into one or more segments. */
 export function segmentEvent(ev: RawEvent, opts: SegmenterOptions = {}): Segment[] {
+  // I2 (docs/CONTROL_PLANE_LOGGING.md): control-plane records — S1 calls, telemetry, the
+  // backend's own server logs — must never reach the segmenter. Segmenting them would make
+  // System-1 score its own output on the next turn.
+  assertSessionEvent(ev);
   const chunkTokens = opts.chunkTokens ?? DEFAULT_CHUNK_TOKENS;
   const overlapTokens = opts.overlapTokens ?? DEFAULT_CHUNK_OVERLAP;
   const base = {

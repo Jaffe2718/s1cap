@@ -56,5 +56,12 @@
           startupTimeoutMs: 120000
           pollIntervalMs: 500
           env: {}
+        # TWO SEPARATE STREAMS — never merge them (docs/CONTROL_PLANE_LOGGING.md).
+        # Control-plane records are never segmented, never indexed in the association
+        # graph and never sent to System-1 as state; otherwise System-1 would end up
+        # scoring its own log and the call count would compound every turn.
         telemetry:
-          jsonl: ./.s1cap/telemetry.jsonl
+          # harness events (append-only) — the only source of segments
+          sessionJsonl: ./.s1cap/session.jsonl
+          # LLM/S1/tool calls, assembly, gate decisions — humans and analysis only
+          controlJsonl: ./.s1cap/control.jsonl
