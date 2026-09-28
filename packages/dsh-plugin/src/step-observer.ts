@@ -27,6 +27,8 @@ export interface StepObserverOptions {
   sessionId?: string;
   onWarn?(message: string): void;
   onObserved?(summary: string): void;
+  /** diagnostic sink; the plugin writes it to the tape file */
+  onProbe?(line: Record<string, unknown>): void;
   /** M1 N3: record one tape line per call (opt-in; a tape contains session content) */
   onTape?(step: number, messages: readonly unknown[], systemPrompt: string | undefined): void;
   /** schedule one deferred upkeep tick; injected so tests can drive it by hand */
@@ -51,6 +53,8 @@ export interface StepObserverStats {
   sessionId: string;
   /** tokens of the rendered system prompt currently pinned (0 while none has been seen) */
   systemPromptTokens: number;
+  /** diagnostic lines emitted (probe mode) */
+  probes: number;
   unknownPartTypes: string[];
   unknownRoles: string[];
   graphSegments: number;
@@ -63,6 +67,8 @@ export interface StepObserver {
   observe(payload: unknown): void;
   /** `session/event`: capture the system prompt and queue the event for asynchronous upkeep */
   noteSessionEvent(event: unknown): void;
+  /** one bounded diagnostic line (written to the tape), used to read harness shapes we do not know yet */
+  probe(line: Record<string, unknown>): void;
   /** drain deferred upkeep now (tests, shutdown) */
   flushUpkeep(): number;
   stats(): StepObserverStats;
@@ -111,6 +117,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     lastObserveMs: 0,
     sessionId: opts.sessionId ?? 'unassigned',
     systemPromptTokens: 0,
+    probes: 0,
     unknownPartTypes: [],
     unknownRoles: [],
     graphSegments: 0,
@@ -129,6 +136,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   /** own monotonic sequence: the harness's session-log sequence is not exposed on the pre-step payload */
   let seq = 0;
   let announcedShapes = false;
+  let eventProbes = 0;
 
   const schedule =
     opts.schedule ??
@@ -247,6 +255,14 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           systemPromptTokens = estimateTokens(prompt);
           stats.systemPromptTokens = systemPromptTokens;
         }
+        if (eventProbes < 3) {
+          eventProbes += 1;
+          const shape =
+            typeof event === 'object' && event !== null
+              ? { type: (event as { type?: unknown }).type, keys: Object.keys(event as object).slice(0, 14) }
+              : { type: typeof event };
+          this.probe({ schema: 0, kind: 'session-event-probe', ...shape });
+        }
         queue.enqueue(event);
         if (!scheduled) {
           scheduled = true;
@@ -256,6 +272,11 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         stats.errors += 1;
         opts.onWarn?.(`session event ignored: ${String(err)}`);
       }
+    },
+
+    probe(line: Record<string, unknown>): void {
+      stats.probes += 1;
+      opts.onProbe?.(line);
     },
 
     flushUpkeep(): number {

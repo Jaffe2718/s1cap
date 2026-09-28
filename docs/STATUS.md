@@ -37,6 +37,17 @@ verified, it says so instead of guessing.
 - [~] **N1** Source the system prompt so the pinned block is not empty — plumbing done (systemPrompt input, extractSystemPrompt, pinned block, tests green); the *source* is still open: a real round proved the prompt is not delivered as a session event, so it must come from the dsh-system-prompt service
 - [x] **N2** Association-graph upkeep on the asynchronous lane (createUpkeepQueue, session/event subscription, lag bound, /s1 stats)
 - [x] **N3** Replay-parity harness (packages/core/src/replay.ts, synthetic fixture, scripts/replay-tape.mjs, observation: tape recorder)
+  - **Round 2 evidence (real session, tape mode):** the tape recorder was verified end to end. A real round
+    wrote exactly one step line:
+    `{"schema":1,"sessionId":"live","step":1,"messages":[{"content":[{"type":"text","text":"Reply with exactly: ok"}],"source":{"kind":"user"},"role":"user","id":"7845ba95-…"}]}`
+    which independently confirms two things: the recorder captures the offered messages in the verified DSH
+    vocabulary (`role` + parts tagged `type` + `source.kind`), and **step 1's message list carries no system
+    prompt at all** — so N1's source really is the `systemPrompt` service and nothing else.
+  - **Round 2 bug to fix first:** the runtime probe that was meant to introspect that service never wrote a
+    line, because the probe block sits *before* `observer` is assigned and its own failure path also throws.
+    Move the probe inside the `if (resolved.observation !== 'off')` branch (or write straight to `probeSink`
+    instead of through the observer), then re-run one tape round and read the
+    `{"schema":0,"kind":"service-probe"}` line to get the service's real method names.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
