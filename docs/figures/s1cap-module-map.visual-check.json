@@ -5,9 +5,9 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "E:\\Coding\\TypeScript\\system_one\\s1cap\\docs\\figures\\s1cap-technical-route.html",
-    "sha256": "926926dcdac5f72c1e871223ee8c4c9e4bc2fa14d92f4e07737189e2ca09e4ec",
-    "bytes": 713888
+    "path": "E:\\Coding\\TypeScript\\system_one\\s1cap\\docs\\figures\\s1cap-module-map.html",
+    "sha256": "0d850586cf9ee7315d678d4769a2fb7ad219a57fcf4a211055d04f23cc680df2",
+    "bytes": 713873
   },
   "state": {
     "detail": "read",
@@ -439,7 +439,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "light",
-        "file": "s1cap-technical-route.visual-check.1440x900.light.png"
+        "file": "s1cap-module-map.visual-check.1440x900.light.png"
       },
       {
         "width": 1440,
@@ -471,7 +471,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "dark",
-        "file": "s1cap-technical-route.visual-check.1440x900.dark.png"
+        "file": "s1cap-module-map.visual-check.1440x900.dark.png"
       },
       {
         "width": 2048,
@@ -503,7 +503,7 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "light",
-        "file": "s1cap-technical-route.visual-check.2048x1320.light.png"
+        "file": "s1cap-module-map.visual-check.2048x1320.light.png"
       },
       {
         "width": 2048,
@@ -535,13 +535,13 @@
         "viewerChromeActive": true,
         "viewerChromeOk": true,
         "resolvedTheme": "dark",
-        "file": "s1cap-technical-route.visual-check.2048x1320.dark.png"
+        "file": "s1cap-module-map.visual-check.2048x1320.dark.png"
       }
     ],
-    "contactSheet": "s1cap-technical-route.visual-check.html"
+    "contactSheet": "s1cap-module-map.visual-check.html"
   },
   "sidecars": {
-    "receipt": "s1cap-technical-route.visual-check.json",
-    "contactSheet": "s1cap-technical-route.visual-check.html"
+    "receipt": "s1cap-module-map.visual-check.json",
+    "contactSheet": "s1cap-module-map.visual-check.html"
   }
 }

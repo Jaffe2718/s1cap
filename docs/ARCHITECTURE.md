@@ -1,8 +1,11 @@
 # S1CAP Architecture — Modules and Connections
 
 Reference for the connections drawn in the interactive route diagram
-([`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html), source
-[`figures/s1cap-technical-route.json`](./figures/s1cap-technical-route.json), text form
+([`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html) — hand-authored SVG, because
+the automatic layout engine cannot express a self-loop together with a cross-lane asynchronous branch; the
+machine-validated, auto-laid-out module map lives beside it as
+[`figures/s1cap-module-map.html`](./figures/s1cap-module-map.html) with its specification
+[`figures/s1cap-module-map.json`](./figures/s1cap-module-map.json), and the text form of the flow is
 [`figures/s1cap-technical-route.mmd`](./figures/s1cap-technical-route.mmd)).
 
 Status legend: **✅ implemented (M0)** · **🔜 planned (M1/M2)** · **◻ external**.
