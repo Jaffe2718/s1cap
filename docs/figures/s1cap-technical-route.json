@@ -2,70 +2,70 @@
   "schema_version": 1,
   "diagram_type": "workflow",
   "meta": {
-    "title": "S1CAP 技术路线图",
-    "locale": "zh-CN",
+    "title": "S1CAP Technical Route",
+    "locale": "en",
     "quality_profile": "showcase",
     "viewBox": [1500, 590]
   },
   "lanes": [
-    { "id": "harness", "label": "Harness 会话层" },
-    { "id": "control", "label": "S1CAP 治理层" },
-    { "id": "s2", "label": "System-2 计算平面" },
-    { "id": "s1", "label": "System-1 后端" }
+    { "id": "harness", "label": "Harness Session" },
+    { "id": "control", "label": "S1CAP Control" },
+    { "id": "s2", "label": "System-2 Compute" },
+    { "id": "s1", "label": "System-1 Backends" }
   ],
   "phases": [
-    { "id": "phase-selective", "label": "① 选择性上下文", "fromCol": 0, "toCol": 4, "variant": "emphasis" },
-    { "id": "phase-planning", "label": "② 自适应规划", "fromCol": 5, "toCol": 5 }
+    { "id": "phase-selective", "label": "① Selective Context", "fromCol": 0, "toCol": 4, "variant": "emphasis" },
+    { "id": "phase-planning", "label": "② Planning", "fromCol": 5, "toCol": 5 }
   ],
   "mainPath": ["x-event", "segrec", "s1assoc", "rg", "assembler", "llm", "s1decide", "plangate", "execute"],
   "nodes": [
-    { "id": "x-event", "lane": "harness", "col": 0, "type": "external", "label": "会话新事件" },
-    { "id": "segrec", "lane": "control", "col": 0, "type": "backend", "label": "分片与召回" },
-    { "id": "rg", "lane": "control", "col": 2, "type": "database", "label": "关联图 RG" },
+    { "id": "x-event", "lane": "harness", "col": 0, "type": "external", "label": "Event Intake" },
+    { "id": "segrec", "lane": "control", "col": 0, "type": "backend", "label": "Segment/Recall" },
+    { "id": "rg", "lane": "control", "col": 2, "type": "database", "label": "Assoc. Graph" },
     { "id": "assembler", "lane": "control", "col": 4, "type": "backend", "label": "ASSEMBLER" },
     { "id": "llm", "lane": "s2", "col": 4, "type": "cloud", "label": "System-2 LLM" },
     { "id": "plangate", "lane": "control", "col": 5, "type": "backend", "label": "PLAN GATE" },
-    { "id": "execute", "lane": "harness", "col": 5, "type": "messagebus", "label": "执行 + 验证" },
-    { "id": "s1assoc", "lane": "s1", "col": 2, "type": "cloud", "label": "S1 关联计算后端", "width": 120 },
-    { "id": "s1decide", "lane": "s1", "col": 4, "type": "cloud", "label": "S1 决策后端", "width": 120 }
+    { "id": "execute", "lane": "harness", "col": 5, "type": "messagebus", "label": "Run + Verify" },
+    { "id": "s1assoc", "lane": "s1", "col": 2, "type": "cloud", "label": "S1 Assoc Backend", "width": 120 },
+    { "id": "s1decide", "lane": "s1", "col": 4, "type": "cloud", "label": "S1 Decide Backend", "width": 120 }
   ],
   "edges": [
-    { "id": "e1", "from": "x-event", "to": "segrec", "label": "x·工具·轨迹", "role": "main" },
-    { "id": "e2", "from": "segrec", "to": "s1assoc", "label": "新片段 × 历史片段", "role": "main" },
-    { "id": "e3", "from": "rg", "to": "assembler", "label": "BFS(τ,d)+预算", "role": "main" },
-    { "id": "e4", "from": "assembler", "to": "llm", "label": "TAS 注入", "role": "main", "variant": "emphasis", "labelAt": [500, 305] },
-    { "id": "e5", "from": "llm", "to": "s1decide", "label": "候选方案", "role": "main", "labelAt": [500, 429] },
-    { "id": "e7", "from": "plangate", "to": "execute", "label": "概率降序", "role": "main", "labelAt": [625, 181] },
-    { "id": "e8", "from": "execute", "to": "x-event", "label": "工具结果回流", "role": "return", "variant": "dashed" },
-    { "id": "e9", "from": "s1assoc", "to": "rg", "label": "扩充 RG·权重+衰减", "role": "main", "labelAt": [300, 367] },
-    { "id": "e10", "from": "s1decide", "to": "plangate", "label": "choice 打分", "role": "main" }
+    { "id": "e1", "from": "x-event", "to": "segrec", "label": "x · tools · traces", "role": "main" },
+    { "id": "e2", "from": "segrec", "to": "s1assoc", "label": "new × history segs", "role": "main" },
+    { "id": "e3", "from": "rg", "to": "assembler", "label": "BFS(τ,d) + budget", "role": "main" },
+    { "id": "e4", "from": "assembler", "to": "llm", "label": "TAS injection", "role": "main", "variant": "emphasis", "labelAt": [500, 305] },
+    { "id": "e5", "from": "llm", "to": "s1decide", "label": "candidate plans", "role": "main", "labelAt": [500, 429] },
+    { "id": "e7", "from": "plangate", "to": "execute", "label": "probability order", "role": "main", "labelAt": [625, 181] },
+    { "id": "e8", "from": "execute", "to": "x-event", "label": "tool results loop back", "role": "return", "variant": "dashed" },
+    { "id": "e9", "from": "s1assoc", "to": "rg", "label": "expand RG · weights + decay", "role": "main", "labelAt": [300, 367] },
+    { "id": "e10", "from": "s1decide", "to": "plangate", "label": "choice scores", "role": "main" }
   ],
   "cards": [
     {
       "dot": "violet",
-      "title": "模块作用（逐模块）",
+      "title": "Module Roles",
       "items": [
-        "会话新事件 — 会话事件源：用户输入 x · 工具结果 · 推理轨迹",
-        "分片与召回 — 消息级分片（非 token 级）+ tier-0/1 候选生成",
-        "S1 关联计算后端 — 新片段 × 历史片段关联打分（noul 批量问询）",
-        "关联图 RG — 加权边存储，w·exp(−Δt/λ) 时间衰减",
-        "ASSEMBLER — BFS(τ,d) 召回 + 预算背包 + TAS 布局组装",
-        "System-2 LLM — 被治理的宿主模型，只消费组装后的上下文",
-        "S1 决策后端 — 候选方案 choice 打分，输出概率与置信度",
-        "PLAN GATE — 概率归一 · 弃权判断 · 尝试上限 M=2 · 执行排序",
-        "执行 + 验证 — 按序尝试并验证，成功即弃备选（详见 docs/MODULES.zh.md）"
+        "Event Intake — user input x, tool results, traces",
+        "Segment/Recall — message-level segments + tier-0/1",
+        "S1 Assoc Backend — segment × history relevance (noul)",
+        "Assoc. Graph — weighted edges, w·exp(−Δt/λ) decay",
+        "ASSEMBLER — BFS(τ,d) + budget knapsack + TAS layout",
+        "System-2 LLM — governed host model, reads assembled ctx",
+        "S1 Decide Backend — plan choice scoring (p, confidence)",
+        "PLAN GATE — normalize · abstain · cap M=2 · order",
+        "Run + Verify — ordered attempts, drop rest on success"
       ]
     },
     {
       "dot": "emerald",
-      "title": "参与点 · 安全 · 测量",
+      "title": "Points · Safety · Measurement",
       "items": [
-        "① Selective Context：S1 关联计算 → 扩充 RG → TAS 组装",
-        "② Adaptive Planning：S1 打分 → 闸门排序 → 按序执行",
-        "surface 重写：模型视图重组，用户 transcript 恒时序",
-        "安全降级：概率归一 · state 预过滤 · S1 超时 → tier-0",
-        "遥测 JSONL v1：cache hit/miss · cost · latency · S1 调用",
-        "成功判据：完成率非劣（−2pp）+ 成本或时间 ≥10% 改善"
+        "① Selective Context: S1 assoc → RG → TAS assembly",
+        "② Adaptive Planning: S1 scoring → gate → execution",
+        "Surface rewrite: model view only; transcript intact",
+        "Safety: normalize · pre-filter · S1 timeout → tier-0",
+        "Telemetry JSONL v1: cache hit/miss · cost · latency",
+        "Success rule: non-inferior solve rate + ≥10% cost/time"
       ]
     }
   ]

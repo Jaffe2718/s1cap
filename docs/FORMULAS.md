@@ -1,0 +1,246 @@
+# S1CAP Formal Definitions and Formula Handbook
+
+**Version** 0.1 · 2026-09-28 · Companion to [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [AGENT_BRIEF.md](./AGENT_BRIEF.md) · [technical roadmap](./figures/s1cap-technical-route.html)
+
+This document uses Markdown + LaTeX to fix all mathematical definitions of S1CAP: segmentation and association graph, context assembly, Trace-as-State layout, plan gate, cost and cache break-even model, time model, statistical protocol. Parameter default values agree with [AGENT_BRIEF.md](./AGENT_BRIEF.md) §4-§5.
+
+---
+
+## 0. Notation
+
+| Symbol | Meaning | Default value |
+|---|---|---|
+| $\mathcal{L} = (e_1,\dots,e_T)$ | Session event log (append-only, human-recorded, never rewritten) | — |
+| $S=\{s_1,\dots,s_n\}$ | Segment set; $s_i=(\mathrm{id},\mathrm{kind},\mathrm{tok}_i,t_i,\mathrm{text}_i)$, $\mathrm{kind}\in\{$user, assistant, trace, toolCall, toolResult$\}$ | — |
+| $x$ | Current user input (condition/instruction) | — |
+| $P$ | Fixed prefix (system prompt + tool schema), never reordered | — |
+| $T_{\mathrm{state}}$ | Task-state proxy (serialized reasoning trace + task brief) | $\le 8\mathrm{k}$ chars |
+| $G_t=(V_t,E_t)$ | Association graph at time $t$ (association graph) | — |
+| $\tau,\ d,\ k$ | Association threshold / BFS depth / per-node expansion limit | $0.55,\ 2,\ 8$ |
+| $\lambda$ | Time decay constant (active session time) | 30 min |
+| $K$ | Number of recent-tail verbatim turns kept | 3 |
+| $B$ | Context token budget | §3.1 |
+| $\rho$ | Recall-block share of the budget | 0.35 |
+| $\mu$ | Minimum recall-block fill rate (fallback below this) | 0.25 |
+| $m,\ M$ | Number of candidate plans / attempt limit | $3,\ 2$ |
+| $c_{\min}$ | Plan gate abstention confidence | 0.5 |
+
+## 1. Segmentation (SEGMENTER)
+
+Message-level segmentation, **never split by token**:
+
+$$
+s_i =
+\begin{cases}
+\mathrm{chunk}(e_i,\,512,\,\mathrm{overlap}=64), & \mathrm{tok}(e_i) > 512 \\
+e_i, & \text{otherwise}
+\end{cases}
+$$
+
+The fixed set $P$ (system/tool schema) does not enter $S$. Each new segment $p$ triggers an association graph update (§2).
+
+## 2. Association graph (S1 association compute backend: two-tier recall + lazy verification)
+
+All S1 calls in this section are handled by the **S1 association compute backend**; it and the **S1 decision backend** of §4 are two independent roles (they may point to the same `/v1/systemone` deployment, or be deployed separately / use different models).
+
+**Tier-0 (metadata, free)**: same task label, same tool family, reply chain — fixed weight $w_0 = 0.6$.
+
+**Tier-1 (candidate generation)**: choose one of two (config option `recall.tier1`):
+
+$$
+\text{embed mode:}\quad C_1(p) = \operatorname*{top\text{-}k}_{h \in S}\ \cos\big(\phi(p),\phi(h)\big),\quad k=32
+$$
+
+$$
+\text{S1 mode:}\quad w_1(p,h) = P_{\mathrm{S1}}\big(\mathrm{rel}(p,h)\big),\quad \text{single } \texttt{/v1/systemone} \text{ parallel noul batch}
+$$
+
+**Tier-2 (lazy verification, only for edges that may enter assembly)**:
+
+$$
+w(p,h) =
+\begin{cases}
+f_{\mathrm{score}}(p,h) \in [0,1], & \mathrm{conf} \ge c_{\min} \\
+0.8\, w_1(p,h), & \text{abstain}
+\end{cases}
+$$
+
+**Time decay**:
+
+$$
+w_{\mathrm{eff}}(p,h) = w(p,h)\cdot \exp\!\big(-\Delta t/\lambda\big), \qquad \Delta t = t_{\mathrm{now}} - t_h
+$$
+
+**Per-turn complexity**: tier-1 ANN $O(\log n)$; tier-2 one parallel query call (state ingested once, $|C_1|$ questions evaluated in parallel); in total tens of ms locally, about $0.0006/turn$ in the cloud.
+
+## 3. Context assembly (ASSEMBLER)
+
+### 3.1 Budget
+
+$$
+B = C_{\max} - r_{\mathrm{out}} - f_{\mathrm{fixed}}
+$$
+
+where $C_{\max}$ is the model context window, $r_{\mathrm{out}}$ the output reserve (8192), $f_{\mathrm{fixed}}$ the fixed overhead (tool schema etc., measured by the token meter).
+
+### 3.2 Bounded BFS recall
+
+$$
+R_d(x) = \big\{ h \in S : \exists\, x \to \cdots \to h,\ \text{path length} \le d,\ \text{per edge } w_{\mathrm{eff}} > \tau,\ \text{per node expansion} \le k \big\}
+$$
+
+Worst case $O(k^d)$, truncated early by the budget.
+
+### 3.3 Budget knapsack (greedy)
+
+$$
+R' = \arg\max_{R \subseteq R_d(x)} \sum_{h \in R} w_{\mathrm{eff}}(x,h)
+\quad \text{s.t.} \quad
+\sum_{h \in R} \mathrm{tok}(h) \le \rho B
+$$
+
+Greedily packed in descending order of $w_{\mathrm{eff}}$; deduplicated by segment id against the recent-tail $K$ verbatim turns.
+
+### 3.4 Trace-as-State layout (factor TAS on)
+
+$$
+\mathrm{prompt} = \big[\,P \,\|\, T_{\mathrm{state}} \,\|\, \operatorname{sort}_{w_{\mathrm{eff}} \downarrow}(R') \,\|\, \mathrm{tail}_K \,\|\, x\,\big]
+$$
+
+Key points (from [arXiv:2609.02702](https://arxiv.org/abs/2609.02702)):
+
+- **State first**: $T_{\mathrm{state}}$ (the task state distilled from the trace) is placed before the history, so it is available before the context;
+- **Question at the tail**: $x$ is always last (measured in paper T: the model's behavior drifts when the question is not at the end);
+- **Strongest first**: recall blocks are ordered by descending $w_{\mathrm{eff}}$ plus the recent-tail verbatim turns at the end, forming a U-shaped attention layout (echoing *Lost in the Middle*, [arXiv:2307.03172](https://arxiv.org/abs/2307.03172));
+- **Cache-friendly**: $P$ is never reordered; $T_{\mathrm{state}}$ is appended at task boundaries (`updatePolicy: perTask` by default).
+
+**Memory separation theorem of paper T** (conditional state update task, state space $\mathcal{S}$, $b=\log_2|\mathcal{S}|$):
+
+$$
+\text{condition-first } [z,C]:\ \lceil b \rceil \text{ bits}
+\qquad\text{vs}\qquad
+\text{condition-last } [C,z]:\ \lceil b\cdot 2^{b} \rceil \text{ bits (worst case)}
+$$
+
+That is, the working memory demand of condition-first versus condition-last shows an **exponential separation** — this is the theoretical basis for the TAS layout.
+
+### 3.5 Fallback
+
+$$
+\sum_{h \in R'} \mathrm{tok}(h) < \mu \rho B \implies \text{degrade to recency window (chronological last-}N\text{), log a degradation event}
+$$
+
+## 4. Plan gate (S1 decision backend + PLAN GATE, factor S1G on)
+
+After the LLM produces a plan set $\Pi = \{\pi_1,\dots,\pi_m\}$ ($m \le 3$), it **hands the candidate plans directly to the S1 decision backend** for one choice scoring, retrieving probabilities $p_i$ and confidences $\mathrm{conf}_i$; **PLAN GATE consumes the scoring results** and is responsible only for normalization, the abstention decision, the attempt limit, and ordering. **Server-side normalization** (Jev does not guarantee $\sum p_i = 1$):
+
+$$
+\hat p_i = \frac{p_i}{\sum_j p_j}
+$$
+
+**Execution order**: try in descending order of $\hat p$, the verifier $V(\pi)$ decides success; on success the unexecuted plans are dropped; attempt limit $M=2$:
+
+$$
+\text{execute } \pi_{(1)}, \pi_{(2)}, \dots \quad \text{until } V(\pi_{(i)}) = \top \text{ or } i = M
+$$
+
+**Abstention**: $\max_i \mathrm{conf}_i < c_{\min} \Rightarrow$ keep the LLM's own order.
+
+**Expected savings** (let $q_{(i)}$ be each plan's independent success probability and $c(\pi_i)$ its cost):
+
+$$
+\mathbb{E}[\text{savings}] = \sum_{i=1}^{M} \Big(\prod_{j<i}(1-q_{(j)})\Big)\, q_{(i)} \sum_{j>i} c(\pi_j)
+$$
+
+Condition for positive gate benefit: the $\hat p$ ordering moves $q_{(i)}$ earlier (i.e. the S1 ordering is rank-correlated with the true success rate $> 0$).
+
+## 5. Cost model
+
+**Single LLM call**:
+
+$$
+c_{\mathrm{call}} = p_{\mathrm{hit}}\, n_{\mathrm{hit}} + p_{\mathrm{miss}}\, n_{\mathrm{miss}} + p_{\mathrm{out}}\, n_{\mathrm{out}}
+$$
+
+**Total task cost**:
+
+$$
+C_{\mathrm{task}} = \sum_{\text{calls}} c_{\mathrm{call}} + C_{\mathrm{S1}}, \qquad
+C_{\mathrm{S1}} = p_{\mathrm{s1}} \sum_{\text{S1 calls}} n_{\mathrm{in}}^{\mathrm{S1}} \quad (\text{Jev output is free})
+$$
+
+Reference prices (per 1M tokens, verified 2026-09-28): `deepseek-flash` peak $p_{\mathrm{hit}}=0.006,\ p_{\mathrm{miss}}=0.30,\ p_{\mathrm{out}}=1.20$ (halved off-peak); GLM-5.3 at $0.26/1.40/4.40$; Jev $p_{\mathrm{s1}}=0.042$ (input only).
+
+## 6. Cache break-even analysis (hypothesis H3)
+
+For a given turn: the selection mechanism deletes $\Delta_s$ tokens (a proportion $h$ of which could have hit the cache), and TAS reordering turns $\Delta_i$ tokens from hits into misses. The cost change relative to the baseline is then:
+
+$$
+\Delta C = \underbrace{-\Delta_s\big(h\,p_{\mathrm{hit}} + (1-h)\,p_{\mathrm{miss}}\big)}_{\text{selection saving}}
+\;+\; \underbrace{\Delta_i\big(p_{\mathrm{miss}} - p_{\mathrm{hit}}\big)}_{\text{reorder penalty}}
+$$
+
+**Break-even ratio**:
+
+$$
+\frac{\Delta_s}{\Delta_i} > \rho^{*} = \frac{p_{\mathrm{miss}} - p_{\mathrm{hit}}}{h\,p_{\mathrm{hit}} + (1-h)\,p_{\mathrm{miss}}}
+$$
+
+Substituting the `deepseek-flash` peak prices:
+
+| Baseline hit rate $h$ | $\rho^{*}$ (tokens that must be saved per 1 hit token invalidated) |
+|---|---|
+| 0.50 | 1.92 |
+| 0.75 | 3.70 |
+| 0.90 | 8.31 |
+| 1.00 | 49.0 |
+
+**Interpretation**: the higher the hit rate, the steeper the reorder cost (as $h \to 1$, 49 tokens must be saved per 1 invalidated token to break even) — this is exactly why H3 must be measured per call and why `updatePolicy` must be adjustable, and it is also the axis of the paper's conditional conclusion.
+
+## 7. Time model
+
+$$
+t_{\mathrm{net}} = t_{\mathrm{end}} - t_{\mathrm{req}} - t_{\mathrm{backoff}} - t_{\mathrm{approval}}, \qquad
+T_{\mathrm{task}} = \sum_{\text{turns}}\big(t_{\mathrm{LLM}}^{\mathrm{net}} + t_{\mathrm{S1}} + t_{\mathrm{tool}}\big)
+$$
+
+$t_{\mathrm{approval}}$ = approval wait (the benchmark zeroes it out with an auto-approval sandbox; interactive sessions deduct it from tool_call events). S1 local path $t_{\mathrm{S1}} \approx 15.6\,\mathrm{ms}$ (EdgeJev INT8, 4 vCPU).
+
+## 8. Statistical protocol (pre-registered)
+
+**Primary metric (completion rate, non-inferiority)** — paired McNemar exact test, C4 vs C1 discordant pairs $(b,c)$:
+
+$$
+p = \min\Big(1,\ 2\sum_{i=0}^{\min(b,c)} \binom{b+c}{i} 2^{-(b+c)}\Big) \le \alpha = 0.05
+\quad\text{and}\quad
+\hat\Delta_{\mathrm{solve}} = \mathrm{solve}_{C4} - \mathrm{solve}_{C1} \ge -\delta,\ \delta = 0.02
+$$
+
+**Secondary metrics (cost/time, superiority)** — paired bootstrap ($B=10^4$ task resamples):
+
+$$
+\bar\Delta = \overline{\mathrm{cost}}_{C4} - \overline{\mathrm{cost}}_{C1}, \qquad
+\mathrm{CI}_{95}\text{ (percentile)},\quad \text{success} \iff \mathrm{CI}_{95}^{\mathrm{upper}} < -0.10\,\overline{\mathrm{cost}}_{C1}
+$$
+
+**Multiple-comparison correction** (secondary family $K=2$: cost, time) — Holm step-down:
+
+$$
+p_{(i)}^{\mathrm{adj}} = \max_{j \le i}\Big\{\min\big(1,\ (K-j+1)\,p_{(j)}\big)\Big\}
+$$
+
+**Success criterion (overall)**: completion rate non-inferior **and** cost or time improved by ≥10% (CI excluding 0). The analysis script is frozen and committed before the full run.
+
+## 9. Complexity summary
+
+| Stage | Complexity | Note |
+|---|---|---|
+| tier-1 recall (embed ANN) | $O(\log n)$ / new segment | HNSW-style index |
+| tier-2 verification | 1 parallel query / turn | state ingested once |
+| BFS recall | $O(k^d)$ upper bound | budget truncation |
+| Assembly ordering | $O(\|R'\|\log\|R'\|)$ | per turn |
+| Telemetry | $O(1)$ / event | JSONL append |
+
+---
+
+*Citations and fact verification in [RELATED_WORK.md](./RELATED_WORK.md); implementation spec in [AGENT_BRIEF.md](./AGENT_BRIEF.md). Changes to parameter default values must be synced with the AGENT_BRIEF §4 configuration table.*

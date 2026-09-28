@@ -97,42 +97,48 @@ Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai
 
 Two planes:
 
-```
-                        ┌────────────────────────────────────────────────┐
-                        │            SYSTEM-1 CONTROL PLANE              │
-                        │  (S1CAP control — cheap, ~ms, $0.001/turn)     │
-                        │                                                │
-  session events ──────►│ SEGMENTER ──► RECALL (tier-0 meta + tier-1) ──►│
-  (append-only log)     │                    │                           │
-                        │                    ▼                           │
-                        │              RG STORE (SQLite)                 │
-                        │              association graph, decay,          │
-                        │              provenance                        │
-                        │                    │                           │
-                        │                    ▼                           │
-                        │   ASSEMBLER ◄──── agent/pre-step hook           │
-                        │   BFS-τ-d recall, budget knapsack,              │
-                        │   Trace-as-State layout, cache-aware prefix     │
-                        │                    │                           │
-                        │   PLAN GATE ◄─ assistant tool-call batch        │
-                        │   choice-question pre-ranking, attempt ctrl     │
-                        │                    │                           │
-                        │   TELEMETRY (JSONL, versioned)                 │
-                        └─────────┬──────────────────┬───────────────────┘
-                                  │ surface rewrite   │ /v1/systemone
-                                  ▼                  ▼
-                        ┌────────────────────────────────────────────────┐
-                        │      SYSTEM-2 COMPUTE PLANE (unmodified)       │
-                        │   host LLM (deepseek-flash / GLM-5.3) called   │
-                        │   by the harness (DSH / opencode / Claude Code) │
-                        └────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart LR
+  subgraph HAR["Harness session layer"]
+    XEV["Event intake<br/>user input x · tool results · reasoning traces"]
+    EXE["Run + verify<br/>ordered attempts, verification oracle"]
+  end
 
-- **SEGMENTER:** session event log → message-level segments (§5.1).
-- **RECALL:** two-tier candidate generation — tier-0 metadata (free, always on) + tier-1 (embedding ANN *or* S1 noul batch, config-selected).
-- **RG STORE:** nodes = segments; edges = verified relevance weights with recency decay; SQLite.
-- **ASSEMBLER:** bounded-BFS selection under token budget + Trace-as-State layout + cache-aware prefix policy; rewrites the *model view* only (DSH `surfaceOp`; proxy message rewrite elsewhere).
-- **PLAN GATE:** choice-question pre-ranking of LLM-proposed plans + attempt controller with verification oracle.
+  subgraph CTL["S1CAP control layer"]
+    SEG["Segment / Recall<br/>message-level segments, tier-0/1 candidates"]
+    RG["Association graph (RG)<br/>weighted edges, w·exp(-Δt/λ) decay"]
+    ASM["ASSEMBLER<br/>BFS(τ,d) recall + budget knapsack + TAS layout"]
+    GATE["PLAN GATE<br/>normalize · abstain · attempt cap M=2 · order"]
+  end
+
+  subgraph S2["System-2 compute plane"]
+    LLM["System-2 LLM<br/>governed host model (deepseek-flash)"]
+  end
+
+  subgraph S1["System-1 backends (POST /v1/systemone)"]
+    S1A["S1 association backend<br/>noul relevance scoring"]
+    S1D["S1 decision backend<br/>choice scoring"]
+  end
+
+  XEV -->|"x · tools · traces"| SEG
+  SEG -->|"new x history segments"| S1A
+  S1A -->|"expand RG · weights + decay"| RG
+  RG -->|"BFS(tau,d) + budget"| ASM
+  ASM -->|"TAS injection"| LLM
+  LLM -->|"candidate plans (m <= 3)"| S1D
+  S1D -->|"choice scores: p, confidence"| GATE
+  GATE -->|"probability order"| EXE
+  EXE -->|"tool results loop back"| XEV
+```
+- **Event intake:** the harness adapter turns session events (user input x, tool results, reasoning traces) into `RawEvent`s and writes the assembled context back to the **model view only** (§5.1, §6).
+- **Segment / Recall:** message-level segments (never token-level, per the project's segmentation rule) + two-tier candidate generation — tier-0 metadata (free, always on) and tier-1 (embedding ANN *or* S1 noul batch, config-selected).
+- **S1 association backend:** scores each new segment against history segments (batched `noul` questions, ≤ 20 per call) and returns the weights that expand the RG.
+- **Association graph (RG):** nodes = segments; edges = verified relevance weights with `w·exp(−Δt/λ)` recency decay; in-memory index at M0 (SQLite persistence lands with M1).
+- **ASSEMBLER:** bounded-BFS selection under the token budget + Trace-as-State layout + cache-aware prefix policy; rewrites the *model view* only (DSH `surfaceOp`; proxy message rewrite elsewhere).
+- **System-2 LLM:** the governed host model; consumes the assembled context and emits reasoning, candidate plans and tool calls.
+- **S1 decision backend:** scores the LLM's candidate plans in one `choice` call and returns probabilities + confidence.
+- **PLAN GATE:** consumes those scores — normalization, abstention, attempt cap `M=2`, execution ordering — and does **not** call System-1 itself.
+- **Run + verify:** executes plans in the gate's order against the benchmark-native verification oracle; drops the remaining plans on first success.
 - **TELEMETRY:** per-call JSONL (LLM/S1/tool), aggregates, cost model (§8).
 - **ADAPTERS:** DSH plugin (first-class) + OpenAI-compatible proxy (portable to opencode / Claude Code / pi).
 
@@ -153,7 +159,7 @@ s1cap/
     cells/              # the four ablation cell configs (JSON)
     stats/              # McNemar, paired bootstrap, effect sizes, Holm; frozen analysis script
     analysis/           # figure generation (Pareto, cache waterfall, case studies)
-  docs/                 # AGENT_BRIEF.md, PROPOSAL.zh.md, RELATED_WORK.md
+  docs/                 # PROPOSAL.md, ARCHITECTURE.md, AGENT_BRIEF.md, FORMULAS.md, RELATED_WORK.md, REPO_METADATA.md
   paper/                # LaTeX outline per §11
 ```
 
@@ -220,7 +226,7 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 - `assistant/message` → 1 segment; its reasoning trace (provider `reasoning_content`, when exposed `[VERIFY]` field name for deepseek-flash / GLM at M0) → separate `trace` segments.
 - `tool/result` → chunk to ≤512-token segments (keep head + tail; store chunk map for reconstitution).
 - `system/message` node 0 + tool schemas → **PINNED**, excluded from the graph.
-- Segment granularity is message-level — never token-level (the user's "语段" requirement).
+- Segment granularity is message-level — never token-level (the project's segmentation rule).
 
 ### 5.2 Association-graph construction (per new segment p) — S1 association backend
 
@@ -385,10 +391,10 @@ Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Ter
 ## 11. Paper outline (Technique paper)
 
 - **Title (LOCKED, user decision 2026-09-28):** *S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*
-  - In-paper expansion: "S1CAP (System-1 Selective Context and Adaptive Planning)". Chinese gloss: 《S1CAP：基于 System-1 模型的选择性上下文与自适应规划，面向高效 LLM Agent》
+  - In-paper expansion: "S1CAP (System-1 Selective Context and Adaptive Planning)".
   - Collision check 2026-09-28: no AI/ML/agent-space collision for "S1CAP" (web-search hits are biomedical false positives — "severe community-acquired pneumonia" literature). npm `s1cap` and `dsh-s1cap` both unregistered (404) — reserved for this project.
   - Accepted residual flag (user decision): "Selective Context" shares its name with Xiao et al., EMNLP 2023 token-level compression (github.com/liyucheng09/Selective_Context). Mitigation is mandatory in paper §2: cite it and explicitly distinguish — token-level pruning for input compression vs segment-level association-graph recall for agent context lifecycle.
-  - Repo/package naming (decided 2026-09-28): repo `s1cap`, npm proxy `s1cap`, DSH plugin `dsh-s1cap` — paper/repo/plugin三点一线。仓库已建：github.com/Jaffe2718/s1cap
+  - Repo/package naming (decided 2026-09-28): repo `s1cap`, npm proxy `s1cap`, DSH plugin `dsh-s1cap` — paper, repo and plugin names aligned. Repository: github.com/Jaffe2718/s1cap
 - 1 Intro: agent-loop context economics (cache-hit ≈ 50× cheaper than miss); Trace-as-State principle; the arrival of decision models.
 - 2 Related work: agent memory (MemGPT, Mem0, Zep, A-Mem, HippoRAG 1/2, MemOS, MESA, GAAMA, EMem); in-loop folding (AgentFold); order sensitivity (Lost in the Middle, Re2, Ok&Lee, CoRe, Racing Thoughts); prompt compression (LLMLingua 1/2); caching (Prompt Cache, CacheGen, Don't Break the Cache); routing/cascades (RouteLLM, FrugalGPT, Hybrid LLM); harness prior art (dsh-command-context-trim, pi-system-one, hermes-jev-skills, dsh-typesafe, laya-jev-GraphRAG); decision models (Jev, Laya, Kev, JevBench). Full verified list: `docs/RELATED_WORK.md`.
 - 3 Method: S1CAP control-layer architecture; association graph; TAS assembly; plan gate; cost model.

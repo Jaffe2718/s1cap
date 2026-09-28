@@ -23,7 +23,8 @@ function edge(from: string, to: string, w: number, verifiedAt = 1000): Associati
 // ---------------------------------------------------------------- segmenter
 
 test('estimateTokens: CJK counts ~1/char, latin ~4 chars/token', () => {
-  assert.equal(estimateTokens('你好世界'), 4);
+  // CJK branch of the estimator, exercised with Japanese kana (no Han characters)
+  assert.equal(estimateTokens('こんにちは'), 5);
   assert.equal(estimateTokens('abcdefgh'), 2);
   assert.ok(estimateTokens('hello world') >= 2);
 });

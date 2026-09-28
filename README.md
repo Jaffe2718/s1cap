@@ -4,14 +4,14 @@
 
 ![status](https://img.shields.io/badge/status-pre--alpha%20(M0)-orange) ![node](https://img.shields.io/badge/node-%3E%3D22.19-green) ![license](https://img.shields.io/badge/license-TBD-lightgrey)
 
-**S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents** · [中文说明](./README.zh-CN.md)
+**S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents**
 
 **Authors:** Yuanming Chen · LI Changzhe
 
 S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The S1CAP control layer intervenes at exactly **two points**:
 
 1. **Selective Context** *(context lifecycle)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide **what the LLM sees**, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`.
-2. **Adaptive Planning** *(decision priority)* — when the LLM proposes candidate plans, the same System-1 model scores them as a **choice question** with probabilities; plans execute in probability order under a verification oracle, and unexecuted alternatives are discarded on first success.
+2. **Adaptive Planning** *(decision priority)* — the LLM's candidate plans go directly to a second System-1 backend that scores them as a **choice question**; **PLAN GATE** normalizes those scores, orders the plans and caps attempts, and execution follows that order under a verification oracle, with unexecuted alternatives discarded on first success.
 
 Everything is **measured, not assumed**: solve rate, token cost split by prompt-cache **hit/miss** (the dominant cost lever — cache-hit tokens are ~50× cheaper than misses on DeepSeek), and wall time excluding approval waits.
 
@@ -25,26 +25,39 @@ Everything is **measured, not assumed**: solve rate, token cost split by prompt-
 
 ## Architecture
 
-```
-                      ┌──────────────────────────────────────────────────┐
-                      │           SYSTEM-1 CONTROL PLANE (S1CAP)         │
-                      │   SEGMENTER → two-tier RECALL → RG STORE (SQLite)│
-                      │   ASSEMBLER: BFS-τ-d recall, token budget,       │
-                      │   Trace-as-State layout, cache-aware prefix      │
-                      │   PLAN GATE: choice-question plan ranking        │
-                      │   TELEMETRY: versioned JSONL (cache hit/miss,    │
-                      │   cost, latency, S1 calls)                       │
-                      └──────────┬───────────────────────┬───────────────┘
-                 surface rewrite │ (DSH surfaceOp /      │ /v1/systemone
-                 (model view only│  proxy message edit)  │ (Jev | Laya | EdgeJev | Kev)
-                                 ▼                       ▼
-                      ┌──────────────────────────────────────────────────┐
-                      │   SYSTEM-2 COMPUTE PLANE (unmodified host LLM)  │
-                      │   deepseek-flash / GLM-5.3, called by DSH /     │
-                      │   opencode / Claude Code / pi                   │
-                      └──────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart LR
+  subgraph HAR["Harness session layer"]
+    XEV["Event intake<br/>user input x · tool results · reasoning traces"]
+    EXE["Run + verify<br/>ordered attempts, verification oracle"]
+  end
 
+  subgraph CTL["S1CAP control layer"]
+    SEG["Segment / Recall<br/>message-level segments, tier-0/1 candidates"]
+    RG["Association graph (RG)<br/>weighted edges, w·exp(-Δt/λ) decay"]
+    ASM["ASSEMBLER<br/>BFS(τ,d) recall + budget knapsack + TAS layout"]
+    GATE["PLAN GATE<br/>normalize · abstain · attempt cap M=2 · order"]
+  end
+
+  subgraph S2["System-2 compute plane"]
+    LLM["System-2 LLM<br/>governed host model (deepseek-flash)"]
+  end
+
+  subgraph S1["System-1 backends (POST /v1/systemone)"]
+    S1A["S1 association backend<br/>noul relevance scoring"]
+    S1D["S1 decision backend<br/>choice scoring"]
+  end
+
+  XEV -->|"x · tools · traces"| SEG
+  SEG -->|"new x history segments"| S1A
+  S1A -->|"expand RG · weights + decay"| RG
+  RG -->|"BFS(tau,d) + budget"| ASM
+  ASM -->|"TAS injection"| LLM
+  LLM -->|"candidate plans (m <= 3)"| S1D
+  S1D -->|"choice scores: p, confidence"| GATE
+  GATE -->|"probability order"| EXE
+  EXE -->|"tool results loop back"| XEV
+```
 The user-facing transcript stays **strictly chronological**; only the model view is reassembled (native in DSH's session/surface split, replicated by the portable proxy elsewhere).
 
 ## Evaluation design (pre-registered)
@@ -102,9 +115,12 @@ s1cap/
 
 | doc | audience |
 |---|---|
-| [docs/PROPOSAL.zh.md](docs/PROPOSAL.zh.md) | research proposal — supervisor / cooperator (Chinese) |
+| [docs/PROPOSAL.md](docs/PROPOSAL.md) | research proposal — supervisor / cooperator |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module reference: Mermaid diagram, connection semantics, parameters, implementation status |
 | [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) | implementation brief for coding agents — verified facts base, interfaces, algorithms, milestones |
+| [docs/FORMULAS.md](docs/FORMULAS.md) | formal definitions and formula handbook (Markdown + LaTeX) |
 | [docs/RELATED_WORK.md](docs/RELATED_WORK.md) | verified related-work dossier + novelty audit |
+| [docs/REPO_METADATA.md](docs/REPO_METADATA.md) | canonical repo description, topics, keywords |
 
 ## Environment
 
