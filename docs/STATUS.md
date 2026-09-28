@@ -200,6 +200,29 @@ verified, it says so instead of guessing.
     `--members dsh-credentials\lib\index.js` is already done and the missing piece is the registry type the
     service exposes. Then: `packages/dsh-plugin/src/credentials.ts` reads `s1.apiKey` from that store when the
     config leaves it empty (env vars stay the fallback), and the browser half writes it.
+  - **Round 13 — the credential service is reachable, and its write API is known.** A real round reported:
+
+    ```json
+    {"schema":0,"kind":"credential","result":"not found","ref":"s1cap/jev",
+     "tried":["resolve","readRecord","describeRecord"],
+     "available":["constructor","isClosed","inherited","dotenvFallback","resolve","describe","set","unset",
+      "readRecord","describeRecord","listRecords","modifyRecord","deleteRecord","enqueue","queueRefresh",
+      "write","assertUnshadowed","loadInitial","migrateFlatDocument","refresh","reconcileFromDisk",
+      "changedRefs","changedRecords"]}
+    ```
+
+    So `ctx.get('credentials')` **does** hand the plugin the store, the read entry points are reachable (they
+    answered "not found" because no key has been entered yet — the correct answer, not a failure), and the write
+    path is `set` / `write` on the same object. `packages/dsh-plugin/src/credentials.ts` implements the read with
+    entry-point probing and never leaks the secret into a report (three tests); the host half is therefore done.
+    **What remains for N4 is only the browser half** (the panel): declare `exports["./client"]` → `lib/client.js`
+    plus `dsh.client` (inject client-runtime + client-connection, platform web, copied from the `dsh-pet`
+    precedent), write the panel in plain JavaScript with `React.createElement`, and on save call
+    `set`/`write` with the ref `s1cap/jev`. Acceptance: the section appears in the sandbox web profile's Settings,
+    a key typed there survives a restart, and no plaintext key appears in the control log, the session log or the
+    plugin output.
+  - **Regression check after the credential wiring:** a real round still reports `blocks.pinned = 684`, so N1
+    holds.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once

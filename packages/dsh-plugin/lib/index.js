@@ -35,6 +35,7 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.js';
 import { primeSystemPrompt } from './system-prompt.js';
+import { readCredential } from './credentials.js';
 import { createStepObserver } from './step-observer.js';
                                                        
 
@@ -300,6 +301,15 @@ export class LayaRuntime {
 let primeOnce                                   ;
 
 /**
+ * Where the System-1 credential lives. The settings panel writes `<scope>/<id>`, and the host reads it back
+ * through the credentials service when the config leaves `s1.apiKey` empty (env vars remain the headless
+ * fallback). The key itself is only ever surfaced through `redactKey()`.
+ */
+const CREDENTIAL_REF = 's1cap/jev';
+let credentialKey                    ;
+let credentialSource = 'config-or-env';
+
+/**
  * The session-event lane is wired at the very top of `applyInner`, before anything that can throw, so an
  * activation failure later in the function cannot silently cost us the lane. These three live at module level
  * because the observer and the tape sink do not exist yet when the subscription is registered.
@@ -560,14 +570,27 @@ function applyInner(ctx               , raw                             )       
 
     // The service lookup happens inside the thunk, not here: at activation time the systemPrompt service may
     // not be provided yet, so it is resolved on the first step instead (see preStepMiddleware).
-    primeOnce = () =>
-      primeSystemPrompt({
+    primeOnce = async () => {
+      // N4 host half, first step: ask the credential service for the key the user is meant to type into the
+      // settings panel. The read is written to the tape either way, so the next real round names the entry
+      // point that actually answers instead of us guessing one.
+      const credential = await readCredential({
+        ref: CREDENTIAL_REF,
+        service: (ctx                                       ).get?.('credentials'),
+        report: (line) => probeSink?.write(JSON.stringify(line) + '\n'),
+      });
+      if (credential.key !== undefined) {
+        credentialKey = credential.key;
+        credentialSource = `credentials:${credential.method ?? 'unknown'}`;
+      }
+      await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
         observer,
         onText: (text, tokens) => observer.setSystemPrompt(text, tokens),
         write: (line) => probeSink?.write(line),
         onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
       });
+    };
 
     // Wire the lane that was registered at the top of applyInner: hand it the observer, the tape sink, and the
     // events that arrived before either existed.
