@@ -13,13 +13,13 @@ importers:
   packages/dsh-plugin:
     dependencies:
       '@s1cap/core':
-        specifier: workspace:*
+        specifier: file:../core
         version: link:../core
       '@s1cap/laya-runtime':
-        specifier: workspace:*
+        specifier: file:../laya-runtime
         version: link:../laya-runtime
       '@s1cap/s1-client':
-        specifier: workspace:*
+        specifier: file:../s1-client
         version: link:../s1-client
     devDependencies:
       '@deepseek-ai/cordis':

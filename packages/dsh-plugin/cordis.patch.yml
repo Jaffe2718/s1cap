@@ -1,12 +1,20 @@
 # dsh-s1cap — loader patch for DeepSeek Harness profiles.
 #
-# `dsh plugin --profile web add file:./packages/dsh-plugin` appends this bundle to
+# `dsh plugin --profile <p> add link:./packages/dsh-plugin` appends this bundle to
 # dsh.profile.bundles and composes the insert row below (plugin id: s1cap).
 # Every field mirrors packages/core AssemblyPolicy (docs/AGENT_BRIEF.md §4).
+#
+# SAFETY: the row ships disabled and the plugin ships inert (`enabled: false`), so registering the
+# bundle changes nothing by itself. Flip `disabled` and `enabled` together, and only after a sandbox
+# profile has shown the plugin activating cleanly — an unverified lifecycle hook once killed a live
+# round (docs/AGENT_BRIEF.md §1.8).
 - insert:
     - id: s1cap
       name: dsh-s1cap
+      disabled: true
       config:
+        # master switch: anything but true keeps apply() from registering hooks, commands or clients
+        enabled: false
         # 2x2 ablation cell: C1 baseline | C2 +TAS | C3 +S1 | C4 full
         cell: C4
         # Who owns the agent loop. Literal, not a toggle: the harness stops when the model

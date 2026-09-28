@@ -120,8 +120,31 @@ Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai
 - Cheap verification without touching a live profile: `dsh --profile <p> --dump-config` composes the whole
   stack (including `--patch` overlays) and exits; `dsh --profile <p> --port <n> --no-open` boots an isolated
   instance for an end-to-end load test, and its `dsh: warning: … did not activate` line is the pass/fail signal.
-- **Unverified:** agent lifecycle hooks. No installed plugin uses `agent/pre-step` or `agent/request-error`;
-  Cordis accepts the names, but whether DSH emits them is still open.
+- **`agent/pre-step` is a waterfall middleware — verified by reading `dsh-agent`'s packaged source**
+  (through Electron-as-Node, because the code lives in `app.asar`; `scripts/scan-dsh-asar.cjs`):
+
+  ```js
+  agentCtx.on("agent/pre-step", async ({ agent, messages, signal, step }, next) => {
+    const decision = await next();
+    if (decision.kind === "reject" || signal.aborted) return decision;
+    return { ...decision, messages: [...] };
+  }, { prepend: true });
+  ```
+
+  A handler **must** `await next()` and return that decision (optionally modified) — the harness reads
+  `decision.kind` and `decision.messages` on the result. `agent/request-error` also exists, but its contract
+  has not been read yet, so it stays unregistered.
+
+- **Post-mortem (2026-09-28).** An earlier revision registered `ctx.on('agent/pre-step', () => undefined)`:
+  a stub that ignored `next` and returned `undefined`. In the desktop app that killed the round with
+  `Cannot read properties of undefined (reading 'kind')`. Three rules follow, enforced in code and tests:
+  1. never register a lifecycle hook whose contract has not been read from the packaged source;
+  2. `apply()` is wrapped so any throw is logged and the plugin stays inert — a half-built governor must
+     never be able to break the harness;
+  3. the plugin ships **inert** (`config.enabled !== true` → no hooks, no commands, no client) and the bundle
+     row ships `disabled: true`, so registering the bundle provably changes nothing.
+  Corollary for this repo: after any operation in a DSH profile, re-run `pnpm install` in the repository —
+  a profile install can drop the workspace junctions that the plugin's tests resolve `@s1cap/*` through.
 
 ---
 

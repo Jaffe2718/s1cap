@@ -10,6 +10,7 @@ interface Harness {
   warns: string[];
   commands: Map<string, (arg: { rawInput?: string }) => unknown>;
   events: string[];
+  handlers: Map<string, (...args: unknown[]) => unknown>;
 }
 
 function harness(): Harness {
@@ -17,9 +18,11 @@ function harness(): Harness {
   const warns: string[] = [];
   const commands = new Map<string, (arg: { rawInput?: string }) => unknown>();
   const events: string[] = [];
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ctx: PluginContext = {
-    on(event) {
+    on(event, handler) {
       events.push(event);
+      handlers.set(event, handler as (...args: unknown[]) => unknown);
     },
     effect(fn) {
       return fn();
@@ -34,7 +37,7 @@ function harness(): Harness {
       warn: (m: string) => warns.push(m),
     },
   };
-  return { ctx, logs, warns, commands, events };
+  return { ctx, logs, warns, commands, events, handlers };
 }
 
 /** A Laya block that never spawns anything (autoStart off) and needs no probe. */
@@ -83,9 +86,9 @@ test('merging the two telemetry streams is refused and the defaults are restored
 
 test('apply() registers the hooks and commands, and a conflict degrades to observation mode', () => {
   const h = harness();
-  apply(h.ctx, { s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: layaIdle });
+  apply(h.ctx, { enabled: true, s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: layaIdle });
 
-  assert.deepEqual(h.events, ['agent/pre-step', 'agent/request-error']);
+  assert.deepEqual(h.events, ['agent/pre-step'], 'agent/request-error stays unregistered until its contract is verified');
   assert.deepEqual([...h.commands.keys()], ['s1', 's1-ping', 's1-laya']);
   assert.ok(h.logs.some((l) => l.includes('command registered: /s1')));
   assert.ok(h.warns.some((w) => w.includes('only one S1 backend')));
@@ -108,7 +111,7 @@ test('apply() registers the hooks and commands, and a conflict degrades to obser
 
 test('apply() reports the resolved backend without leaking the key, and ping is honest', async () => {
   const h = harness();
-  apply(h.ctx, { s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: { enabled: false } });
+  apply(h.ctx, { enabled: true, s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: { enabled: false } });
 
   const info = h.logs.join('\n');
   assert.match(info, /provider=jev \(cloud\)/);
@@ -124,7 +127,7 @@ test('apply() reports the resolved backend without leaking the key, and ping is 
   assert.equal(typeof ping.ok, 'boolean', 'ping reports reachability as a boolean');
 
   const none = harness();
-  apply(none.ctx, { s1: { provider: 'none' } });
+  apply(none.ctx, { enabled: true, s1: { provider: 'none' } });
   const idle = (await none.commands.get('s1-ping')?.({})) as { ok: boolean; reason: string };
   assert.equal(idle.ok, false);
   assert.match(idle.reason, /provider=none/);
@@ -133,6 +136,7 @@ test('apply() reports the resolved backend without leaking the key, and ping is 
 test('every config problem is reported as a warning and the session keeps its defaults', () => {
   const h = harness();
   apply(h.ctx, {
+    enabled: true,
     cell: 'C9' as unknown as 'C4',
     termination: 'harness-owned' as unknown as 'model-owned',
     recall: { tau: 3 } as never,
@@ -146,4 +150,74 @@ test('every config problem is reported as a warning and the session keeps its de
   const status = h.commands.get('s1')?.({}) as { recall: { tau: number }; cell: string };
   assert.equal(status.recall.tau, 0.55, 'invalid value falls back to the default');
   assert.equal(status.cell, 'C4');
+});
+
+test('the plugin is inert unless explicitly enabled', () => {
+  const off = harness();
+  apply(off.ctx, undefined);
+  assert.deepEqual(off.events, [], 'no hooks without enabled: true');
+  assert.equal(off.commands.size, 0, 'no commands without enabled: true');
+  assert.ok(off.logs.some((l) => l.includes('not enabled')));
+
+  const explicit = harness();
+  apply(explicit.ctx, { enabled: false, s1: { provider: 'jev' } });
+  assert.deepEqual(explicit.events, []);
+  assert.equal(explicit.commands.size, 0);
+});
+
+test('the pre-step middleware honours the waterfall contract (call next once, return its decision)', async () => {
+  const h = harness();
+  apply(h.ctx, { enabled: true, s1: { provider: 'none' } });
+  const handler = h.handlers.get('agent/pre-step');
+  assert.equal(typeof handler, 'function');
+
+  const decision = { kind: 'accept', messages: [{ kind: 'user' }] };
+  let calls = 0;
+  const returned = await handler?.({ agent: {}, messages: [], signal: {}, step: 1 }, async () => {
+    calls += 1;
+    return decision;
+  });
+  assert.equal(calls, 1, 'next() must be awaited exactly once');
+  assert.equal(returned, decision, 'the decision must be returned unchanged (identity preserved)');
+
+  // a harness error must propagate untouched, never be swallowed by our bookkeeping
+  await assert.rejects(
+    async () => handler?.({}, async () => {
+      throw new Error('harness blew up');
+    }),
+    /harness blew up/,
+  );
+});
+
+test('activation can never throw: a hostile context leaves the plugin inert and the harness alive', () => {
+  const logs: string[] = [];
+  const hostile = {
+    on() {
+      throw new Error('no event service');
+    },
+    commands: {
+      register() {
+        throw new Error('no command service');
+      },
+    },
+    logger: { warn: (m: string) => logs.push(m), info: () => undefined },
+  } as unknown as PluginContext;
+
+  assert.doesNotThrow(() => apply(hostile, { enabled: true, s1: { provider: 'jev' } }));
+  assert.ok(logs.some((l) => l.includes('activation failed')), 'the failure is reported, not thrown');
+
+  const brokenLogger = {
+    on() {
+      throw new Error('boom');
+    },
+    logger: {
+      warn() {
+        throw new Error('logger also broken');
+      },
+      info() {
+        throw new Error('logger also broken');
+      },
+    },
+  } as unknown as PluginContext;
+  assert.doesNotThrow(() => apply(brokenLogger, { enabled: true }));
 });

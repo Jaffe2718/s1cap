@@ -34,6 +34,8 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
 import type { ResolvedS1Backend } from '@s1cap/s1-client';
 
 export interface S1CapPluginConfig extends AssemblyPolicy {
+  /** master switch: anything other than true keeps the plugin completely inert (default false) */
+  enabled?: boolean;
   /**
    * Two independent sinks (docs/CONTROL_PLANE_LOGGING.md): the session log is the only
    * source of segments; the control-plane log records LLM/S1/tool calls and gate
@@ -69,7 +71,7 @@ export interface ResolvedPluginConfig {
  */
 export function resolvePluginConfig(raw?: Partial<S1CapPluginConfig>): ResolvedPluginConfig {
   const source = (raw ?? {}) as Record<string, unknown>;
-  const policy = validatePolicy(source, ['laya', 'telemetry']);
+  const policy = validatePolicy(source, ['laya', 'telemetry', 'enabled']);
   const laya = validateLayaConfig(source.laya);
 
   const telemetryErrors: string[] = [];
@@ -241,7 +243,63 @@ export class LayaRuntime {
   }
 }
 
+/**
+ * `agent/pre-step` is a **waterfall middleware**, verified against `dsh-agent`'s packaged source:
+ *
+ *   agentCtx.on('agent/pre-step', async ({ agent, messages, signal, step }, next) => {
+ *     const decision = await next();
+ *     if (decision.kind === 'reject' || signal.aborted) return decision;
+ *     return { ...decision, messages: [...] };
+ *   }, { prepend: true });
+ *
+ * The contract is absolute: a handler MUST await `next()` and return that decision, optionally
+ * modified. Returning `undefined` — which an earlier stub of this plugin did — makes the harness read
+ * `decision.kind` of nothing and kills the round:
+ * `Cannot read properties of undefined (reading 'kind')`.
+ *
+ * This wrapper therefore (1) calls `next()` first so harness errors propagate unchanged and are never
+ * swallowed, (2) returns the decision untouched until M1 actually assembles context, and (3) isolates
+ * its own bookkeeping: a failure in our code is logged and cannot affect the round.
+ */
+export function preStepMiddleware(
+  ctx: PluginContext,
+): (payload: unknown, next: () => Promise<unknown>) => Promise<unknown> {
+  return async (_payload, next) => {
+    const decision = await next();
+    try {
+      // M1 observes the step here (segment new events, update the RG asynchronously).
+      // Nothing is rewritten yet: S1CAP stays inert until replay-correctness tests exist.
+      void ctx;
+    } catch (err) {
+      ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
+    }
+    return decision;
+  };
+}
+
+/**
+ * Activation is wrapped so a half-built governor can never break the harness: any throw is logged and
+ * the plugin stays inert. `enabled` defaults to false, so merely registering the bundle changes nothing
+ * — no hooks, no commands, no System-1 calls.
+ */
 export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void {
+  try {
+    applyInner(ctx, raw);
+  } catch (err) {
+    try {
+      ctx.logger?.warn?.(`[s1cap] activation failed; plugin stays inert: ${String(err)}`);
+    } catch {
+      // nothing left to do — never rethrow from here
+    }
+  }
+}
+
+function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void {
+  const source = (raw ?? {}) as Record<string, unknown>;
+  if (source.enabled !== true) {
+    ctx.logger?.info?.('[s1cap] not enabled (config.enabled !== true) — inert: no hooks, no commands, no System-1 calls');
+    return;
+  }
   const resolved = resolvePluginConfig(raw);
   const config = resolved.config;
   const layaConfig = config.laya ?? defaultLayaConfig();
@@ -287,15 +345,10 @@ export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): voi
       .catch((err: unknown) => ctx.logger?.warn(`[s1cap] laya startup failed: ${String(err)}`));
   }
 
-  ctx.on('agent/pre-step', () => {
-    // M1: assemble(input) from @s1cap/core and emit surface replace ops.
-    return undefined;
-  });
-
-  ctx.on('agent/request-error', () => {
-    // M1: degradation path — tier-0 metadata + recency window, then request a retry.
-    return undefined;
-  });
+  // The only lifecycle hook we register, in the verified middleware shape. `agent/request-error`
+  // is deliberately NOT registered: its contract is unverified, and an unverified hook is exactly
+  // what took a round down before.
+  ctx.on('agent/pre-step', preStepMiddleware(ctx));
 
   // The `/s1` surface. Registration follows the verified Cordis shape:
   // is ctx.effect(() => ctx.commands.register({ name, description, input, handler })) - all verified
