@@ -48,6 +48,20 @@ verified, it says so instead of guessing.
     Move the probe inside the `if (resolved.observation !== 'off')` branch (or write straight to `probeSink`
     instead of through the observer), then re-run one tape round and read the
     `{"schema":0,"kind":"service-probe"}` line to get the service's real method names.
+  - **Round 3 (runtime introspection, real round):** the service is reachable **without touching `inject`** —
+    `ctx.get('systemPrompt')` returns it (verified: `service: "object"`). Its own methods are
+    `section`, `getSectionOrder`, `getContextOrder`, `context`, `suppressRuntimeContext`, `tools`, `variable`
+    and **`assemble`** — no `render`. Calling `assemble()` with no arguments returns an object with **no
+    enumerable own keys** and no `text`/`prompt` field, so either it needs arguments/scoping or the text sits
+    behind getters. **Next action (precise):** dump the `assemble(` definition out of the packaged source
+    (`& $app --expose-internals scripts/scan-dsh-asar.cjs --dump dsh-system-prompt\lib\index.js 366` and read
+    around it) to learn its arguments; then either call it with those arguments, or add
+    `@deepseek-ai/dsh-system-prompt` as a plugin dependency and render with the package's exported
+    `renderPrompt(assembly)`. Acceptance stays: a real round shows `blocks.pinned > 0` and
+    `prefixTokensStable === blocks.pinned`.
+  - **Probe artefact:** the two probes (`service-probe`, `session-event-probe`) are written only in
+    `observation: tape` mode and are bounded (service probe once, event probe for the first three events).
+    They are what produced the facts above; remove them once N1 and N2's event mapping no longer need them.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once

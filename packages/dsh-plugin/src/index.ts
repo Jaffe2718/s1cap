@@ -391,6 +391,45 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       resolved.observation === 'tape'
         ? createControlSink({ path: resolveTelemetryPath(resolved.telemetry.tapeJsonl), onError: () => undefined })
         : undefined;
+    if (probeSink !== undefined) {
+      // One-shot introspection: the real method names of the systemPrompt service. Reading a service that
+      // was not injected throws in Cordis, so both outcomes are written down instead of guessed at.
+      try {
+        const svc = (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt');
+        probeSink.write(
+          `${JSON.stringify({
+            schema: 0,
+            kind: 'service-probe',
+            service: svc === undefined ? 'absent' : typeof svc,
+            methods:
+              svc === null || typeof svc !== 'object'
+                ? []
+                : Object.getOwnPropertyNames(Object.getPrototypeOf(svc)).slice(0, 40),
+            assemblyKeys: (() => {
+              try {
+                const built = (svc as { assemble?: () => unknown }).assemble?.();
+                return built === null || typeof built !== 'object' ? typeof built : Object.keys(built as object).slice(0, 20);
+              } catch (err) {
+                return `threw:${String(err)}`;
+              }
+            })(),
+            assemblyPreview: (() => {
+              try {
+                const built = (svc as { assemble?: () => unknown }).assemble?.() as { text?: unknown; prompt?: unknown } | undefined;
+                const text = typeof built?.text === 'string' ? built.text : typeof built?.prompt === 'string' ? built.prompt : undefined;
+                return text === undefined ? 'none' : text.slice(0, 160);
+              } catch {
+                return 'threw';
+              }
+            })(),
+          })}
+`,
+        );
+      } catch (err) {
+        probeSink.write(`${JSON.stringify({ schema: 0, kind: 'service-probe', service: 'threw', error: String(err) })}
+`);
+      }
+    }
     const tapeSink =
       resolved.observation === 'tape'
         ? createControlSink({
@@ -398,6 +437,45 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
             onError: (message) => ctx.logger?.warn?.(`[s1cap] tape sink: ${message}`),
           })
         : undefined;
+    if (probeSink !== undefined) {
+      // One-shot introspection: the real method names of the systemPrompt service. Reading a service that
+      // was not injected throws in Cordis, so both outcomes are written down instead of guessed at.
+      try {
+        const svc = (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt');
+        probeSink.write(
+          `${JSON.stringify({
+            schema: 0,
+            kind: 'service-probe',
+            service: svc === undefined ? 'absent' : typeof svc,
+            methods:
+              svc === null || typeof svc !== 'object'
+                ? []
+                : Object.getOwnPropertyNames(Object.getPrototypeOf(svc)).slice(0, 40),
+            assemblyKeys: (() => {
+              try {
+                const built = (svc as { assemble?: () => unknown }).assemble?.();
+                return built === null || typeof built !== 'object' ? typeof built : Object.keys(built as object).slice(0, 20);
+              } catch (err) {
+                return `threw:${String(err)}`;
+              }
+            })(),
+            assemblyPreview: (() => {
+              try {
+                const built = (svc as { assemble?: () => unknown }).assemble?.() as { text?: unknown; prompt?: unknown } | undefined;
+                const text = typeof built?.text === 'string' ? built.text : typeof built?.prompt === 'string' ? built.prompt : undefined;
+                return text === undefined ? 'none' : text.slice(0, 160);
+              } catch {
+                return 'threw';
+              }
+            })(),
+          })}
+`,
+        );
+      } catch (err) {
+        probeSink.write(`${JSON.stringify({ schema: 0, kind: 'service-probe', service: 'threw', error: String(err) })}
+`);
+      }
+    }
     const sink = createControlSink({
       path: resolveTelemetryPath(resolved.telemetry.controlJsonl),
       onError: (message) => ctx.logger?.warn?.(`[s1cap] control sink: ${message}`),
@@ -435,22 +513,6 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     });
     ctx.logger?.info?.(`[s1cap] observation mode: ${resolved.observation} -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)}${resolved.observation === 'tape' ? ` + tape ${resolveTelemetryPath(resolved.telemetry.tapeJsonl)}` : ''} (prompt untouched)`);
 
-    // One-shot runtime introspection, written to the tape: the systemPrompt service's real method names.
-    // Reading a service that was not injected throws in Cordis, so this is wrapped and recorded either way.
-    try {
-      const service = (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt');
-      observer.probe({
-        schema: 0,
-        kind: 'service-probe',
-        service: service === undefined ? 'absent' : typeof service,
-        methods:
-          service === null || typeof service !== 'object'
-            ? []
-            : Object.getOwnPropertyNames(Object.getPrototypeOf(service)).slice(0, 40),
-      });
-    } catch (err) {
-      observer.probe({ schema: 0, kind: 'service-probe', service: 'threw', error: String(err) });
-    }
 
     // Asynchronous upkeep lane: session events feed the graph off the critical path. The hook name and its
     // payload shape are verified (`ctx.on("session/event", (session, event) => …)` in dsh-agent-instructions);
