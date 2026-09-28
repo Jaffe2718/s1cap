@@ -168,6 +168,25 @@ verified, it says so instead of guessing.
     buffered (limit 16) and drained on wiring — the `session-subscribed` probe reports how many were replayed.
     Follow-up (not blocking): map the now-known event vocabulary onto segment kinds, and confirm `step/end`
     arrives in longer interactive sessions (the web profile) rather than in a single-task headless run.
+  - **N4 plan (round 11) — two APIs still to read, then the implementation is mechanical.** The settings shell is
+    plugin-extensible, so the panel is contributed by the plugin's own browser half:
+
+    | Step | What | Verified so far |
+    |---|---|---|
+    | 1 | read the **credentials** service surface | the service is registered as `credentials` (`super(ctx, "credentials")` in `dsh-credentials`); its public methods are not yet read |
+    | 2 | read the **slot** mount API | `dsh-client-ui-slots` exports `SlotCore`, `SlotOwnershipError`, `StaleAuthorizationError`, `resolveSlotLabel`, `standardHookPropName`, and its source speaks of slots, contributions, axes and a shared-handle scope ledger |
+    | 3 | declare the browser half | `dsh-pet` is the working precedent: `exports["./client"] → lib/client.js` plus `dsh.client = { inject: ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-connection"], platform: "web" }` |
+    | 4 | write the panel | plain JavaScript with `React.createElement` — JSX is not erasable syntax and this repository ships no bundler |
+    | 5 | persist the key | through the credentials service; the value must never reach a log, a control-plane record, the repository or the transcript, and only ever leaves through `redactKey()` |
+
+    **Read them with a wider pattern than last attempt** (this round's greps were too narrow and printed nothing):
+    `& $app --expose-internals scripts/scan-dsh-asar.cjs --dump dsh-credentials\lib\index.js 200` and read the
+    class body, then `--dump dsh-client-ui-slots\lib\index.js 60` for the exported entry points. Do **not** ship a
+    stub browser half before the mount API is known: a client half that fails to load is exactly the class of
+    change that once took a real round down.
+    **Acceptance for N4:** in the sandbox web profile (port 19487) a S1CAP section appears in Settings, a key
+    typed there survives a restart, and `grep` over the control log, the session log and the plugin output finds
+    no plaintext key.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
