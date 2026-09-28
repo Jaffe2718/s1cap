@@ -1,15 +1,16 @@
 # S1CAP Architecture — Modules and Connections
 
 Reference for the connections drawn in the route diagram
-([`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html) — hand-authored SVG), whose text
-form is [`figures/s1cap-technical-route.mmd`](./figures/s1cap-technical-route.mmd) and which is also embedded
-in the README and in AGENT_BRIEF §2.
+([`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html) — hand-authored, and the single
+geometry source). The committed SVGs
+([`light`](./figures/s1cap-technical-route.light.svg) · [`dark`](./figures/s1cap-technical-route.dark.svg)) are
+generated from it by `scripts/build-route-svg.mjs` and embedded in the README and in AGENT_BRIEF §2.
 
 **Diagram maintenance — do not regress.** The flow is a loop with a hook: `Run + Verify` carries a self-loop
 (`next LLM step · model continues`) and association-graph upkeep sits in its own asynchronous lane. Never
 regenerate this figure with an automatic pipeline layout: an auto-laid-out serial chain misstates the design by
 hiding both the inner loop and the async decoupling. `docs/figures/s1cap-technical-route.html` is the single
-authoritative picture, and every Mermaid copy must keep the same topology.
+authoritative picture; the SVGs are generated from it and no second hand-drawn copy may be introduced.
 
 Status legend: **✅ implemented (M0)** · **🔜 planned (M1/M2)** · **◻ external**.
 
@@ -17,11 +18,9 @@ Status legend: **✅ implemented (M0)** · **🔜 planned (M1/M2)** · **◻ ext
 
 ## 1. Diagram
 
-Five layers, one row per layer, equal width (`block-beta` stretches every row to the same width; a
-flowchart cannot). Rendered reference:
-[`figures/s1cap-mermaid-lane-view.png`](./figures/s1cap-mermaid-lane-view.png). The arrow-level topology —
-the inner loop's self-edge, the asynchronous tap and the advisory edge back into the loop — is in §2 below
-and in [`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html).
+Five layers, one row per layer, top to bottom. The picture above is the generated SVG; the arrow-level
+topology — the inner loop's self-edge, the asynchronous tap and the advisory edge back into the loop — is in §2
+below and in [`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./figures/s1cap-technical-route.dark.svg">
