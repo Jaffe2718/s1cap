@@ -144,6 +144,20 @@ verified, it says so instead of guessing.
     deviation: an unknown `{{…}}` reference is left literal and reported instead of throwing, because a
     governor must not be able to break a round. Two variables were unresolved in this profile (`model`, `cwd`)
     — they are listed in the probe line rather than silently replaced.
+  - **Round 9 — N2 diagnosis (evidence, not theory).** Two facts from real rounds:
+    1. The subscription *form* is right: `dsh-agent-instructions` registers exactly
+       `ctx.on("session/event", (session, event) => …)` on its own (root) plugin context, read from its packaged
+       source. So the hook name and the registration style are not the problem.
+    2. A `session-subscribed` marker probe placed immediately **after** the subscription never appears in the
+       tape, while `service-probe` and `system-prompt` — written from the same `if (resolved.observation !== 'off')`
+       branch — do. So the listener line is either not reached or throws before the marker, and the plugin
+       survives because `apply()` swallows activation errors by design.
+    **Concrete next step:** move the `session/event` subscription **out of the observation branch** to the top of
+    `applyInner` (right after the `enabled` gate) and register it *before* anything that can throw, then re-run a
+    round and read the tape: a `session-subscribed` line plus at least one `session-event-probe` line closes the
+    delivery question. If the marker appears but no event probe does, the profile genuinely emits none during a
+    short headless run — in that case verify in the interactive web profile (port 19487) where sessions last
+    longer. N2's acceptance is unchanged and still open: `/s1` shows `upkeep.enqueued > 0`.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once

@@ -549,6 +549,9 @@ function applyInner(ctx               , raw                             )       
     ctx.on('session/event', (_session         , event         ) => {
       observer?.noteSessionEvent(event);
     });
+    // Subscription marker: it proves the listener was registered even when no event ever arrives, which is the
+    // difference between "the hook name is wrong" and "this profile emits nothing during the run".
+    observer.probe({ schema: 0, kind: 'session-subscribed' });
   } else {
     ctx.logger?.info?.('[s1cap] observation mode: off');
   }
