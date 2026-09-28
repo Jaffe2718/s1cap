@@ -2,11 +2,19 @@
 
 **S**ystem-**1** **C**ontext-**A**ware **P**lanning
 
-![status](https://img.shields.io/badge/status-pre--alpha%20(M0)-orange) ![node](https://img.shields.io/badge/node-%3E%3D22.19-green) ![license](https://img.shields.io/badge/license-TBD-lightgrey)
+![status](https://img.shields.io/badge/status-M1%20observation-blue) ![node](https://img.shields.io/badge/node-%3E%3D22.19-green) ![license](https://img.shields.io/badge/license-TBD-lightgrey)
 
 **S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents**
 
 **Authors:** Yuanming Chen · LI Changzhe
+
+**Progress:** M0 complete (packages, Laya runtime verified on this machine, the plugin activates in a real DSH
+profile). **M1 observation mode is live and verified in real sessions**: the per-call pipeline runs
+(SEGMENTER → RECALL → ASSEMBLER) with the prompt returned untouched, the system prompt is sourced from the
+harness registry so the pinned block and the cache-stable prefix are non-zero (`blocks.pinned = 684` in a real
+round), association-graph upkeep is fed by real `session/event` traffic, and a replay harness reproduces the
+control-plane records byte for byte. The settings panel that will hold the Jev key is next. Details, evidence
+and per-item acceptance tests: [`docs/STATUS.md`](docs/STATUS.md).
 
 S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The S1CAP control layer intervenes at exactly **two points**:
 
