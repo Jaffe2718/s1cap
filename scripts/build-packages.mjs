@@ -27,6 +27,9 @@ function walk(dir) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) found.push(...walk(full));
     else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) found.push(full);
+    // plain-JS sources are copied verbatim: the browser half runs in a loader that hands it require, and JSX
+    // is not erasable syntax, so it can never be authored as TypeScript in this repository.
+    else if (entry.name.endsWith('.js')) found.push(full);
   }
   return found;
 }
@@ -60,10 +63,11 @@ for (const name of readdirSync(packagesDir)) {
   rmSync(outDir, { recursive: true, force: true });
   let files = 0;
   for (const file of walk(srcDir)) {
-    const target = join(outDir, relative(srcDir, file).replace(/\.ts$/, '.js'));
+    const target = join(outDir, relative(srcDir, file).replace(/\.ts$/, '.js').replace(/\.js$/, '.js'));
     mkdirSync(dirname(target), { recursive: true });
-    const code = stripTypeScriptTypes(readFileSync(file, 'utf8'), { mode: 'strip' });
-    writeFileSync(target, rewriteSpecifiers(code), 'utf8');
+    const source = readFileSync(file, 'utf8');
+    const code = file.endsWith('.js') ? source : rewriteSpecifiers(stripTypeScriptTypes(source, { mode: 'strip' }));
+    writeFileSync(target, code, 'utf8');
     files += 1;
   }
   report.push(`${pkg.name}: ${files} file(s) -> lib/`);

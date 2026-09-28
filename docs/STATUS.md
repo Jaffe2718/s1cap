@@ -302,6 +302,24 @@ verified, it says so instead of guessing.
     to get its function list, then `--grep` that file for `remote\.[a-zA-Z]` with context 1 to see the exact host
     call the Save button makes. Copy that call shape for the S1CAP panel; the host side is already done
     (`readCredential` + `set`/`write` on the `credentials` store with ref `s1cap/jev`).
+  - **Round 17 — the browser half is written and built, but DSH does not register it yet (evidence below).**
+    Shipped this round: `packages/dsh-plugin/src/client.js` (plain JS; `window.__ModuleLoader__.load`, factory
+    returning `{ apply, inject, name }`, `inject = ['slots', 'remote.credentials']`, a section registered into
+    `settings.section` with `id: 's1cap-config'`, `order: 30`, `label: () => 'S1CAP'`; the panel reads the
+    credential state through `ctx.remote.credentials.describe([ref])` — the call the shipped API-key screen makes —
+    and saves through `set`/`write` with ref `s1cap/jev`, never echoing the value), `exports['./client']` and
+    `dsh.client = { inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-connection'], platform:
+    'web' }` in `package.json`, and `scripts/build-packages.mjs` now **copies** `src/**/*.js` into `lib/`
+    (`lib/client.js`, 7 KB).
+    **The gap, measured rather than guessed:** `window.__DSH_BOOT__` is the ground truth for client modules — it
+    lists `{ id, url, rev, inject }` per entry, with URLs shaped `plugins/??<package-name>/client.js&rev=…` — and
+    in the running sandbox web profile it **does not mention `dsh-s1cap`** at all, while `window.__ModuleLoader__`
+    exists. So the declaration is not being discovered. **Next: compare our `dsh` block with `dsh-pet`'s
+    field-by-field** (`dsh.bundle.patch`, `dsh.client.inject`, `dsh.client.platform` look identical) and check how
+    the boot table is produced — most likely the client entry is registered from the **profile's install metadata**,
+    so the linked plugin may need a reinstall (`dsh plugin --profile s1captest remove` + `add link:…`) or an
+    additional declaration field before the entry appears. Also note the shipped client ids are **package names**
+    (`@deepseek-ai/dsh-client-ui-…`), which our `id: 'dsh-s1cap'` matches.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
