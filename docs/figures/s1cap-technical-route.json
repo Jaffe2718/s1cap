@@ -49,23 +49,23 @@
         "Segment/Recall — message-level segments + tier-0/1",
         "S1 Assoc Backend — segment × history relevance (noul)",
         "Assoc. Graph — weighted edges, w·exp(−Δt/λ) decay",
-        "ASSEMBLER — BFS(τ,d) + budget knapsack + TAS layout",
+        "ASSEMBLER — per LLM call: BFS(τ,d) + budget + TAS",
         "System-2 LLM — governed host model, reads assembled ctx",
         "S1 Decide Backend — plan choice scoring (p, confidence)",
-        "PLAN GATE — normalize · abstain · cap M=2 · order",
+        "PLAN GATE — orders the model's plans, never vetoes stop",
         "Run + Verify — ordered attempts, drop rest on success"
       ]
     },
     {
       "dot": "emerald",
-      "title": "Points · Safety · Measurement",
+      "title": "Loop · Authority · Async",
       "items": [
-        "① Selective Context: S1 assoc → RG → TAS assembly",
-        "② Adaptive Planning: S1 scoring → gate → execution",
+        "One user turn = many LLM steps (think · act · tool)",
+        "ASSEMBLER runs before every LLM call, not per turn",
+        "RG upkeep is silent and async: it may lag behind",
+        "Stopping is the model's call; S1CAP cannot veto it",
         "Surface rewrite: model view only; transcript intact",
-        "Safety: normalize · pre-filter · S1 timeout → tier-0",
-        "Telemetry JSONL v1: cache hit/miss · cost · latency",
-        "Success rule: non-inferior solve rate + ≥10% cost/time"
+        "Telemetry JSONL v1: session log + control log, split"
       ]
     }
   ]

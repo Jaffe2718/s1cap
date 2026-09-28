@@ -9,6 +9,17 @@
       config:
         # 2x2 ablation cell: C1 baseline | C2 +TAS | C3 +S1 | C4 full
         cell: C4
+        # Who owns the agent loop. Literal, not a toggle: the harness stops when the model
+        # stops and S1CAP can neither prolong nor veto that (docs/ARCHITECTURE.md §4).
+        termination: model-owned
+        # Hard deadline for the synchronous per-call assembly hook; on expiry the LLM call
+        # proceeds unmodified instead of waiting for S1CAP.
+        assemblyDeadlineMs: 250
+        # Association-graph upkeep is asynchronous: new events are scored off the critical
+        # path and merged afterwards, so the graph may lag the session by maxLagTurns.
+        rgMaintenance:
+          mode: async
+          maxLagTurns: 2
         tas:
           on: true
           tMaxChars: 8000

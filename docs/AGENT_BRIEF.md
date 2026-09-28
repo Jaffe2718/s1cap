@@ -15,6 +15,7 @@
 4. The human owns the research decisions listed in §12. All other implementation decisions within this spec are yours.
 5. Telemetry schemas (§8) are **versioned contracts**: after the first benchmark run starts, changing a field name breaks comparability — add fields, never rename.
 6. **Control-plane isolation is a hard architectural rule** (docs/CONTROL_PLANE_LOGGING.md): System-1 calls, their telemetry and the backend's server logs go to a log stream that is *independent of the session event log*. No control-plane record may become a segment, enter the association graph, or appear in any LLM context or System-1 `state` — otherwise System-1 would end up scoring its own output and call count would compound per turn. Enforced in `packages/core/src/provenance.ts` (type families + runtime guards); do not relax it for convenience.
+7. **The agent loop is model-owned and S1CAP is only a hook** (docs/ARCHITECTURE.md §6). One user turn is *many* LLM steps (think → act → tool → …), so the flow is a loop, not a chain: S1CAP assembles context before **every** LLM call under a hard deadline (on expiry the call proceeds unmodified), and maintains the association graph **asynchronously, off the critical path** (the graph may lag the session). Nothing in S1CAP may keep the loop alive: the harness stops when the model stops, the plan gate only reorders the plans the model already produced, and any S1CAP failure or timeout degrades to passthrough. `termination: 'model-owned'` and `rgMaintenance.mode: 'async'` are literal types in `AssemblyPolicy` — not toggles.
 
 ---
 
@@ -100,20 +101,20 @@ Two planes:
 
 ```mermaid
 flowchart LR
-  subgraph HAR["Harness session layer"]
-    XEV["Event intake<br/>user input x · tool results · reasoning traces"]
-    EXE["Run + verify<br/>ordered attempts, verification oracle"]
+  subgraph HAR["Harness session - one user turn = many LLM steps"]
+    X["User turn x<br/>user input · tool results · traces"]
+    TL["Run + verify<br/>tool exec · results · verification"]
+    ST["Stop - the model's own call<br/>S1CAP cannot veto or prolong it"]
   end
 
-  subgraph CTL["S1CAP control layer"]
-    SEG["Segment / Recall<br/>message-level segments, tier-0/1 candidates"]
-    RG["Association graph (RG)<br/>weighted edges, w·exp(-Δt/λ) decay"]
-    ASM["ASSEMBLER<br/>BFS(τ,d) recall + budget knapsack + TAS layout"]
-    GATE["PLAN GATE<br/>normalize · abstain · attempt cap M=2 · order"]
+  subgraph CTL["S1CAP control - hook, advisory"]
+    ASM["ASSEMBLER<br/>runs before every LLM call"]
+    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
+    GATE["PLAN GATE<br/>orders plans the model gave"]
   end
 
   subgraph S2["System-2 compute plane"]
-    LLM["System-2 LLM<br/>governed host model (deepseek-flash)"]
+    LLM["System-2 LLM step<br/>think · act · call tools"]
   end
 
   subgraph S1["System-1 backends (POST /v1/systemone)"]
@@ -121,15 +122,17 @@ flowchart LR
     S1D["S1 decision backend<br/>choice scoring"]
   end
 
-  XEV -->|"x · tools · traces"| SEG
-  SEG -->|"new x history segments"| S1A
-  S1A -->|"expand RG · weights + decay"| RG
-  RG -->|"BFS(tau,d) + budget"| ASM
-  ASM -->|"TAS injection"| LLM
-  LLM -->|"candidate plans (m <= 3)"| S1D
-  S1D -->|"choice scores: p, confidence"| GATE
-  GATE -->|"probability order"| EXE
-  EXE -->|"tool results loop back"| XEV
+  X -->|"input x"| ASM
+  ASM -->|"assembled view (TAS) · per call"| LLM
+  LLM -->|"act · tool call"| TL
+  TL -.->|"next LLM step · model continues"| ASM
+  TL -->|"model stops"| ST
+  TL -.->|"new events · async tap, off the critical path"| S1A
+  S1A -.->|"weights + decay (may lag)"| RG
+  RG -->|"bounded recall + budget"| ASM
+  LLM -->|"candidate plans (when offered)"| S1D
+  S1D -->|"choice scores"| GATE
+  GATE -->|"advisory order · never vetoes stop"| TL
 ```
 - **Event intake:** the harness adapter turns session events (user input x, tool results, reasoning traces) into `RawEvent`s and writes the assembled context back to the **model view only** (§5.1, §6).
 - **Segment / Recall:** message-level segments (never token-level, per the project's segmentation rule) + two-tier candidate generation — tier-0 metadata (free, always on) and tier-1 (embedding ANN *or* S1 noul batch, config-selected).

@@ -5418,10 +5418,10 @@
           <li>&bull; Segment/Recall — message-level segments + tier-0/1</li>
           <li>&bull; S1 Assoc Backend — segment × history relevance (noul)</li>
           <li>&bull; Assoc. Graph — weighted edges, w·exp(−Δt/λ) decay</li>
-          <li>&bull; ASSEMBLER — BFS(τ,d) + budget knapsack + TAS layout</li>
+          <li>&bull; ASSEMBLER — per LLM call: BFS(τ,d) + budget + TAS</li>
           <li>&bull; System-2 LLM — governed host model, reads assembled ctx</li>
           <li>&bull; S1 Decide Backend — plan choice scoring (p, confidence)</li>
-          <li>&bull; PLAN GATE — normalize · abstain · cap M=2 · order</li>
+          <li>&bull; PLAN GATE — orders the model&#39;s plans, never vetoes stop</li>
           <li>&bull; Run + Verify — ordered attempts, drop rest on success</li>
         </ul>
       </div>
@@ -5429,15 +5429,15 @@
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>Points · Safety · Measurement</h3>
+          <h3>Loop · Authority · Async</h3>
         </div>
         <ul>
-          <li>&bull; ① Selective Context: S1 assoc → RG → TAS assembly</li>
-          <li>&bull; ② Adaptive Planning: S1 scoring → gate → execution</li>
+          <li>&bull; One user turn = many LLM steps (think · act · tool)</li>
+          <li>&bull; ASSEMBLER runs before every LLM call, not per turn</li>
+          <li>&bull; RG upkeep is silent and async: it may lag behind</li>
+          <li>&bull; Stopping is the model&#39;s call; S1CAP cannot veto it</li>
           <li>&bull; Surface rewrite: model view only; transcript intact</li>
-          <li>&bull; Safety: normalize · pre-filter · S1 timeout → tier-0</li>
-          <li>&bull; Telemetry JSONL v1: cache hit/miss · cost · latency</li>
-          <li>&bull; Success rule: non-inferior solve rate + ≥10% cost/time</li>
+          <li>&bull; Telemetry JSONL v1: session log + control log, split</li>
         </ul>
       </div>
     </div>

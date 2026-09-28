@@ -13,20 +13,20 @@ Status legend: **✅ implemented (M0)** · **🔜 planned (M1/M2)** · **◻ ext
 
 ```mermaid
 flowchart LR
-  subgraph HAR["Harness session layer"]
-    XEV["Event intake<br/>user input x · tool results · reasoning traces"]
-    EXE["Run + verify<br/>ordered attempts, verification oracle"]
+  subgraph HAR["Harness session - one user turn = many LLM steps"]
+    X["User turn x<br/>user input · tool results · traces"]
+    TL["Run + verify<br/>tool exec · results · verification"]
+    ST["Stop - the model's own call<br/>S1CAP cannot veto or prolong it"]
   end
 
-  subgraph CTL["S1CAP control layer"]
-    SEG["Segment / Recall<br/>message-level segments, tier-0/1 candidates"]
-    RG["Association graph (RG)<br/>weighted edges, w·exp(-Δt/λ) decay"]
-    ASM["ASSEMBLER<br/>BFS(τ,d) recall + budget knapsack + TAS layout"]
-    GATE["PLAN GATE<br/>normalize · abstain · attempt cap M=2 · order"]
+  subgraph CTL["S1CAP control - hook, advisory"]
+    ASM["ASSEMBLER<br/>runs before every LLM call"]
+    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
+    GATE["PLAN GATE<br/>orders plans the model gave"]
   end
 
   subgraph S2["System-2 compute plane"]
-    LLM["System-2 LLM<br/>governed host model (deepseek-flash)"]
+    LLM["System-2 LLM step<br/>think · act · call tools"]
   end
 
   subgraph S1["System-1 backends (POST /v1/systemone)"]
@@ -34,15 +34,17 @@ flowchart LR
     S1D["S1 decision backend<br/>choice scoring"]
   end
 
-  XEV -->|"x · tools · traces"| SEG
-  SEG -->|"new × history segments"| S1A
-  S1A -->|"expand RG · weights + decay"| RG
-  RG -->|"BFS(τ,d) + budget"| ASM
-  ASM -->|"TAS injection"| LLM
-  LLM -->|"candidate plans (m ≤ 3)"| S1D
-  S1D -->|"choice scores: p, confidence"| GATE
-  GATE -->|"probability order"| EXE
-  EXE -->|"tool results loop back"| XEV
+  X -->|"input x"| ASM
+  ASM -->|"assembled view (TAS) · per call"| LLM
+  LLM -->|"act · tool call"| TL
+  TL -.->|"next LLM step · model continues"| ASM
+  TL -->|"model stops"| ST
+  TL -.->|"new events · async tap, off the critical path"| S1A
+  S1A -.->|"weights + decay (may lag)"| RG
+  RG -->|"bounded recall + budget"| ASM
+  LLM -->|"candidate plans (when offered)"| S1D
+  S1D -->|"choice scores"| GATE
+  GATE -->|"advisory order · never vetoes stop"| TL
 ```
 
 ## 2. Connections (edge semantics)
@@ -89,5 +91,28 @@ flowchart LR
 | ASSEMBLER (TAS layout) | off (chronological) | **on** | off (chronological) | **on** |
 | S1 decision + PLAN GATE | off | off | **on** | **on** |
 | Telemetry | on | on | on | on |
+
+## 6. Loop, authority and asynchrony
+
+The diagram is a **loop with a hook**, not a serial pipeline. Three properties are part of the design and
+are enforced in code, not left to convention:
+
+1. **One user turn is many LLM steps.** The model thinks, acts, calls tools and continues as long as it
+   decides to. Consequently the ASSEMBLER runs **before every LLM call** (a per-call hook), not once per
+   turn, and the `Run + verify → ASSEMBLER` edge is the live loop edge (`next LLM step · model continues`).
+2. **Stopping belongs to the model.** The harness ends the turn when the model says so; `Stop · the model's
+   own call` is a harness node that no S1CAP output can veto or delay. The two guarantees in code:
+   `AssemblyPolicy.termination` is the literal type `'model-owned'` (there is no configuration that flips it),
+   and `AttemptController` walks only the plans the model produced — it cannot invent a plan, cannot exceed
+   the attempt cap, and `stop()` exists so the harness can register the model's decision without asking S1CAP.
+   An empty plan list yields an empty order.
+3. **Graph upkeep is asynchronous.** New session events are scored by the S1 association backend **off the
+   critical path** and merged into the RG afterwards (dashed edges `new events · async tap` and
+   `weights + decay (may lag)`); `rgMaintenance = { mode: 'async', maxLagTurns }`. The synchronous part is
+   only the assembly read (`bounded recall + budget`) and it carries a hard deadline:
+   `assemblyDeadlineMs` — on expiry the LLM call proceeds with the unmodified context instead of waiting.
+
+Degradation is therefore total: if Laya/Jev is slow, absent or wrong, the turn continues on the native path
+(tier-0 metadata + recency window), which is exactly the C1 behaviour the ablation compares against.
 
 Cell presets: `bench/cells/C{1..4}.json`.

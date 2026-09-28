@@ -51,6 +51,21 @@ export type S1ProviderName = 'jev' | 'laya-serve' | 'edgejev' | 'kev' | 'none';
 
 export interface AssemblyPolicy {
   cell: Cell;
+  /**
+   * Who owns the agent loop. Deliberately a literal type, not a boolean: the harness
+   * stops when the model stops, and no S1CAP output may prolong or veto that exit
+   * (docs/ARCHITECTURE.md §4). One user turn is many LLM steps; S1CAP only assembles
+   * the context before each call and orders the plans the model already offered.
+   */
+  termination: 'model-owned';
+  /** hard deadline for the synchronous per-call assembly hook; on expiry the call passes through unmodified */
+  assemblyDeadlineMs: number;
+  /**
+   * Association-graph upkeep is asynchronous: new session events are scored off the
+   * critical path by the S1 association backend and merged into the graph afterwards,
+   * so the graph may lag the session by up to `maxLagTurns` turns.
+   */
+  rgMaintenance: { mode: 'async'; maxLagTurns: number };
   tas: {
     on: boolean;
     /** max chars of the serialized state proxy T */
@@ -138,6 +153,9 @@ export interface PlanGateDecision {
 export function defaultPolicy(): AssemblyPolicy {
   return {
     cell: 'C4',
+    termination: 'model-owned',
+    assemblyDeadlineMs: 250,
+    rgMaintenance: { mode: 'async', maxLagTurns: 2 },
     tas: { on: true, tMaxChars: 8000, updatePolicy: 'perTask' },
     recall: {
       tau: 0.55,

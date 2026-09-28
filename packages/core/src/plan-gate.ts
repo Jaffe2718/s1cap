@@ -57,6 +57,11 @@ export function orderPlans(
 /**
  * Attempt controller: execute plans in order, verify each, stop on first success
  * or when the attempt cap M is reached.
+ *
+ * Authority note (docs/ARCHITECTURE.md §4): this controller only ever walks the plans the
+ * model produced. It cannot invent a plan, cannot exceed the cap, and cannot keep the loop
+ * alive — the harness stops the turn whenever the model says so, and `stop()` exists so the
+ * harness can register that decision without asking S1CAP.
  */
 export class AttemptController {
   #order: string[];
@@ -89,6 +94,14 @@ export class AttemptController {
       this.#succeeded = id;
       this.#stopped = true;
     }
+  }
+
+  /**
+   * The model (or the harness on its behalf) ended the turn. Recorded here so the gate
+   * cannot hand out another attempt; S1CAP never decides this and never delays it.
+   */
+  stop(): void {
+    this.#stopped = true;
   }
 
   get attempts(): number {

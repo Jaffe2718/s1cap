@@ -1,18 +1,26 @@
+%% S1CAP technical route - canonical topology (README.md, docs/ARCHITECTURE.md, docs/AGENT_BRIEF.md)
+%%
+%% Three facts the shape has to carry:
+%%   1. ONE user turn is MANY LLM steps (think / act / tool), so the flow is a loop, not a chain:
+%%      Run + verify --next step--> ASSEMBLER --assembled view--> System-2 LLM step.
+%%   2. S1CAP is a HOOK on the LLM-call boundary, not a stage in the loop: it assembles context before
+%%      every call, and it maintains the association graph SILENTLY (async, off the critical path, may lag).
+%%   3. Stopping belongs to the model: no S1CAP output can keep the loop alive or veto the exit.
 flowchart LR
-  subgraph HAR["Harness session layer"]
-    XEV["Event intake<br/>user input x · tool results · reasoning traces"]
-    EXE["Run + verify<br/>ordered attempts, verification oracle"]
+  subgraph HAR["Harness session - one user turn = many LLM steps"]
+    X["User turn x<br/>user input · tool results · traces"]
+    TL["Run + verify<br/>tool exec · results · verification"]
+    ST["Stop - the model's own call<br/>S1CAP cannot veto or prolong it"]
   end
 
-  subgraph CTL["S1CAP control layer"]
-    SEG["Segment / Recall<br/>message-level segments, tier-0/1 candidates"]
-    RG["Association graph (RG)<br/>weighted edges, w·exp(-Δt/λ) decay"]
-    ASM["ASSEMBLER<br/>BFS(tau,d) recall + budget knapsack + TAS layout"]
-    GATE["PLAN GATE<br/>normalize · abstain · attempt cap M=2 · order"]
+  subgraph CTL["S1CAP control - hook, advisory"]
+    ASM["ASSEMBLER<br/>runs before every LLM call"]
+    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
+    GATE["PLAN GATE<br/>orders plans the model gave"]
   end
 
   subgraph S2["System-2 compute plane"]
-    LLM["System-2 LLM<br/>governed host model (deepseek-flash)"]
+    LLM["System-2 LLM step<br/>think · act · call tools"]
   end
 
   subgraph S1["System-1 backends (POST /v1/systemone)"]
@@ -20,21 +28,14 @@ flowchart LR
     S1D["S1 decision backend<br/>choice scoring"]
   end
 
-  XEV -->|"x · tools · traces"| SEG
-  SEG -->|"new x history segments"| S1A
-  S1A -->|"expand RG · weights + decay"| RG
-  RG -->|"BFS(tau,d) + budget"| ASM
-  ASM -->|"TAS injection"| LLM
-  LLM -->|"candidate plans (m <= 3)"| S1D
-  S1D -->|"choice scores: p, confidence"| GATE
-  GATE -->|"probability order"| EXE
-  EXE -->|"tool results loop back"| XEV
-
-  classDef harness fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
-  classDef control fill:#ecfdf5,stroke:#059669,color:#064e3b
-  classDef s2 fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
-  classDef s1 fill:#fef3c7,stroke:#d97706,color:#78350f
-  class XEV,EXE harness
-  class SEG,RG,ASM,GATE control
-  class LLM s2
-  class S1A,S1D s1
+  X -->|"input x"| ASM
+  ASM -->|"assembled view (TAS) · per call"| LLM
+  LLM -->|"act · tool call"| TL
+  TL -.->|"next LLM step · model continues"| ASM
+  TL -->|"model stops"| ST
+  TL -.->|"new events · async tap, off the critical path"| S1A
+  S1A -.->|"weights + decay (may lag)"| RG
+  RG -->|"bounded recall + budget"| ASM
+  LLM -->|"candidate plans (when offered)"| S1D
+  S1D -->|"choice scores"| GATE
+  GATE -->|"advisory order · never vetoes stop"| TL
