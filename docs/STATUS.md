@@ -62,6 +62,17 @@ verified, it says so instead of guessing.
   - **Probe artefact:** the two probes (`service-probe`, `session-event-probe`) are written only in
     `observation: tape` mode and are bounded (service probe once, event probe for the first three events).
     They are what produced the facts above; remove them once N1 and N2's event mapping no longer need them.
+  - **Round 4 notes (both are process findings, recorded so the next attempt is cheaper):**
+    1. Filtering the dump in the pipeline (`... --dump … | Select-String 'assemble\s*\(' -Context`) returned
+       nothing even though `assemble` is demonstrably a method at runtime. Read the dump **unfiltered** in
+       page-sized chunks (`--dump dsh-system-prompt\lib\index.js 366` with a line window), or add a `--grep`
+       mode to `scripts/scan-dsh-asar.cjs` first — do not conclude "the symbol is absent" from a filtered read.
+    2. **N2 risk found:** the plugin subscribes `session/event` on the **root** context, and no
+       `session-event-probe` line was ever written, which suggests session events are emitted in a
+       *session/agent scope* rather than at the root. Verify before trusting the asynchronous lane: subscribe
+       the way `dsh-agent-instructions` does (it registers on an agent-scoped context) or move the
+       subscription into a scope that actually receives the events. Acceptance for N2 therefore becomes: a
+       real round shows `upkeep.enqueued > 0` in `/s1` (today it stays 0), with the lag bound respected.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
