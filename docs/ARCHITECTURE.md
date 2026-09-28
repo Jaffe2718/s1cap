@@ -15,47 +15,22 @@ Status legend: **✅ implemented (M0)** · **🔜 planned (M1/M2)** · **◻ ext
 
 ---
 
-## 1. Diagram (Mermaid)
+## 1. Diagram — lane view (Mermaid)
+
+Five layers, one row per layer, equal width (`block-beta` stretches every row to the same width; a
+flowchart cannot). Rendered reference:
+[`figures/s1cap-mermaid-lane-view.png`](./figures/s1cap-mermaid-lane-view.png). The arrow-level topology —
+the inner loop's self-edge, the asynchronous tap and the advisory edge back into the loop — is in §2 below
+and in [`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html).
 
 ```mermaid
-flowchart LR
-  subgraph HAR["Harness session - one user turn = many LLM steps"]
-    X["User turn x<br/>user input · tool results · traces"]
-    TL["Run + verify<br/>tool exec · results · verification"]
-    ST["Stop - the model's own call<br/>S1CAP cannot veto or prolong it"]
-  end
-
-  subgraph SYNC["Per-call hook (synchronous, bounded)"]
-    ASM["ASSEMBLER<br/>assembles before every LLM call"]
-    LLM["System-2 LLM step<br/>think · act · call tools"]
-  end
-
-  subgraph PLAN["Advisory ordering"]
-    S1D["S1 decision backend<br/>choice scoring"]
-    GATE["PLAN GATE<br/>orders plans the model gave"]
-  end
-
-  subgraph UP["Async RG upkeep - off the critical path"]
-    RGU["RG upkeep<br/>scores new session events"]
-    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
-  end
-
-  subgraph S1A["System-1 backends (POST /v1/systemone)"]
-    S1ASSOC["S1 association backend<br/>noul relevance scoring"]
-  end
-
-  X -->|"input x"| ASM
-  ASM -->|"assembled view (TAS), per call"| LLM
-  LLM -->|"act · tool call"| TL
-  TL -.->|"next LLM step · model continues (self-loop)"| TL
-  TL -.->|"model stops"| ST
-  LLM -->|"candidate plans (when offered)"| S1D
-  S1D -->|"choice scores"| GATE
-  GATE -->|"advisory order · never vetoes stop"| TL
-  TL -.->|"new session events"| RGU
-  RGU -.->|"weights + decay (may lag)"| RG
-  RG -->|"bounded recall + budget"| ASM
-  S1ASSOC -.->|"relevance scoring (noul)"| RGU
+block-beta
+  columns 1
+  L1["① Harness session — one user turn = many LLM steps<br/>sends session events · act · tool calls — receives the assembled context and the advisory order"]
+  L2["② System-2 compute — one LLM step at a time<br/>receives the assembled view (TAS) · sends candidate plans, when the model offers them"]
+  L3["③ S1CAP control — per-call hook, advisory<br/>ASSEMBLER (BFS τ,d + budget + TAS) · PLAN GATE (order · attempt cap M = 2)"]
+  L4["④ Async RG upkeep — off the critical path<br/>Segment / Recall → RG Upkeep → Association Graph · silent, may lag the session"]
+  L5["⑤ System-1 backends — POST /v1/systemone<br/>S1 assoc (noul relevance) · S1 decide (choice scoring) · Laya or Jev runtime"]
 ```
 
 ## 2. Connections (edge semantics)

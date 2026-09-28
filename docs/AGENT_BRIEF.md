@@ -16,7 +16,7 @@
 5. Telemetry schemas (§8) are **versioned contracts**: after the first benchmark run starts, changing a field name breaks comparability — add fields, never rename.
 6. **Control-plane isolation is a hard architectural rule** (docs/CONTROL_PLANE_LOGGING.md): System-1 calls, their telemetry and the backend's server logs go to a log stream that is *independent of the session event log*. No control-plane record may become a segment, enter the association graph, or appear in any LLM context or System-1 `state` — otherwise System-1 would end up scoring its own output and call count would compound per turn. Enforced in `packages/core/src/provenance.ts` (type families + runtime guards); do not relax it for convenience.
 7. **The agent loop is model-owned and S1CAP is only a hook** (docs/ARCHITECTURE.md §6). One user turn is *many* LLM steps (think → act → tool → …), so the flow is a loop, not a chain: S1CAP assembles context before **every** LLM call under a hard deadline (on expiry the call proceeds unmodified), and maintains the association graph **asynchronously, off the critical path** (the graph may lag the session). Nothing in S1CAP may keep the loop alive: the harness stops when the model stops, the plan gate only reorders the plans the model already produced, and any S1CAP failure or timeout degrades to passthrough. `termination: 'model-owned'` and `rgMaintenance.mode: 'async'` are literal types in `AssemblyPolicy` — not toggles.
-8. **The route diagram is authoritative and hand-authored** (`docs/figures/s1cap-technical-route.html`; text form `docs/figures/s1cap-technical-route.mmd`). It shows the loop-with-a-hook topology of rule 7. Never replace it with an auto-generated chain/pipeline figure, and keep every Mermaid copy (README, ARCHITECTURE, §2 here) in sync with it — a serial picture of this design is *wrong*, not merely stylised. An auto-laid-out serial version was produced earlier in this project and has been deleted for exactly that reason.
+8. **The route diagram is authoritative and hand-authored** (`docs/figures/s1cap-technical-route.html`; text form `docs/figures/s1cap-technical-route.mmd`). It shows the loop-with-a-hook topology of rule 7. Never replace it with an auto-generated chain/pipeline figure, and keep every Mermaid copy (README, ARCHITECTURE, §2 here) in sync with it — a serial picture of this design is *wrong*, not merely stylised. An auto-laid-out serial version was produced earlier in this project and has been deleted for exactly that reason. **Two views, one truth:** the HTML carries the arrow-level topology (inner-loop self-edge, asynchronous tap, advisory edge back into the loop); the Mermaid copies are the *lane view* — `block-beta`, five equal-width rows, one per layer, each row stating what it sends and receives. A lane view must never contradict the HTML; when they disagree, the HTML wins and the Mermaid is wrong.
 9. **Exactly one System-1 backend is active at a time.** `s1.provider` selects it (`jev | laya-serve | edgejev | kev | none`); enabling the local Laya runtime while selecting a cloud provider is a *configuration error*, never a silent priority decision — a session that quietly switches governors makes its own measurements meaningless. Enforced by `singleBackendIssues()` in `packages/s1-client/src/resolve.ts`; on conflict the plugin logs the conflict and runs the session with `provider=none` (observation only).
 10. **Config is validated fail-safe, and credentials never reach a log or the transcript.** `validatePolicy()` (packages/core/src/config.ts), `validateLayaConfig()` (packages/laya-runtime/src/config.ts) and the plugin's telemetry check report every problem as a warning and keep the default — a typo in a profile patch must never break a live session. The API key comes from `s1.apiKey` or the provider's environment variable (`TYPESAFE_API_KEY`, generic fallback `S1CAP_API_KEY`), is passed straight to the client, and is only ever printed through `redactKey()`; session and control JSONL sinks must differ, because merging them would let control-plane records become segments (rule 6).
 
@@ -153,44 +153,13 @@ Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai
 Two planes:
 
 ```mermaid
-flowchart LR
-  subgraph HAR["Harness session - one user turn = many LLM steps"]
-    X["User turn x<br/>user input · tool results · traces"]
-    TL["Run + verify<br/>tool exec · results · verification"]
-    ST["Stop - the model's own call<br/>S1CAP cannot veto or prolong it"]
-  end
-
-  subgraph SYNC["Per-call hook (synchronous, bounded)"]
-    ASM["ASSEMBLER<br/>assembles before every LLM call"]
-    LLM["System-2 LLM step<br/>think · act · call tools"]
-  end
-
-  subgraph PLAN["Advisory ordering"]
-    S1D["S1 decision backend<br/>choice scoring"]
-    GATE["PLAN GATE<br/>orders plans the model gave"]
-  end
-
-  subgraph UP["Async RG upkeep - off the critical path"]
-    RGU["RG upkeep<br/>scores new session events"]
-    RG["Association graph RG<br/>weights w·exp(-dt/lambda)"]
-  end
-
-  subgraph S1A["System-1 backends (POST /v1/systemone)"]
-    S1ASSOC["S1 association backend<br/>noul relevance scoring"]
-  end
-
-  X -->|"input x"| ASM
-  ASM -->|"assembled view (TAS), per call"| LLM
-  LLM -->|"act · tool call"| TL
-  TL -.->|"next LLM step · model continues (self-loop)"| TL
-  TL -.->|"model stops"| ST
-  LLM -->|"candidate plans (when offered)"| S1D
-  S1D -->|"choice scores"| GATE
-  GATE -->|"advisory order · never vetoes stop"| TL
-  TL -.->|"new session events"| RGU
-  RGU -.->|"weights + decay (may lag)"| RG
-  RG -->|"bounded recall + budget"| ASM
-  S1ASSOC -.->|"relevance scoring (noul)"| RGU
+block-beta
+  columns 1
+  L1["① Harness session — one user turn = many LLM steps<br/>sends session events · act · tool calls — receives the assembled context and the advisory order"]
+  L2["② System-2 compute — one LLM step at a time<br/>receives the assembled view (TAS) · sends candidate plans, when the model offers them"]
+  L3["③ S1CAP control — per-call hook, advisory<br/>ASSEMBLER (BFS τ,d + budget + TAS) · PLAN GATE (order · attempt cap M = 2)"]
+  L4["④ Async RG upkeep — off the critical path<br/>Segment / Recall → RG Upkeep → Association Graph · silent, may lag the session"]
+  L5["⑤ System-1 backends — POST /v1/systemone<br/>S1 assoc (noul relevance) · S1 decide (choice scoring) · Laya or Jev runtime"]
 ```
 - **Event intake:** the harness adapter turns session events (user input x, tool results, reasoning traces) into `RawEvent`s and writes the assembled context back to the **model view only** (§5.1, §6).
 - **Segment / Recall:** message-level segments (never token-level, per the project's segmentation rule) + two-tier candidate generation — tier-0 metadata (free, always on) and tier-1 (embedding ANN *or* S1 noul batch, config-selected).
