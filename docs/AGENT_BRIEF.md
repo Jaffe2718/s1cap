@@ -1,4 +1,4 @@
-# s1-governor — Agent Implementation Brief
+# S1CAP — Agent Implementation Brief
 
 **Version** 0.1 · 2026-09-28 · Pre-implementation
 **Purpose:** complete, self-contained instructions for an AI coding agent (DSH / Claude Code / opencode / pi) to build this project's software stack: the System-1-governed context-lifecycle middleware, the DSH plugin, the 2×2 benchmark/ablation harness, and the paper's experimental artifacts.
@@ -100,7 +100,7 @@ Two planes:
 ```
                         ┌────────────────────────────────────────────────┐
                         │            SYSTEM-1 CONTROL PLANE              │
-                        │  (the "governor" — cheap, ~ms, ~$0.001/turn)   │
+                        │  (S1CAP control — cheap, ~ms, $0.001/turn)     │
                         │                                                │
   session events ──────►│ SEGMENTER ──► RECALL (tier-0 meta + tier-1) ──►│
   (append-only log)     │                    │                           │
@@ -143,11 +143,11 @@ Two planes:
 pnpm monorepo:
 
 ```
-s1-governor/
+s1cap/
   packages/core/        # segmenter, rg, assembler, plan-gate, config, telemetry schemas (pure TS, no IO)
   packages/s1-client/   # /v1/systemone client + provider matrix (jev | laya-serve | edgejev | kev | none)
   packages/proxy/       # OpenAI-compatible middleware (Hono): passthrough + request rewrite + telemetry
-  packages/dsh-plugin/  # "dsh-s1-governor": cordis bundle, surface assembly, pre-step hook, /s1 commands
+  packages/dsh-plugin/  # "dsh-s1cap": cordis bundle, surface assembly, pre-step hook, /s1 commands
   bench/
     runners/            # swe-verified/ | terminal-bench/ | tau2/  (fetch, run cell, parse, score)
     cells/              # the four ablation cell configs (JSON)
@@ -272,10 +272,10 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 
 ---
 
-## 6. DSH plugin (`dsh-s1-governor`)
+## 6. DSH plugin (`dsh-s1cap`)
 
-- `package.json`: name `dsh-s1-governor`; `dsh.bundle.patch`; peerDeps mirror `dsh-command-context-trim` (§1.5); dev-pin harness contracts as devDependencies; `dsh.compatibility.dshReleases` for 0.1.2-rc.1 / 0.1.5-rc.x / 0.1.7-rc.2.
-- `cordis.patch.yml` insert: `id: s1-governor`, config surface = §4 `AssemblyPolicy` defaults.
+- `package.json`: name `dsh-s1cap`; `dsh.bundle.patch`; peerDeps mirror `dsh-command-context-trim` (§1.5); dev-pin harness contracts as devDependencies; `dsh.compatibility.dshReleases` for 0.1.2-rc.1 / 0.1.5-rc.x / 0.1.7-rc.2.
+- `cordis.patch.yml` insert: `id: s1cap`, config surface = §4 `AssemblyPolicy` defaults.
 - Registrations:
   - message-append events → SEGMENTER + tier-1 RECALL incrementally (background, awaitable);
   - `agent/pre-step` listener → ASSEMBLER → surface replace ops (non-S1 path < 50 ms);
@@ -387,10 +387,10 @@ Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Ter
   - In-paper expansion: "S1CAP (System-1 Selective Context and Adaptive Planning)". Chinese gloss: 《S1CAP：基于 System-1 模型的选择性上下文与自适应规划，面向高效 LLM Agent》
   - Collision check 2026-09-28: no AI/ML/agent-space collision for "S1CAP" (web-search hits are biomedical false positives — "severe community-acquired pneumonia" literature). npm `s1cap` and `dsh-s1cap` both unregistered (404) — reserved for this project.
   - Accepted residual flag (user decision): "Selective Context" shares its name with Xiao et al., EMNLP 2023 token-level compression (github.com/liyucheng09/Selective_Context). Mitigation is mandatory in paper §2: cite it and explicitly distinguish — token-level pruning for input compression vs segment-level association-graph recall for agent context lifecycle.
-  - Repo/package alignment (decide before first public release): `s1cap` (repo + npm proxy `s1cap` + DSH plugin `dsh-s1cap`) for full paper/repo/plugin name alignment — recommended; or keep `s1-governor` branding.
+  - Repo/package naming (decided 2026-09-28): repo `s1cap`, npm proxy `s1cap`, DSH plugin `dsh-s1cap` — paper/repo/plugin三点一线。仓库已建：github.com/Jaffe2718/s1cap
 - 1 Intro: agent-loop context economics (cache-hit ≈ 50× cheaper than miss); Trace-as-State principle; the arrival of decision models.
 - 2 Related work: agent memory (MemGPT, Mem0, Zep, A-Mem, HippoRAG 1/2, MemOS, MESA, GAAMA, EMem); in-loop folding (AgentFold); order sensitivity (Lost in the Middle, Re2, Ok&Lee, CoRe, Racing Thoughts); prompt compression (LLMLingua 1/2); caching (Prompt Cache, CacheGen, Don't Break the Cache); routing/cascades (RouteLLM, FrugalGPT, Hybrid LLM); harness prior art (dsh-command-context-trim, pi-system-one, hermes-jev-skills, dsh-typesafe, laya-jev-GraphRAG); decision models (Jev, Laya, Kev, JevBench). Full verified list: `docs/RELATED_WORK.md`.
-- 3 Method: governor architecture; association graph; TAS assembly; plan gate; cost model.
+- 3 Method: S1CAP control-layer architecture; association graph; TAS assembly; plan gate; cost model.
 - 4 Setup: 2×2, benchmarks, telemetry.
 - 5 Results: quality/cost/time + Pareto; **cache-hit waterfall (H3)**; degradation; case studies.
 - 6 Analysis: when does TAS pay for its cache penalty; S1 decision quality vs outcome; failure modes (jaggedness, adversarial segments).

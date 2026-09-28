@@ -6,7 +6,7 @@
 
 **S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents** · [中文说明](./README.zh-CN.md)
 
-S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The governor intervenes at exactly **two points**:
+S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The S1CAP control layer intervenes at exactly **two points**:
 
 1. **Selective Context** *(context lifecycle)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide **what the LLM sees**, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`.
 2. **Adaptive Planning** *(decision priority)* — when the LLM proposes candidate plans, the same System-1 model scores them as a **choice question** with probabilities; plans execute in probability order under a verification oracle, and unexecuted alternatives are discarded on first success.
@@ -25,7 +25,7 @@ Everything is **measured, not assumed**: solve rate, token cost split by prompt-
 
 ```
                       ┌──────────────────────────────────────────────────┐
-                      │           SYSTEM-1 CONTROL PLANE (governor)      │
+                      │           SYSTEM-1 CONTROL PLANE (S1CAP)         │
                       │   SEGMENTER → two-tier RECALL → RG STORE (SQLite)│
                       │   ASSEMBLER: BFS-τ-d recall, token budget,       │
                       │   Trace-as-State layout, cache-aware prefix      │

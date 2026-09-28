@@ -69,7 +69,7 @@ This dossier serves paper §2 and the novelty audit. Axes: **(a)** association g
 | hermes-jev-skills | Jev-powered routing, memory, compaction, skill selection for Hermes/Claude Code/Codex | https://github.com/kerpopule/hermes-jev-skills | Closest combination-axis prior work: Jev inside harnesses driving memory/compaction — but no association graph (a), no budgeted TAS assembly (b proper), no probability plan pre-ranking (c), no cache/latency telemetry (d); integration repo, no research evaluation |
 | dsh-typesafe | Jev decision layer for DSH: typed decisions, confidence-gated routing, cost meter | https://github.com/979569650/dsh-typesafe | (c)/(d)-lite, routing-only |
 | laya-jev-GraphRAG | Agentic GraphRAG with swappable System One models, A* traversal over graph DBs | https://github.com/bodepudimuneendra-netizen/laya-jev-GraphRAG | GraphRAG over documents, not agent-trace context management |
-| DSH plugin hub / dshmarket | Community marketplaces (10,000+ plugins) | https://dsh-plugin.org · https://www.npmjs.com/package/dshmarket | Distribution channels for `dsh-s1-governor` |
+| DSH plugin hub / dshmarket | Community marketplaces (10,000+ plugins) | https://dsh-plugin.org · https://www.npmjs.com/package/dshmarket | Distribution channels for `dsh-s1cap` |
 
 ## 6. Closest-works ranking (novelty audit, Sept 2026)
 

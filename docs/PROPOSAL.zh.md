@@ -1,4 +1,4 @@
-# s1-governor 项目提案（人读版）
+# S1CAP 项目提案（人读版）
 
 **版本** 0.1 · 2026-09-28 · 面向 Supervisor / Cooperator
 **配套文档:** [AGENT_BRIEF.md](./AGENT_BRIEF.md)（投喂给编码 Agent 的完整实施规格，英文）· [RELATED_WORK.md](./RELATED_WORK.md)（全部经 URL 核验的相关工作档案）
@@ -51,7 +51,7 @@
 
 ### 3.1 总体架构：System-1 控制平面 / System-2 计算平面
 
-廉价决策模型作为**治理层**（governor）运行在 harness 与 LLM 之间，LLM 本体不做任何修改。组件：SEGMENTER（分片）→ RECALL（两级召回）→ RG STORE（SQLite 关联图）→ ASSEMBLER（预算内 BFS 选择 + TAS 布局）→ PLAN GATE（choice 预排序 + 尝试控制）→ TELEMETRY（版本化 JSONL 遥测）。适配层：DSH 一等插件（`dsh-s1-governor`）+ OpenAI-compatible 代理（可移植到 opencode / Claude Code / pi）。
+廉价决策模型作为**治理层**（S1CAP 控制平面）运行在 harness 与 LLM 之间，LLM 本体不做任何修改。组件：SEGMENTER（分片）→ S1 关联计算（新片段 × 历史片段，扩充 RG）→ RG STORE（SQLite 关联图）→ ASSEMBLER（预算内 BFS 选择 + TAS 布局）→ PLAN GATE（choice 预排序 + 尝试控制）→ TELEMETRY（版本化 JSONL 遥测）。适配层：DSH 一等插件（`dsh-s1cap`）+ OpenAI-compatible 代理（可移植到 opencode / Claude Code / pi）。
 
 ### 3.2 相对初版设计的四个关键修正
 
@@ -146,7 +146,7 @@ DSH 的会话模型是**持久化 append-only 事件日志（人类记录，永�
 ## 8. 命名与发布
 
 - **论文标题（已锁定，2026-09-28）**：*S1CAP: Selective Context and Adaptive Planning via System-1 Models for Efficient LLM Agents*（中文对照：S1CAP：基于 System-1 模型的选择性上下文与自适应规划，面向高效 LLM Agent）。查重：AI/agent 领域无 "S1CAP" 冲突（检索命中均为医学文献 "severe CAP" 假阳性）。已知遗留并接受：与 EMNLP 2023 [Selective Context](https://github.com/liyucheng09/Selective_Context)（token 级压缩）同名——论文 §2 必须引用并显式区分（token 剪枝 vs 分片级关联图召回）。
-- **仓库**：推荐 `s1cap`（与论文系统名对齐；npm `s1cap` 与 `dsh-s1cap` 均未注册，2026-09-28 核实 404），备选 `s1-governor`（npm `s1-governor` / `dsh-s1-governor` 同样可用）。命名空间说明：`system-one`/`s1` 裸前缀在决策模型生态已拥挤（s1-rs、pi-system-one、system-one-core），带 CAP 后缀即独占；首次公开发布前定案，保持论文/repo/插件三点一线。
+- **仓库（已定案，2026-09-28）**：`s1cap` —— 已建库 [github.com/Jaffe2718/s1cap](https://github.com/Jaffe2718/s1cap)；npm `s1cap`（代理）与 `dsh-s1cap`（DSH 插件）均未注册（核实 404），论文/repo/插件三点一线。命名空间说明：`system-one`/`s1` 裸前缀在决策模型生态已拥挤（s1-rs、pi-system-one、system-one-core），带 CAP 后缀即独占。
 - **Description**：*A System-1 decision model (Jev/Laya/Kev-class) governs the context lifecycle of LLM agent harnesses: an association graph over session segments, relevance-gated context assembly with Trace-as-State ordering, and pre-execution plan ranking — with full cache-hit/miss, cost, and latency telemetry. DSH plugin + harness-agnostic proxy.*
 - **Topics**：`llm-agents` `context-engineering` `agent-memory` `context-window` `prompt-caching` `kv-cache` `system-one` `decision-models` `jev` `laya` `small-language-models` `coding-agent` `deepseek-harness` `dsh-plugin` `agent-harness` `opencode` `claude-code` `benchmark` `ablation-study`
 - **发布渠道**：dshmarket / DSH Plugin Hub / GitHub topic `dsh-plugin`；论文 target venue 待定（Open Questions #4）。
