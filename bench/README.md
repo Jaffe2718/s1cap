@@ -23,3 +23,19 @@ bench/
   stats/      McNemar + paired bootstrap + Holm; frozen before the first full run
   analysis/   Pareto and cache-waterfall figures
 ```
+
+## Selection status — deferred to M3 (user decision 2026-09-28)
+
+Which suites to run, how many instances per cell, and whether recall uses lexical scoring or embeddings are
+**evaluation-stage questions**; they are deliberately unanswered until M3. Nothing in M1/M2 depends on them,
+because the two pieces that would have been expensive to retrofit are already in place:
+
+- **cost / cache telemetry**: `packages/core/src/telemetry.ts` v1 already records `cacheHitTokens`,
+  `cacheMissTokens` and `outputTokens` per step, and derives cached-token cost and `cacheHitRate` from the
+  hit/miss prices — so no run has to be repeated to obtain the cost claim.
+- **ablation cells**: `cellPolicy(cell)` (`packages/core/src/types.ts`) derives C1–C4 from toggles, with the
+  invariants fixed in *every* cell (`termination: model-owned`, `rgMaintenance.mode: async`) and asserted in
+  `packages/core/test/authority.test.ts`.
+
+Still open, and cheap to close later: recall scoring is lexical today (BM25/entity overlap); adding an
+embedding backend touches the assembler's candidate generation only.
