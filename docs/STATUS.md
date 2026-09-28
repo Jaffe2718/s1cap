@@ -320,7 +320,7 @@ verified, it says so instead of guessing.
     so the linked plugin may need a reinstall (`dsh plugin --profile s1captest remove` + `add link:…`) or an
     additional declaration field before the entry appears. Also note the shipped client ids are **package names**
     (`@deepseek-ai/dsh-client-ui-…`), which our `id: 'dsh-s1cap'` matches.
-- [~] **N4** Settings panel: the **host half is done and verified**; the browser half is written but cannot load yet — see the round-19 finding below
+- [x] **N4** Settings panel shipped and verified in a real browser: **S1CAP** appears in Settings, the panel renders, and it reads credential state through the host RPC (evidence below)
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
     `'systemPrompt'` is added to `inject` (Cordis throws on uninjected access — that is how the earlier
@@ -360,6 +360,33 @@ The panel itself (plain JS, `React.createElement`, no bundler): shows whether a 
 never echoes the value; the host half reads the same ref back (`packages/dsh-plugin/src/credentials.ts`).
 **Lesson worth keeping:** a linked plugin needs a reinstall before DSH registers its client entry — the boot
 table is built from install metadata, not from the package.json on disk.
+### N4 evidence (round 20 — the panel is live in the browser)
+
+Driven through a real browser against the sandbox web profile: opening **设置** shows a **S1CAP** section next to
+通用设置 / 模型 / 内置插件 / Agent 预设, and the panel renders
+
+```
+S1CAP — System-1 backend
+… This panel holds the credential for the cloud System-1 backend (Jev) …
+no Jev key stored          ← the credential read succeeded
+[ password field: "paste the Jev API key" ]  [Save] [Clear]
+Credential reference: s1cap/jev. …
+```
+
+with no failure screen and no error from the half (`window.__S1CAP_CLIENT_ERROR__` is null; the boot table lists
+`dsh-s1cap` among 66 entries).
+
+**The two mistakes that took three rounds, both now understood:**
+1. **The factory is the module body.** DSH's loader states it verbatim in its own client module:
+   `factory: (require) => { var module = { exports: {} }; var exports = module.exports; … return module.exports; }`.
+   An earlier revision returned a *nested function*, so the body never ran and DSH reported the entry as failed with
+   no error surfacing from the file. `require` is the factory's **argument**; `module` is declared by the module
+   itself.
+2. **Client RPC namespaces must be injected.** Cordis throws on access to an uninjected service, which the panel
+   itself reported: `cannot get property "remote" without inject`. The half now injects
+   `['slots', 'remote', 'remote.credentials']` — the same namespaces the shipped key UI declares.
+Also: a **linked** plugin must be reinstalled after any change to its client declaration, because the boot table is
+built from install metadata rather than from the package.json on disk.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
