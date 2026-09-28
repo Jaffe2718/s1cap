@@ -94,13 +94,9 @@ export class S1TimeoutError extends Error {
   }
 }
 
-/** Known deployments. `laya-serve` / EdgeJev / Kev expose the same protocol locally. */
-export const PROVIDERS = {
-  jev: { baseUrl: 'https://api.typesafe.ai', model: 'jev-latest' },
-  'laya-serve': { baseUrl: 'http://127.0.0.1:8008', model: 'laya-typed-decisions' },
-  edgejev: { baseUrl: 'http://127.0.0.1:8008', model: 'laya-mmbert-322m-int8' },
-  kev: { baseUrl: 'http://127.0.0.1:8008', model: 'kev-4b' },
-} as const;
+/** Known deployments live in `providers.ts` (one active backend at a time); re-exported here. */
+export * from './providers.ts';
+export * from './resolve.ts';
 
 export class S1Client {
   #baseUrl: string;

@@ -38,6 +38,8 @@
           fanout: 8
           # tier1: embed (local ANN) | s1 (noul batch) | off
           tier1: embed
+          # "" = the tier-1 embedding model's own default
+          embedModel: ""
           budgetRatio: 0.35
           minRecalledShare: 0.25
         tail:
@@ -48,8 +50,16 @@
           attemptCap: 2
           abstainConfidence: 0.5
         s1:
-          # jev | laya-serve | edgejev | kev | none
+          # jev | laya-serve | edgejev | kev | none — EXACTLY ONE backend is active at a time:
+          # enabling Laya while selecting a cloud provider is a config error, not a priority rule
           provider: jev
+          # "" = provider default; for laya-serve it follows the Laya runtime's host/port
+          baseUrl: ""
+          # "" = provider default (jev-latest | laya-typed-decisions | ...) or the Laya checkpoint name
+          model: ""
+          # "" = read TYPESAFE_API_KEY (jev) or S1CAP_API_KEY from the environment. Never logged:
+          # /s1 status prints a redacted fingerprint only.
+          apiKey: ""
           timeoutMs: 2500
           questionsPerCall: 20
         # Local Laya backend (docs/LAYA_RUNTIME.md). Enable after installing the

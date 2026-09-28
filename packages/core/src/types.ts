@@ -109,8 +109,12 @@ export interface AssemblyPolicy {
   };
   s1: {
     provider: S1ProviderName;
+    /** "" = use the provider default (or the Laya runtime's host/port) */
     baseUrl?: string;
+    /** "" = use the provider default (or the Laya checkpoint name) */
     model?: string;
+    /** "" = read the provider's environment variable (TYPESAFE_API_KEY / S1CAP_API_KEY); never logged */
+    apiKey?: string;
     timeoutMs: number;
     /** questions per /v1/systemone call (context-rot guard) */
     questionsPerCall: number;
@@ -174,12 +178,13 @@ export function defaultPolicy(): AssemblyPolicy {
       depth: 2,
       fanout: 8,
       tier1: 'embed',
+      embedModel: '',
       budgetRatio: 0.35,
       minRecalledShare: 0.25,
     },
     tail: { k: 3 },
     planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
-    s1: { provider: 'jev', timeoutMs: 2500, questionsPerCall: 20 },
+    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', timeoutMs: 2500, questionsPerCall: 20 },
   };
 }
 

@@ -17,9 +17,9 @@
  * that can `import laya`, launches `laya-serve` and health-checks `/v1/models`.
  * Context-lifecycle hooks stay skeletons until M1.
  */
-import type { AssemblyPolicy } from '@s1cap/core';
-import { defaultPolicy } from '@s1cap/core';
-import type { LayaConfig } from '@s1cap/laya-runtime';
+import type { AssemblyPolicy, Issue, ValidationResult } from '@s1cap/core';
+import { defaultPolicy, validatePolicy } from '@s1cap/core';
+import type { LayaConfig, LayaValidation } from '@s1cap/laya-runtime';
 import {
   LayaServer,
   createNodeDiscoveryDeps,
@@ -28,7 +28,10 @@ import {
   discoverLayaPython,
   installHint,
   layaBaseUrl,
+  validateLayaConfig,
 } from '@s1cap/laya-runtime';
+import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackendIssues } from '@s1cap/s1-client';
+import type { ResolvedS1Backend } from '@s1cap/s1-client';
 
 export interface S1CapPluginConfig extends AssemblyPolicy {
   /**
@@ -40,6 +43,75 @@ export interface S1CapPluginConfig extends AssemblyPolicy {
   laya?: LayaConfig;
 }
 
+export interface TelemetrySinks {
+  sessionJsonl: string;
+  controlJsonl: string;
+}
+
+export const DEFAULT_TELEMETRY: TelemetrySinks = {
+  sessionJsonl: './.s1cap/session.jsonl',
+  controlJsonl: './.s1cap/control.jsonl',
+};
+
+export interface ResolvedPluginConfig {
+  config: S1CapPluginConfig;
+  policy: ValidationResult;
+  laya: LayaValidation;
+  telemetry: TelemetrySinks;
+  /** single-backend violations: a conflict degrades the session to observation mode */
+  conflicts: string[];
+  telemetryErrors: string[];
+}
+
+/**
+ * Validate and normalise the whole plugin config. Fail-safe: invalid values are reported and
+ * the default is kept, so a typo in a profile patch can never break a live session.
+ */
+export function resolvePluginConfig(raw?: Partial<S1CapPluginConfig>): ResolvedPluginConfig {
+  const source = (raw ?? {}) as Record<string, unknown>;
+  const policy = validatePolicy(source, ['laya', 'telemetry']);
+  const laya = validateLayaConfig(source.laya);
+
+  const telemetryErrors: string[] = [];
+  const telemetry: TelemetrySinks = { ...DEFAULT_TELEMETRY };
+  const rawTelemetry = (source.telemetry ?? {}) as Record<string, unknown>;
+  for (const key of ['sessionJsonl', 'controlJsonl'] as const) {
+    const value = rawTelemetry[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || value.trim() === '') {
+      telemetryErrors.push(`${key} must be a non-empty string (default kept)`);
+      continue;
+    }
+    telemetry[key] = value;
+  }
+  if (telemetry.sessionJsonl === telemetry.controlJsonl) {
+    // merging the streams would let control-plane records become segments (docs/CONTROL_PLANE_LOGGING.md)
+    telemetryErrors.push('sessionJsonl and controlJsonl must differ — the two streams may never be merged');
+    telemetry.sessionJsonl = DEFAULT_TELEMETRY.sessionJsonl;
+    telemetry.controlJsonl = DEFAULT_TELEMETRY.controlJsonl;
+  }
+
+  const config = {
+    ...policy.policy,
+    telemetry,
+    laya: laya.config,
+  } as S1CapPluginConfig;
+
+  return {
+    config,
+    policy,
+    laya,
+    telemetry,
+    conflicts: singleBackendIssues(config.s1, laya.config),
+    telemetryErrors,
+  };
+}
+
+/** Kept for callers that only want the merged config. */
+export function resolveConfig(raw?: Partial<S1CapPluginConfig>): S1CapPluginConfig {
+  return resolvePluginConfig(raw).config;
+}
+
 /** Minimal structural shape of the Cordis plugin context we rely on (M1 fills the types). */
 export interface PluginContext {
   on(event: string, handler: (...args: unknown[]) => unknown, options?: { prepend?: boolean }): void;
@@ -49,13 +121,6 @@ export interface PluginContext {
 }
 
 export const name = 'dsh-s1cap';
-
-/** Cordis resolves config through schemastery in production; skeleton keeps the raw shape. */
-export function resolveConfig(raw: Partial<S1CapPluginConfig> | undefined): S1CapPluginConfig {
-  const base = defaultPolicy();
-  const laya = { ...defaultLayaConfig(), ...(raw?.laya ?? {}) };
-  return { ...base, ...(raw ?? {}), laya } as S1CapPluginConfig;
-}
 
 export interface LayaRuntimeState {
   status: 'stopped' | 'starting' | 'ready' | 'failed';
@@ -139,13 +204,40 @@ export class LayaRuntime {
 }
 
 export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void {
-  const config = resolveConfig(raw);
+  const resolved = resolvePluginConfig(raw);
+  const config = resolved.config;
   const layaConfig = config.laya ?? defaultLayaConfig();
   const runtime = new LayaRuntime(layaConfig);
 
-  ctx.logger?.info(
-    `[s1cap] cell=${config.cell} tas=${String(config.tas.on)} tier1=${config.recall.tier1} planGate=${String(config.planGate.on)} s1=${config.s1.provider} laya=${String(layaConfig.enabled)}`,
+  for (const issue of resolved.policy.warnings) ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message}`);
+  for (const issue of resolved.laya.warnings) ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message}`);
+  for (const issue of [...resolved.policy.errors, ...resolved.laya.errors] as Issue[]) {
+    ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message} (default kept)`);
+  }
+  for (const message of resolved.telemetryErrors) ctx.logger?.warn(`[s1cap] config telemetry: ${message}`);
+
+  // One S1 backend at a time (docs/AGENT_BRIEF.md §0.9). A conflict is reported and the session
+  // degrades to observation mode rather than silently picking a governor.
+  for (const conflict of resolved.conflicts) ctx.logger?.warn(`[s1cap] ${conflict}`);
+  const backend: ResolvedS1Backend = resolveS1Backend(
+    resolved.conflicts.length > 0 ? { ...config.s1, provider: 'none' } : config.s1,
+    layaConfig,
   );
+  const client =
+    backend.mode !== 'none' && backend.baseUrl
+      ? new S1Client({
+          baseUrl: backend.baseUrl,
+          ...(backend.apiKey ? { apiKey: backend.apiKey } : {}),
+          ...(backend.model ? { model: backend.model } : {}),
+          timeoutMs: config.s1.timeoutMs,
+        })
+      : undefined;
+
+  ctx.logger?.info(
+    `[s1cap] cell=${config.cell} tas=${String(config.tas.on)} tier1=${config.recall.tier1} planGate=${String(config.planGate.on)} laya=${String(layaConfig.enabled)}`,
+  );
+  ctx.logger?.info(`[s1cap] s1 backend: ${describeS1Backend(backend)}`);
+  if (resolved.conflicts.length > 0) ctx.logger?.warn('[s1cap] this session makes no System-1 calls (provider=none)');
 
   if (layaConfig.enabled && layaConfig.autoStart) {
     void runtime
@@ -167,12 +259,55 @@ export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): voi
     return undefined;
   });
 
+  // `/s1 status` never prints the API key: the resolved backend is described through redactKey().
   ctx.command?.({
     name: 's1',
-    description: 'S1CAP: status | config | graph | why <seq>',
+    description: 'S1CAP status: policy, resolved System-1 backend, Laya state, sinks',
     run: () => {
-      ctx.logger?.info(`[s1cap] ${JSON.stringify({ cell: config.cell, policy: config }, null, 2)}`);
-      return undefined;
+      const status = {
+        cell: config.cell,
+        termination: config.termination,
+        assemblyDeadlineMs: config.assemblyDeadlineMs,
+        rgMaintenance: config.rgMaintenance,
+        cache: config.cache,
+        tas: config.tas,
+        recall: config.recall,
+        tail: config.tail,
+        planGate: config.planGate,
+        s1: {
+          provider: backend.provider,
+          mode: backend.mode,
+          baseUrl: backend.baseUrl,
+          model: backend.model,
+          key: redactKey(backend.apiKey),
+          timeoutMs: config.s1.timeoutMs,
+          questionsPerCall: config.s1.questionsPerCall,
+        },
+        laya: runtime.summary(),
+        telemetry: resolved.telemetry,
+        configIssues: {
+          errors: resolved.policy.errors.concat(resolved.laya.errors as Issue[]).map((i) => `${i.path}: ${i.message}`),
+          warnings: resolved.policy.warnings.concat(resolved.laya.warnings as Issue[]).map((i) => `${i.path}: ${i.message}`),
+          conflicts: resolved.conflicts,
+          telemetry: resolved.telemetryErrors,
+        },
+      };
+      ctx.logger?.info(`[s1cap] ${JSON.stringify(status, null, 2)}`);
+      return status;
+    },
+  });
+
+  // Closed-loop probe: proves the configured backend is actually reachable.
+  ctx.command?.({
+    name: 's1 ping',
+    description: 'S1CAP: probe the resolved System-1 backend (GET /health)',
+    run: async () => {
+      if (!client) return { ok: false, reason: 'provider=none (no System-1 backend is active)' };
+      const started = Date.now();
+      const ok = await client.health();
+      const result = { ok, baseUrl: backend.baseUrl, model: backend.model, ms: Date.now() - started };
+      ctx.logger?.info(`[s1cap] ping ${ok ? 'ok' : 'unreachable'} ${String(backend.baseUrl)} in ${result.ms}ms`);
+      return result;
     },
   });
 

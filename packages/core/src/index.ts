@@ -1,4 +1,5 @@
 export * from './types.ts';
+export * from './config.ts';
 export * from './segmenter.ts';
 export * from './assoc-graph.ts';
 export * from './assembler.ts';
