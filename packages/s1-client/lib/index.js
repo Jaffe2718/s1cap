@@ -1,0 +1,210 @@
+/**
+ * Thin client for the decision-model wire protocol `POST {baseUrl}/v1/systemone`
+ * (TypeSafe Jev; wire-compatible with Laya `laya-serve`, EdgeJev, Kev).
+ *
+ * Verified request/response shape (docs/AGENT_BRIEF.md §1.2):
+ *   request  { state, model?, questions: { <id>: { type, instructions, criteria? } } }
+ *   response { model, answers: { <id>: {...} }, usage: { input_tokens, output_tokens } }
+ *
+ * Interop note: `system-one-core` (npm, MIT) implements the same protocol with
+ * `HttpSystemOneProvider`; this client is vendored to keep S1CAP dependency-free
+ * for offline test runs and to own normalization/telemetry semantics.
+ */
+
+                               
+               
+                       
+                                             
+ 
+
+                                 
+                 
+                       
+                                                              
+                                          
+ 
+
+                                
+                
+                       
+                                          
+                     
+ 
+
+                                                                       
+
+                             
+               
+                                                                 
+               
+ 
+
+                               
+                 
+                 
+                                        
+                     
+ 
+
+                              
+                
+                
+                  
+                                         
+                     
+ 
+
+                                                               
+
+                          
+                       
+                        
+ 
+
+                                 
+                
+                                    
+                 
+             
+ 
+
+                                  
+                  
+                  
+                 
+                                                                  
+                     
+                             
+                           
+ 
+
+export class S1HttpError extends Error {
+           status        ;
+  constructor(status        , message        ) {
+    super(message);
+    this.name = 'S1HttpError';
+    this.status = status;
+  }
+}
+
+export class S1TimeoutError extends Error {
+  constructor(timeoutMs        ) {
+    super(`systemone request timed out after ${timeoutMs}ms`);
+    this.name = 'S1TimeoutError';
+  }
+}
+
+/** Known deployments live in `providers.ts` (one active backend at a time); re-exported here. */
+export * from './providers.js';
+export * from './resolve.js';
+
+export class S1Client {
+  #baseUrl        ;
+  #apiKey                    ;
+  #model                    ;
+  #timeoutMs        ;
+  #fetch              ;
+
+  constructor(opts                 ) {
+    this.#baseUrl = opts.baseUrl.replace(/\/+$/, '');
+    this.#apiKey = opts.apiKey;
+    this.#model = opts.model;
+    this.#timeoutMs = opts.timeoutMs ?? 2500;
+    this.#fetch = opts.fetchImpl ?? fetch;
+  }
+
+  /** Evaluate any number of questions against one state in a single call. */
+  async decide(state         , questions                            )                          {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
+    try {
+      const headers                         = { 'content-type': 'application/json' };
+      if (this.#apiKey) headers.authorization = `Bearer ${this.#apiKey}`;
+
+      const res = await this.#fetch(`${this.#baseUrl}/v1/systemone`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          state,
+          ...(this.#model ? { model: this.#model } : {}),
+          questions,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new S1HttpError(res.status, `systemone ${res.status}: ${body.slice(0, 200)}`);
+      }
+
+      const json = (await res.json())                           ;
+      return {
+        model: json.model ?? this.#model ?? 'unknown',
+        answers: json.answers ?? {},
+        usage: json.usage ?? { input_tokens: 0, output_tokens: 0 },
+        ms: Date.now() - started,
+      };
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') throw new S1TimeoutError(this.#timeoutMs);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * GET /health — the readiness probe of Laya-style deployments.
+   * Verified: `laya-serve` 0.3.21 exposes `/health` and `/v1/systemone` only.
+   */
+  async health()                   {
+    try {
+      const res = await this.#fetch(`${this.#baseUrl}/health`);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /** GET /v1/models — available on the hosted Jev deployment, not on `laya-serve`. */
+  async models()                    {
+    const headers                         = {};
+    if (this.#apiKey) headers.authorization = `Bearer ${this.#apiKey}`;
+    const res = await this.#fetch(`${this.#baseUrl}/v1/models`, { headers });
+    if (!res.ok) throw new S1HttpError(res.status, `models ${res.status}`);
+    const json = (await res.json())                                           ;
+    if (Array.isArray(json)) return json;
+    return (json.data ?? []).map((m) => m.id ?? '').filter(Boolean);
+  }
+}
+
+/** Probability normalization — Jev does not guarantee invariants (Σp may exceed 1). */
+export function normalize(raw                        )                         {
+  const entries = Object.entries(raw).filter(([, v]) => Number.isFinite(v) && v > 0);
+  const sum = entries.reduce((a, [, v]) => a + v, 0);
+  if (entries.length === 0 || sum <= 0) {
+    const ids = Object.keys(raw);
+    const u = ids.length > 0 ? 1 / ids.length : 0;
+    return Object.fromEntries(ids.map((id) => [id, u]));
+  }
+  return Object.fromEntries(entries.map(([id, v]) => [id, v / sum]));
+}
+
+// ---- question helpers (mirrors system-one-core's noul/choice/score) ----
+
+export function noul(instructions        , criteria                                  )               {
+  return criteria ? { type: 'noul', instructions, criteria } : { type: 'noul', instructions };
+}
+
+export function choice(instructions        , criteria                               )                 {
+  return { type: 'choice', instructions, criteria };
+}
+
+export function score(instructions        , criteria          )                {
+  return { type: 'score', instructions, criteria };
+}
+
+/** Jev input-only pricing. */
+export function s1CostUsd(inputTokens        , pricePerMInput = 0.042)         {
+  return (inputTokens * pricePerMInput) / 1_000_000;
+}

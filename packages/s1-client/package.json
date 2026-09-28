@@ -2,12 +2,14 @@
   "name": "@s1cap/s1-client",
   "version": "0.1.0",
   "private": true,
+  "main": "lib/index.js",
   "type": "module",
   "description": "Thin /v1/systemone client (Jev | laya-serve | EdgeJev | Kev), zero dependencies",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./lib/index.js"
   },
   "scripts": {
+    "build": "node ../../scripts/build-packages.mjs",
     "test": "node --test --experimental-strip-types \"test/*.test.ts\""
   }
 }

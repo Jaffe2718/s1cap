@@ -2,13 +2,15 @@
   "name": "@s1cap/laya-runtime",
   "version": "0.1.0",
   "private": true,
+  "main": "lib/index.js",
   "type": "module",
   "description": "Laya backend runtime: discover the system Python environment that has the laya package, launch laya-serve, and health-check the /v1/systemone endpoint",
   "author": "Yuanming Chen and LI Changzhe",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./lib/index.js"
   },
   "scripts": {
+    "build": "node ../../scripts/build-packages.mjs",
     "test": "node --test --experimental-strip-types \"test/*.test.ts\""
   }
 }

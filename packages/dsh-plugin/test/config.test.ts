@@ -8,21 +8,26 @@ interface Harness {
   ctx: PluginContext;
   logs: string[];
   warns: string[];
-  commands: Map<string, (arg?: unknown) => unknown>;
+  commands: Map<string, (arg: { rawInput?: string }) => unknown>;
   events: string[];
 }
 
 function harness(): Harness {
   const logs: string[] = [];
   const warns: string[] = [];
-  const commands = new Map<string, (arg?: unknown) => unknown>();
+  const commands = new Map<string, (arg: { rawInput?: string }) => unknown>();
   const events: string[] = [];
   const ctx: PluginContext = {
     on(event) {
       events.push(event);
     },
-    command(spec) {
-      commands.set(spec.name, spec.run);
+    effect(fn) {
+      return fn();
+    },
+    commands: {
+      register(spec) {
+        commands.set(spec.name, spec.handler);
+      },
     },
     logger: {
       info: (m: string) => logs.push(m),
@@ -81,11 +86,12 @@ test('apply() registers the hooks and commands, and a conflict degrades to obser
   apply(h.ctx, { s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: layaIdle });
 
   assert.deepEqual(h.events, ['agent/pre-step', 'agent/request-error']);
-  assert.deepEqual([...h.commands.keys()], ['s1', 's1 ping', 's1 laya']);
+  assert.deepEqual([...h.commands.keys()], ['s1', 's1-ping', 's1-laya']);
+  assert.ok(h.logs.some((l) => l.includes('command registered: /s1')));
   assert.ok(h.warns.some((w) => w.includes('only one S1 backend')));
   assert.ok(h.warns.some((w) => w.includes('makes no System-1 calls')));
 
-  const status = h.commands.get('s1')?.() as {
+  const status = h.commands.get('s1')?.({}) as {
     s1: { provider: string; mode: string; key: string };
     telemetry: { sessionJsonl: string; controlJsonl: string };
     configIssues: { conflicts: string[] };
@@ -108,18 +114,18 @@ test('apply() reports the resolved backend without leaking the key, and ping is 
   assert.match(info, /provider=jev \(cloud\)/);
   assert.ok(!info.includes('SUPERSECRET'));
 
-  const status = h.commands.get('s1')?.() as { s1: { provider: string; key: string; baseUrl: string } };
+  const status = h.commands.get('s1')?.({}) as { s1: { provider: string; key: string; baseUrl: string } };
   assert.equal(status.s1.provider, 'jev');
   assert.equal(status.s1.baseUrl, 'https://api.typesafe.ai');
   assert.match(status.s1.key, /^sk-l…89/);
   assert.ok(!status.s1.key.includes('SUPERSECRET'));
 
-  const ping = (await h.commands.get('s1 ping')?.()) as { ok: boolean };
+  const ping = (await h.commands.get('s1-ping')?.({})) as { ok: boolean };
   assert.equal(typeof ping.ok, 'boolean', 'ping reports reachability as a boolean');
 
   const none = harness();
   apply(none.ctx, { s1: { provider: 'none' } });
-  const idle = (await none.commands.get('s1 ping')?.()) as { ok: boolean; reason: string };
+  const idle = (await none.commands.get('s1-ping')?.({})) as { ok: boolean; reason: string };
   assert.equal(idle.ok, false);
   assert.match(idle.reason, /provider=none/);
 });
@@ -137,7 +143,7 @@ test('every config problem is reported as a warning and the session keeps its de
   assert.match(warns, /termination: must be "model-owned"/);
   assert.match(warns, /recall\.tau: must be within/);
   assert.match(warns, /laya\.port: must be within/);
-  const status = h.commands.get('s1')?.() as { recall: { tau: number }; cell: string };
+  const status = h.commands.get('s1')?.({}) as { recall: { tau: number }; cell: string };
   assert.equal(status.recall.tau, 0.55, 'invalid value falls back to the default');
   assert.equal(status.cell, 'C4');
 });

@@ -5,9 +5,12 @@
   "type": "module",
   "description": "S1CAP for DeepSeek Harness: System-1-governed context lifecycle (association graph recall + Trace-as-State assembly + plan ranking)",
   "author": "Yuanming Chen and LI Changzhe",
-  "main": "src/index.ts",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-packages.mjs"
+  },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./lib/index.js"
   },
   "dsh": {
     "bundle": {
@@ -15,17 +18,14 @@
     },
     "compatibility": {
       "dshReleases": {
-        "0.1.2-rc.1": "planned",
-        "0.1.5-rc.2": "planned",
-        "0.1.5-rc.3": "planned",
-        "0.1.7-rc.2": "planned"
+        "0.1.7-rc.2": "supported"
       }
     }
   },
   "dependencies": {
-    "@s1cap/core": "workspace:*",
-    "@s1cap/laya-runtime": "workspace:*",
-    "@s1cap/s1-client": "workspace:*"
+    "@s1cap/core": "file:../core",
+    "@s1cap/laya-runtime": "file:../laya-runtime",
+    "@s1cap/s1-client": "file:../s1-client"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

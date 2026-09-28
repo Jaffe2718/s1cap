@@ -98,6 +98,33 @@ Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai
 
 ---
 
+### 1.8 DSH 0.1.7-rc.2 plugin-loading facts (verified by booting real profiles, 2026-09-28)
+
+- **A bundle must expose a compiled JS entry.** `dsh plugin --profile <p> add file:<dir>` hard-links the
+  package into the profile's `node_modules`, and Node refuses to strip TypeScript types there
+  (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). `main`/`exports` therefore point at `lib/index.js`,
+  produced by `scripts/build-packages.mjs` (zero-dependency: Node's own `stripTypeScriptTypes`).
+- **`link:` is the better development wiring** (`dsh plugin --profile <p> add link:<dir>` → junction → Node
+  resolves the real path outside `node_modules`, so `lib/` updates apply without reinstalling).
+- **The app-managed `desktop` profile cannot be touched by the CLI:**
+  `dsh plugin --profile desktop …` → *"profile "desktop" is managed exclusively by the Electron application"*.
+  Register it through the app, or edit `~/.dsh/profiles/desktop/{package.json,cordis.patch.yml}` directly.
+- **Service injection is the array form:** `export const inject = ['commands']`. An object form such as
+  `{ optional: [...] }` makes Cordis wait for a service literally named `optional`
+  (*"pending (waiting for service: optional)"*).
+- **Commands:** `ctx.effect(() => ctx.commands.register({ name, description, input: { hint }, handler }))`.
+  The service is **`commands`** (plural) and does not need a `command` property to be pre-declared.
+  Command names must match `/^[a-z][a-z0-9_-]*$/u` — **no spaces**: `name: 's1 ping'` throws at registration,
+  hence `s1`, `s1-ping`, `s1-laya`.
+- `ctx.logger?.info?.(...)`: the logger needs no injection, and both it and its methods are optional.
+- Cheap verification without touching a live profile: `dsh --profile <p> --dump-config` composes the whole
+  stack (including `--patch` overlays) and exits; `dsh --profile <p> --port <n> --no-open` boots an isolated
+  instance for an end-to-end load test, and its `dsh: warning: … did not activate` line is the pass/fail signal.
+- **Unverified:** agent lifecycle hooks. No installed plugin uses `agent/pre-step` or `agent/request-error`;
+  Cordis accepts the names, but whether DSH emits them is still open.
+
+---
+
 ## 2. System overview
 
 Two planes:

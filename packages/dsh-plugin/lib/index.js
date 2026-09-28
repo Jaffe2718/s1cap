@@ -17,9 +17,9 @@
  * that can `import laya`, launches `laya-serve` and health-checks `/v1/models`.
  * Context-lifecycle hooks stay skeletons until M1.
  */
-import type { AssemblyPolicy, Issue, ValidationResult } from '@s1cap/core';
+                                                                           
 import { defaultPolicy, validatePolicy } from '@s1cap/core';
-import type { LayaConfig, LayaValidation } from '@s1cap/laya-runtime';
+                                                                      
 import {
   LayaServer,
   createNodeDiscoveryDeps,
@@ -31,51 +31,51 @@ import {
   validateLayaConfig,
 } from '@s1cap/laya-runtime';
 import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackendIssues } from '@s1cap/s1-client';
-import type { ResolvedS1Backend } from '@s1cap/s1-client';
+                                                          
 
-export interface S1CapPluginConfig extends AssemblyPolicy {
-  /**
-   * Two independent sinks (docs/CONTROL_PLANE_LOGGING.md): the session log is the only
-   * source of segments; the control-plane log records LLM/S1/tool calls and gate
-   * decisions and is never segmented or sent to System-1.
-   */
-  telemetry?: { sessionJsonl?: string; controlJsonl?: string };
-  laya?: LayaConfig;
-}
+                                                           
+     
+                                                                                       
+                                                                                 
+                                                          
+     
+                                                               
+                    
+ 
 
-export interface TelemetrySinks {
-  sessionJsonl: string;
-  controlJsonl: string;
-}
+                                 
+                       
+                       
+ 
 
-export const DEFAULT_TELEMETRY: TelemetrySinks = {
+export const DEFAULT_TELEMETRY                 = {
   sessionJsonl: './.s1cap/session.jsonl',
   controlJsonl: './.s1cap/control.jsonl',
 };
 
-export interface ResolvedPluginConfig {
-  config: S1CapPluginConfig;
-  policy: ValidationResult;
-  laya: LayaValidation;
-  telemetry: TelemetrySinks;
-  /** single-backend violations: a conflict degrades the session to observation mode */
-  conflicts: string[];
-  telemetryErrors: string[];
-}
+                                       
+                            
+                           
+                       
+                            
+                                                                                       
+                      
+                            
+ 
 
 /**
  * Validate and normalise the whole plugin config. Fail-safe: invalid values are reported and
  * the default is kept, so a typo in a profile patch can never break a live session.
  */
-export function resolvePluginConfig(raw?: Partial<S1CapPluginConfig>): ResolvedPluginConfig {
-  const source = (raw ?? {}) as Record<string, unknown>;
+export function resolvePluginConfig(raw                             )                       {
+  const source = (raw ?? {})                           ;
   const policy = validatePolicy(source, ['laya', 'telemetry']);
   const laya = validateLayaConfig(source.laya);
 
-  const telemetryErrors: string[] = [];
-  const telemetry: TelemetrySinks = { ...DEFAULT_TELEMETRY };
-  const rawTelemetry = (source.telemetry ?? {}) as Record<string, unknown>;
-  for (const key of ['sessionJsonl', 'controlJsonl'] as const) {
+  const telemetryErrors           = [];
+  const telemetry                 = { ...DEFAULT_TELEMETRY };
+  const rawTelemetry = (source.telemetry ?? {})                           ;
+  for (const key of ['sessionJsonl', 'controlJsonl']         ) {
     const value = rawTelemetry[key];
     if (value === undefined) continue;
     if (typeof value !== 'string' || value.trim() === '') {
@@ -95,7 +95,7 @@ export function resolvePluginConfig(raw?: Partial<S1CapPluginConfig>): ResolvedP
     ...policy.policy,
     telemetry,
     laya: laya.config,
-  } as S1CapPluginConfig;
+  }                     ;
 
   return {
     config,
@@ -108,27 +108,27 @@ export function resolvePluginConfig(raw?: Partial<S1CapPluginConfig>): ResolvedP
 }
 
 /** Kept for callers that only want the merged config. */
-export function resolveConfig(raw?: Partial<S1CapPluginConfig>): S1CapPluginConfig {
+export function resolveConfig(raw                             )                    {
   return resolvePluginConfig(raw).config;
 }
 
 /** Minimal structural shape of the Cordis plugin context we rely on (verified against DSH 0.1.7-rc.2). */
-export interface CommandSpec {
-  name: string;
-  description: string;
-  input?: { hint: string };
-  handler: (arg: { rawInput?: string }) => unknown;
-}
+                              
+               
+                      
+                           
+                                                   
+ 
 
-export interface PluginContext {
-  on(event: string, handler: (...args: unknown[]) => unknown, options?: { prepend?: boolean }): void;
-  /** Cordis disposal helper: registrations inside it are torn down when the plugin unloads */
-  effect?(fn: () => unknown): unknown;
-  /** the command service (`commands`, injected as an optional dependency) */
-  commands?: { register?(spec: CommandSpec): unknown };
-  tokenMeter?: { total(): number; fixedOverhead(): number };
-  logger?: { info?(msg: string): void; warn?(msg: string): void };
-}
+                                
+                                                                                                     
+                                                                                              
+                                      
+                                                                             
+                                                       
+                                                            
+                                                                  
+ 
 
 export const name = 'dsh-s1cap';
 
@@ -142,14 +142,14 @@ export const name = 'dsh-s1cap';
 export const inject = ['commands'];
 
 /** Register the `/s1` surface; tolerant of a profile that does not mount the command service. */
-function registerCommands(ctx: PluginContext, specs: CommandSpec[]): string[] {
-  const registered: string[] = [];
+function registerCommands(ctx               , specs               )           {
+  const registered           = [];
   if (typeof ctx.commands?.register !== 'function') {
     ctx.logger?.warn?.('[s1cap] command service unavailable in this profile — /s1 commands disabled');
     return registered;
   }
   for (const spec of specs) {
-    const register = (): void => {
+    const register = ()       => {
       ctx.commands?.register?.(spec);
       registered.push(spec.name);
     };
@@ -160,13 +160,13 @@ function registerCommands(ctx: PluginContext, specs: CommandSpec[]): string[] {
   return registered;
 }
 
-export interface LayaRuntimeState {
-  status: 'stopped' | 'starting' | 'ready' | 'failed';
-  baseUrl: string;
-  pythonPath?: string;
-  error?: string;
-  logs: readonly string[];
-}
+                                   
+                                                      
+                  
+                      
+                 
+                          
+ 
 
 /**
  * Resolve the interpreter, start `laya-serve` when configured, and expose the state
@@ -174,18 +174,18 @@ export interface LayaRuntimeState {
  * stop the server and re-run discovery.
  */
 export class LayaRuntime {
-  #config: LayaConfig;
-  #server: LayaServer;
-  #pythonPath?: string;
-  #error?: string;
+  #config            ;
+  #server            ;
+  #pythonPath         ;
+  #error         ;
 
-  constructor(config: LayaConfig) {
+  constructor(config            ) {
     this.#config = config;
     this.#server = new LayaServer(config, createNodeLaunchDeps());
   }
 
   /** `discover` only probes interpreters; `start` also spawns the server. */
-  async discover(): Promise<{ pythonPath?: string; hasLaya: boolean; hint?: string; error?: string }> {
+  async discover()                                                                                    {
     const report = await discoverLayaPython(this.#config, createNodeDiscoveryDeps());
     const chosen = report.chosen;
     if (!chosen) {
@@ -205,7 +205,7 @@ export class LayaRuntime {
     };
   }
 
-  async start(): Promise<LayaRuntimeState> {
+  async start()                            {
     const discovered = await this.discover();
     if (!discovered.hasLaya || !discovered.pythonPath) {
       return this.state();
@@ -215,12 +215,12 @@ export class LayaRuntime {
     return this.state();
   }
 
-  async stop(): Promise<LayaRuntimeState> {
+  async stop()                            {
     await this.#server.stop();
     return this.state();
   }
 
-  state(): LayaRuntimeState {
+  state()                   {
     return {
       status: this.#server.status,
       baseUrl: layaBaseUrl(this.#config),
@@ -235,13 +235,13 @@ export class LayaRuntime {
    * backend's raw stdout/stderr stays a bounded diagnostic buffer and is never handed
    * to the agent as command output, so it cannot become a session segment.
    */
-  summary(): Omit<LayaRuntimeState, 'logs'> & { logLines: number } {
+  summary()                                                        {
     const { logs, ...rest } = this.state();
     return { ...rest, logLines: logs.length };
   }
 }
 
-export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void {
+export function apply(ctx               , raw                             )       {
   const resolved = resolvePluginConfig(raw);
   const config = resolved.config;
   const layaConfig = config.laya ?? defaultLayaConfig();
@@ -249,7 +249,7 @@ export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): voi
 
   for (const issue of resolved.policy.warnings) ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message}`);
   for (const issue of resolved.laya.warnings) ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message}`);
-  for (const issue of [...resolved.policy.errors, ...resolved.laya.errors] as Issue[]) {
+  for (const issue of [...resolved.policy.errors, ...resolved.laya.errors]           ) {
     ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message} (default kept)`);
   }
   for (const message of resolved.telemetryErrors) ctx.logger?.warn(`[s1cap] config telemetry: ${message}`);
@@ -257,7 +257,7 @@ export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): voi
   // One S1 backend at a time (docs/AGENT_BRIEF.md §0.9). A conflict is reported and the session
   // degrades to observation mode rather than silently picking a governor.
   for (const conflict of resolved.conflicts) ctx.logger?.warn(`[s1cap] ${conflict}`);
-  const backend: ResolvedS1Backend = resolveS1Backend(
+  const backend                    = resolveS1Backend(
     resolved.conflicts.length > 0 ? { ...config.s1, provider: 'none' } : config.s1,
     layaConfig,
   );
@@ -284,7 +284,7 @@ export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): voi
         if (state.status === 'ready') ctx.logger?.info(`[s1cap] laya-serve ready at ${state.baseUrl} (python: ${state.pythonPath ?? 'unknown'})`);
         else ctx.logger?.warn(`[s1cap] laya-serve not ready: ${state.error ?? state.status} — System-1 calls fall back to tier-0`);
       })
-      .catch((err: unknown) => ctx.logger?.warn(`[s1cap] laya startup failed: ${String(err)}`));
+      .catch((err         ) => ctx.logger?.warn(`[s1cap] laya startup failed: ${String(err)}`));
   }
 
   ctx.on('agent/pre-step', () => {
@@ -327,8 +327,8 @@ export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): voi
           laya: runtime.summary(),
           telemetry: resolved.telemetry,
           configIssues: {
-            errors: resolved.policy.errors.concat(resolved.laya.errors as Issue[]).map((i) => `${i.path}: ${i.message}`),
-            warnings: resolved.policy.warnings.concat(resolved.laya.warnings as Issue[]).map((i) => `${i.path}: ${i.message}`),
+            errors: resolved.policy.errors.concat(resolved.laya.errors           ).map((i) => `${i.path}: ${i.message}`),
+            warnings: resolved.policy.warnings.concat(resolved.laya.warnings           ).map((i) => `${i.path}: ${i.message}`),
             conflicts: resolved.conflicts,
             telemetry: resolved.telemetryErrors,
           },
