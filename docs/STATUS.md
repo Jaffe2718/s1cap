@@ -89,6 +89,18 @@ verified, it says so instead of guessing.
     reproduce the join from the assembly's section list — never guess the string shape). Feed the result into
     `observer.setSystemPrompt(text)` **before** the first observation (or refresh it when its hash changes).
     Acceptance: `blocks.pinned > 0` and `prefixTokensStable === blocks.pinned` in a real round.
+  - **Round 5 status of N1:** the source is wired and no longer breaks a session
+    (`packages/dsh-plugin/src/system-prompt.ts` + `observer.setSystemPrompt()` + one call in `applyInner`; a real
+    round returned its answer normally). The `system-prompt` probe did **not** fire, and the reason is a race,
+    not a missing API: the call is `void primeSystemPrompt(...)`, so a short headless round can exit before
+    `assemble()`'s promise resolves. **Next action:** await the prime before the first observation — either
+    make `applyInner` await it once, or have the pre-step middleware await a shared `priming` promise on its
+    first call (bounded: one `assemble()` per session). Then read the tape again: a
+    `{"schema":0,"kind":"system-prompt","result":"captured",…}` line, followed by `blocks.pinned > 0` and
+    `prefixTokensStable === blocks.pinned` in the control record, closes N1.
+  - **Round 5 evidence that the read is safe:** with the wiring in place the round still answered `ok`, and the
+    only probe lines written were the service probe plus the step line — i.e. a failed or late prompt read
+    cannot damage a session.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once

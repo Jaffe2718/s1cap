@@ -67,6 +67,8 @@ export interface StepObserver {
   observe(payload: unknown): void;
   /** `session/event`: capture the system prompt and queue the event for asynchronous upkeep */
   noteSessionEvent(event: unknown): void;
+  /** N1: the rendered system prompt, read from the harness registry (see system-prompt.ts) */
+  setSystemPrompt(text: string, tokens?: number): void;
   /** one bounded diagnostic line (written to the tape), used to read harness shapes we do not know yet */
   probe(line: Record<string, unknown>): void;
   /** drain deferred upkeep now (tests, shutdown) */
@@ -277,6 +279,15 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     probe(line: Record<string, unknown>): void {
       stats.probes += 1;
       opts.onProbe?.(line);
+    },
+
+    setSystemPrompt(text: string, tokens?: number): void {
+      const trimmed = text.trim();
+      if (trimmed === '' || trimmed === systemPrompt) return;
+      systemPrompt = trimmed;
+      systemPromptTokens = tokens ?? estimateTokens(trimmed);
+      stats.systemPromptTokens = systemPromptTokens;
+      opts.onWarn?.(`[s1cap] system prompt pinned: ${systemPromptTokens} tokens`);
     },
 
     flushUpkeep(): number {

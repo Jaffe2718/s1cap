@@ -34,6 +34,7 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
                                                           
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.js';
+import { primeSystemPrompt } from './system-prompt.js';
 import { createStepObserver } from './step-observer.js';
                                                        
 
@@ -513,6 +514,13 @@ function applyInner(ctx               , raw                             )       
     });
     ctx.logger?.info?.(`[s1cap] observation mode: ${resolved.observation} -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)}${resolved.observation === 'tape' ? ` + tape ${resolveTelemetryPath(resolved.telemetry.tapeJsonl)}` : ''} (prompt untouched)`);
 
+
+    void primeSystemPrompt({
+      service: (ctx                                       ).get?.('systemPrompt'),
+      observer,
+      onText: (text, tokens) => observer.setSystemPrompt(text, tokens),
+      onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
+    });
 
     // Asynchronous upkeep lane: session events feed the graph off the critical path. The hook name and its
     // payload shape are verified (`ctx.on("session/event", (session, event) => …)` in dsh-agent-instructions);
