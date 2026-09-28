@@ -67,7 +67,7 @@ export interface AssemblyPolicy {
    */
   rgMaintenance: { mode: 'async'; maxLagTurns: number };
   /**
-   * Selective context keeps hitting the prefix cache only while the *selection* is stable:
+   * A selected context keeps hitting the prefix cache only while the *selection* is stable:
    * a prompt that changes in the middle loses the discount on everything after the change.
    * Docs: docs/FORMULAS.md §6, `packages/core/src/cache-policy.ts`.
    */
