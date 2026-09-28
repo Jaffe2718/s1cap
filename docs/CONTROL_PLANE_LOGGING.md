@@ -20,7 +20,7 @@ S1 call ──► control record ──► (if it were a session event) segment 
 
 Each turn would add new S1-generated material that the next turn scores, so the number of System-1
 calls per turn grows with the number of calls already made: unbounded cost, unbounded latency, and a
-graph whose edges mostly describe the governor's own bookkeeping. This is the "observer observed"
+graph whose edges mostly describe the control layer's own bookkeeping. This is the "observer observed"
 failure mode, and it is a correctness problem before it is a cost problem.
 
 ## 2. Two logs, two purposes

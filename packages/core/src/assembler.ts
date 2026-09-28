@@ -1,6 +1,6 @@
 /**
  * ASSEMBLER — budgeted recall + Trace-as-State layout.
- * Layout: [pinned | T | recalled | tail | x]  (x always last; docs/FORMULAS.zh.md §3.4)
+ * Layout: [pinned | T | recalled | tail | x]  (x always last; docs/FORMULAS.md §3.4)
  */
 import type { AssemblyPolicy, AssemblyResult, Segment } from './types.ts';
 import { AssociationGraph } from './assoc-graph.ts';

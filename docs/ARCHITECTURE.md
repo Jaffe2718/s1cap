@@ -1,12 +1,15 @@
 # S1CAP Architecture — Modules and Connections
 
-Reference for the connections drawn in the interactive route diagram
-([`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html) — hand-authored SVG, because
-the automatic layout engine cannot express a self-loop together with a cross-lane asynchronous branch; the
-machine-validated, auto-laid-out module map lives beside it as
-[`figures/s1cap-module-map.html`](./figures/s1cap-module-map.html) with its specification
-[`figures/s1cap-module-map.json`](./figures/s1cap-module-map.json), and the text form of the flow is
-[`figures/s1cap-technical-route.mmd`](./figures/s1cap-technical-route.mmd)).
+Reference for the connections drawn in the route diagram
+([`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html) — hand-authored SVG), whose text
+form is [`figures/s1cap-technical-route.mmd`](./figures/s1cap-technical-route.mmd) and which is also embedded
+in the README and in AGENT_BRIEF §2.
+
+**Diagram maintenance — do not regress.** The flow is a loop with a hook: `Run + Verify` carries a self-loop
+(`next LLM step · model continues`) and association-graph upkeep sits in its own asynchronous lane. Never
+regenerate this figure with an automatic pipeline layout: an auto-laid-out serial chain misstates the design by
+hiding both the inner loop and the async decoupling. `docs/figures/s1cap-technical-route.html` is the single
+authoritative picture, and every Mermaid copy must keep the same topology.
 
 Status legend: **✅ implemented (M0)** · **🔜 planned (M1/M2)** · **◻ external**.
 

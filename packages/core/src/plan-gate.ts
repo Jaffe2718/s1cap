@@ -1,5 +1,5 @@
 /**
- * PLAN GATE — probability-ordered plan execution (docs/FORMULAS.zh.md §4).
+ * PLAN GATE — probability-ordered plan execution (docs/FORMULAS.md §4).
  * m = candidate plans (<= 3), M = attempt cap (default 2).
  */
 import type { PlanCandidate, PlanGateDecision, PlanScore } from './types.ts';

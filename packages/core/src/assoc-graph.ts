@@ -1,6 +1,6 @@
 /**
  * Association graph (RG) — nodes are segments, edges are System-1-scored relevance
- * relations with recency decay (docs/FORMULAS.zh.md §2, docs/AGENT_BRIEF.md §5.2).
+ * relations with recency decay (docs/FORMULAS.md §2, docs/AGENT_BRIEF.md §5.2).
  *
  * Storage is in-memory for M0/M1; the SQLite-backed store plugs in behind the
  * same surface (segments + edges + provenance).

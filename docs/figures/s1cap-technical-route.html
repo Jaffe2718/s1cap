@@ -196,11 +196,12 @@
   </div>
 
   <footer>
-    Hand-authored SVG: the automatic layout engine cannot express a self-loop together with a cross-lane
-    asynchronous branch, so this flow is drawn by hand and checked for containment at 1440×900, 1600×1000,
-    1920×1080 and 2048×1320. The auto-laid-out, machine-validated module map is kept as
-    <a href="./s1cap-module-map.html">s1cap-module-map.html</a>; the Mermaid source of this flow lives in
-    <a href="./s1cap-technical-route.mmd">s1cap-technical-route.mmd</a>.
+    Hand-authored SVG — <b>this file is the single authoritative picture of the flow</b>. Do not regenerate it
+    with an automatic pipeline layout: that cannot express the self-loop on <i>Run + Verify</i> together with the
+    cross-lane asynchronous branch, and an auto-laid-out serial chain misstates the design. Text form, kept in
+    sync: <a href="./s1cap-technical-route.mmd">s1cap-technical-route.mmd</a> (also embedded in the README,
+    docs/ARCHITECTURE.md and docs/AGENT_BRIEF.md). Verified in a real browser: no horizontal overflow, every
+    element inside the viewBox, self-loops and dash patterns rendered.
   </footer>
 </div>
 
