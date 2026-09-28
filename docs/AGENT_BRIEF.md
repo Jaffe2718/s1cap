@@ -22,6 +22,9 @@
 
 ---
 
+> **Where the work stands:** [`STATUS.md`](./STATUS.md) carries the done/next checklist and, for every open
+> item, the goal, the files, the verified facts, the steps, the acceptance test and the traps. This file is the
+> facts base it assumes; work the checklist in order.
 ## 1. Verified facts base
 
 ### 1.1 Paper T — Trace as State (arXiv:2609.02702)

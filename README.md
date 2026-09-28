@@ -96,6 +96,7 @@ s1cap/
 
 | doc | audience |
 |---|---|
+| [docs/STATUS.md](docs/STATUS.md) | **start here** — done/next checklist plus agent-ready detail for every open item |
 | [docs/PROPOSAL.md](docs/PROPOSAL.md) | research proposal — supervisor / cooperator |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module reference: route SVG + connection semantics, parameters, implementation status |
 | [docs/LAYA_RUNTIME.md](docs/LAYA_RUNTIME.md) | local Laya backend: Python environment discovery, launcher, configuration keys |
