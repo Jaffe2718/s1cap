@@ -261,6 +261,37 @@ verified, it says so instead of guessing.
     (`exports["./client"]` + `dsh.client = { inject: ['@deepseek-ai/dsh-client-runtime',
     '@deepseek-ai/dsh-client-connection'], platform: 'web' }`) and call the credential store's `set`/`write`
     with ref `s1cap/jev` on save.
+  - **Round 15 — the last unknown is answered: React comes from the loader's `require`.** Reading `dsh-pet`'s
+    client half to the end shows the factory receives a CommonJS-style `require` in its scope:
+
+    ```js
+    function makeFactory() {
+      return function () {
+        const react = require('react');                    // the client loader provides it
+        const { jsx: h } = require('react/jsx-runtime');
+        const inject = [ /* … */ 'remote', 'remote.commands', 'commandUi' ];
+        function apply(ctx) { /* … */ }
+        module.exports = { apply, inject, name };
+        return module.exports;
+      };
+    }
+    window.__ModuleLoader__.load({ id: 'dsh-pet', factory: makeFactory() });
+    ```
+
+    So a plain-JavaScript half needs no bundler: `require('react')` plus `React.createElement`, exactly the
+    shape this repository can ship. **N4 now has no unknowns left.** Implementation checklist:
+    1. `packages/dsh-plugin/src/client.js` — plain JS, `window.__ModuleLoader__.load({ id: 'dsh-s1cap', factory })`,
+       factory returns `{ apply, inject, name }`, `inject` includes `'slots'`;
+    2. register `ctx.slots.inject('settings.section', function* () { yield ctx.slots.register({ name:
+       'settings.section', id: 's1cap-config', order: 30, label: () => 'S1CAP', inject: () => ({}) }, Section); })`;
+    3. extend `scripts/build-packages.mjs` to **copy** `src/**/*.js` into `lib/` (it currently strips only `.ts`);
+    4. `package.json`: `exports['./client'] = './lib/client.js'` and
+       `dsh.client = { inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-connection'], platform: 'web' }`;
+    5. the panel reads live state through the client's `remote.commands` channel and writes the key through the
+       credential store (`set`/`write`, ref `s1cap/jev`) — **never** through a command's raw input, because that
+       would put the secret into the transcript;
+    6. verify in the sandbox **web** profile: the section appears, a key survives a restart, and no plaintext key
+       turns up in the control log, the session log or the plugin output.
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
