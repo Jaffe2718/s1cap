@@ -292,6 +292,16 @@ verified, it says so instead of guessing.
        would put the secret into the transcript;
     6. verify in the sandbox **web** profile: the section appears, a key survives a restart, and no plaintext key
        turns up in the control log, the session log or the plugin output.
+  - **Round 16 — where the shipped key UI lives, and the read that was too broad.** DSH's own "enter an API key"
+    screen is `dsh-client-ui-settings-models` (its client half contains an `apiKey` module with a
+    `apiKeyFailure(draft)` normaliser, a credential dot per route showing configured/missing, and an editor that
+    saves through the **host RPC** — the client half injects `remote`, `remote.commands` and `commandUi`).
+    **The mistake to avoid repeating:** grepping that file for `credential|apiKey|secret` matched thousands of CSS
+    class names and buried the code. **Next read (tight, no CSS):**
+    `& $app --expose-internals scripts/scan-dsh-asar.cjs --members dsh-client-ui-settings-models\lib\client.js`
+    to get its function list, then `--grep` that file for `remote\.[a-zA-Z]` with context 1 to see the exact host
+    call the Save button makes. Copy that call shape for the S1CAP panel; the host side is already done
+    (`readCredential` + `set`/`write` on the `credentials` store with ref `s1cap/jev`).
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
