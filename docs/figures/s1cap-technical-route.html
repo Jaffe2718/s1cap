@@ -5059,10 +5059,11 @@
         <path data-edge-from="rg" data-edge-to="assembler" data-edge-label="BFS(τ,d)+预算" data-edge-key="2" data-edge-id="e3" data-composition-points="346,243;454,243" d="M 346 243 L 454 243" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="assembler" data-edge-to="llm" data-edge-label="TAS 注入" data-edge-key="3" data-edge-id="e4" data-composition-points="500,269;500,290;500,290;500,341" d="M 500 269 L 500 290 L 500 290 L 500 341" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="llm" data-edge-to="plangate" data-edge-label="候选方案" data-edge-key="4" data-edge-id="e5" data-composition-points="546,367;625,367;625,269" d="M 546 367 L 625 367 L 625 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="plangate" data-edge-to="s1decide" data-edge-label="choice 打分" data-edge-key="5" data-edge-id="e6" data-composition-points="579,243;579,549;560,549;560,491" d="M 579 243 L 579 549 L 560 549 L 560 491" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="plangate" data-edge-to="s1decide" data-edge-label="choice 问询" data-edge-key="5" data-edge-id="e6" data-composition-points="579,243;579,549;560,549;560,491" d="M 579 243 L 579 549 L 560 549 L 560 491" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="plangate" data-edge-to="execute" data-edge-label="概率降序" data-edge-key="6" data-edge-id="e7" data-composition-points="625,217;625,166;625,166;625,145" d="M 625 217 L 625 166 L 625 166 L 625 145" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="execute" data-edge-to="x-event" data-edge-label="工具结果回流" data-edge-key="7" data-edge-id="e8" data-composition-points="579,119;134,119" d="M 579 119 L 134 119" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="s1assoc" data-edge-to="rg" data-edge-label="扩充 RG·权重+衰减" data-edge-key="8" data-edge-id="e9" data-composition-points="300,465;300,352;300,352;300,269" d="M 300 465 L 300 352 L 300 352 L 300 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="s1decide" data-edge-to="plangate" data-edge-label="概率 · 置信度" data-edge-key="9" data-edge-id="e10" data-composition-points="560,491;692,491;692,243;579,243" d="M 560 491 L 692 491 L 692 243 L 579 243" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
 
         <!-- Nodes -->
         <g id="node-x-event" data-node-id="x-event" data-node-label="会话新事件" tabindex="0" role="button" aria-label="聚焦会话新事件，Harness 会话层 › ① 选择性上下文" aria-pressed="false" data-node-kind="external" data-node-context="Harness 会话层 › ① 选择性上下文">
@@ -5181,9 +5182,9 @@
           <rect x="600.8" y="308" width="48.4" height="14" rx="3" class="c-mask"/>
           <text x="625" y="318" class="t-muted" font-size="8" text-anchor="middle">候选方案</text>
         </g>
-        <g data-detail="context" data-edge-from="plangate" data-edge-to="s1decide" data-edge-label="choice 打分" data-edge-key="5" data-edge-id="e6">
+        <g data-detail="context" data-edge-from="plangate" data-edge-to="s1decide" data-edge-label="choice 问询" data-edge-key="5" data-edge-id="e6">
           <rect x="538.1" y="529" width="62.8" height="14" rx="3" class="c-mask"/>
-          <text x="569.5" y="539" class="t-muted" font-size="8" text-anchor="middle">choice 打分</text>
+          <text x="569.5" y="539" class="t-muted" font-size="8" text-anchor="middle">choice 问询</text>
         </g>
         <g data-detail="context" data-edge-from="plangate" data-edge-to="execute" data-edge-label="概率降序" data-edge-key="6" data-edge-id="e7">
           <rect x="600.8" y="146" width="48.4" height="14" rx="3" class="c-mask"/>
@@ -5196,6 +5197,10 @@
         <g data-detail="context" data-edge-from="s1assoc" data-edge-to="rg" data-edge-label="扩充 RG·权重+衰减" data-edge-key="8" data-edge-id="e9">
           <rect x="254.2" y="332" width="91.6" height="14" rx="3" class="c-mask"/>
           <text x="300" y="342" class="t-muted" font-size="8" text-anchor="middle">扩充 RG·权重+衰减</text>
+        </g>
+        <g data-detail="context" data-edge-from="s1decide" data-edge-to="plangate" data-edge-label="概率 · 置信度" data-edge-key="9" data-edge-id="e10">
+          <rect x="655.8" y="347" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="692" y="357" class="t-muted" font-size="8" text-anchor="middle">概率 · 置信度</text>
         </g>
 
         <!-- Legend -->
@@ -5415,7 +5420,7 @@
         </div>
         <ul>
           <li>&bull; ① Selective Context：分片 → S1 关联计算 → 扩充 RG → TAS 组装，治理上下文生命周期</li>
-          <li>&bull; ② Adaptive Planning：S1 决策后端 choice 打分 → 按序执行验证，治理决策优先级</li>
+          <li>&bull; ② Adaptive Planning：LLM 出方案 → S1 决策后端 choice 打分 → PLAN GATE 归一/排序 → 按序执行验证</li>
           <li>&bull; surface 重写：模型视图重组，用户 transcript 恒时序</li>
           <li>&bull; 两个 S1 后端同协议可插拔：Jev 云端 · Laya · Kev（/v1/systemone）</li>
         </ul>

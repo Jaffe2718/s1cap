@@ -49,10 +49,11 @@
     { "id": "e3", "from": "rg", "to": "assembler", "label": "BFS(τ,d)+预算", "role": "main" },
     { "id": "e4", "from": "assembler", "to": "llm", "label": "TAS 注入", "role": "main", "variant": "emphasis" },
     { "id": "e5", "from": "llm", "to": "plangate", "label": "候选方案", "role": "main" },
-    { "id": "e6", "from": "plangate", "to": "s1decide", "label": "choice 打分", "role": "branch", "route": "bottom-channel" },
+    { "id": "e6", "from": "plangate", "to": "s1decide", "label": "choice 问询", "role": "main", "route": "bottom-channel" },
     { "id": "e7", "from": "plangate", "to": "execute", "label": "概率降序", "role": "main" },
     { "id": "e8", "from": "execute", "to": "x-event", "label": "工具结果回流", "role": "return", "variant": "dashed" },
-    { "id": "e9", "from": "s1assoc", "to": "rg", "label": "扩充 RG·权重+衰减", "role": "main" }
+    { "id": "e9", "from": "s1assoc", "to": "rg", "label": "扩充 RG·权重+衰减", "role": "main" },
+    { "id": "e10", "from": "s1decide", "to": "plangate", "label": "概率 · 置信度", "role": "return", "route": "outside-right" }
   ],
   "cards": [
     {
@@ -60,7 +61,7 @@
       "title": "两个 System-1 参与点",
       "items": [
         "① Selective Context：分片 → S1 关联计算 → 扩充 RG → TAS 组装，治理上下文生命周期",
-        "② Adaptive Planning：S1 决策后端 choice 打分 → 按序执行验证，治理决策优先级",
+        "② Adaptive Planning：LLM 出方案 → S1 决策后端 choice 打分 → PLAN GATE 归一/排序 → 按序执行验证",
         "surface 重写：模型视图重组，用户 transcript 恒时序",
         "两个 S1 后端同协议可插拔：Jev 云端 · Laya · Kev（/v1/systemone）"
       ]
