@@ -81,3 +81,30 @@ Cost and timing must join to turns for the paper, but joining must not move cont
   governance cost can be reported separately from task cost (a headline number for the 2×2).
 - **Reproducibility:** the two logs together are a complete, replayable record — session content and
   governance decisions — without either contaminating the other.
+
+## 6. What observation mode writes today (M1)
+
+`observation: log` (the default when the plugin is enabled) runs SEGMENTER → RECALL → ASSEMBLER on **every**
+LLM call and appends one `assembly` record per call. The prompt the model receives is returned untouched:
+this milestone changes no tokens, which is what makes it safe to run against a live session.
+
+A real record from a DSH 0.1.7-rc.2 round (`~/.dsh/.s1cap/control.jsonl`, relative paths resolve against
+`DSH_HOME`):
+
+```json
+{"type":"assembly","schema":1,"ts":1790601861099,"sessionId":"…","seq":0,"candidates":0,"selected":0,
+ "bfsDepth":0,"budgetUsed":7,"budgetTotal":118800,
+ "blocks":{"pinned":0,"stateProxy":0,"recalled":0,"tail":0,"anchor":6},"prefixTokensStable":0,
+ "fallback":"recency-window"}
+```
+
+Three things that round taught us, all now reflected in code:
+
+- **`blocks.pinned` was 0.** The `agent/pre-step` payload's `messages` array did not carry the system prompt
+  in this profile, so the pinned block — and with it `prefixTokensStable` — is empty. Sourcing the system
+  prompt from the harness's own system-prompt surface is the next block's job; until then the budget
+  accounting under-counts the fixed prefix.
+- **`blocks.stateProxy` was 1 for an absent T.** `estimateTokens('')` returns 1 by design (a text estimate is
+  never zero), so an empty state proxy was charged a token; `assemble()` now charges 0.
+- **`sessionId` was missing.** Added to `AssemblyEvent` as an optional field (the schema rule is *add, never
+  rename*): without it, records from several sessions sharing one control-plane file cannot be attributed.

@@ -6,6 +6,18 @@ const path = require('path');
 const ROOT = 'D:\\Program Files\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai';
 // needles come from argv so the same scanner answers new questions: node scripts/scan-dsh-asar.cjs "credentials" "settings"
 const NEEDLES = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['agent/pre-step', 'agent/request-error'];
+// `--dump <path relative to @deepseek-ai> [maxLines]` prints one packaged file, so a contract can be read
+// in full instead of guessed from snippets.
+const dumpIndex = process.argv.indexOf('--dump');
+if (dumpIndex > 0) {
+  const rel = process.argv[dumpIndex + 1];
+  const maxLines = Number(process.argv[dumpIndex + 2] ?? 400);
+  const target = path.join(ROOT, rel);
+  const text = fs.readFileSync(target, 'utf8').split('\n');
+  console.log(`### ${rel} (${text.length} lines, showing ${Math.min(maxLines, text.length)})`);
+  console.log(text.slice(0, maxLines).join('\n'));
+  process.exit(0);
+}
 const hits = [];
 
 function scanFile(p) {

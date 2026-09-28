@@ -15,6 +15,10 @@
       config:
         # master switch: anything but true keeps apply() from registering hooks, commands or clients
         enabled: false
+        # M1 observation mode - log runs SEGMENTER/RECALL/ASSEMBLER on every LLM call and records the
+        # result in the control-plane log with the prompt left untouched; off disables it. Rewriting the
+        # model view is a later, separate switch that does not exist yet.
+        observation: log
         # 2x2 ablation cell: C1 baseline | C2 +TAS | C3 +S1 | C4 full
         cell: C4
         # Who owns the agent loop. Literal, not a toggle: the harness stops when the model

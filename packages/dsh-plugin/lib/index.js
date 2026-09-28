@@ -32,10 +32,20 @@ import {
 } from '@s1cap/laya-runtime';
 import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackendIssues } from '@s1cap/s1-client';
                                                           
+import { ControlPlaneLog } from '@s1cap/core';
+import { createControlSink, resolveTelemetryPath } from './control-log.js';
+import { createStepObserver } from './step-observer.js';
+                                                       
 
                                                            
                                                                                                   
                     
+     
+                                                                                                         
+                                                                                                   
+                                                                                                      
+     
+                              
      
                                                                                        
                                                                                  
@@ -63,7 +73,16 @@ export const DEFAULT_TELEMETRY                 = {
                                                                                        
                       
                             
+                                                                               
+                             
+                              
  
+
+/** Context accounting defaults, used when the harness token meter is unavailable. */
+const CONTEXT_WINDOW_DEFAULT = 128_000;
+const RESERVE_OUTPUT_DEFAULT = 8_000;
+const FIXED_OVERHEAD_DEFAULT = 1_200;
+const DECAY_LAMBDA_MS = 36 * 60 * 60 * 1000;
 
 /**
  * Validate and normalise the whole plugin config. Fail-safe: invalid values are reported and
@@ -71,13 +90,12 @@ export const DEFAULT_TELEMETRY                 = {
  */
 export function resolvePluginConfig(raw                             )                       {
   const source = (raw ?? {})                           ;
-  const policy = validatePolicy(source, ['laya', 'telemetry', 'enabled']);
+  const policy = validatePolicy(source, ['laya', 'telemetry', 'enabled', 'observation']);
   const laya = validateLayaConfig(source.laya);
 
   const telemetryErrors           = [];
   const telemetry                 = { ...DEFAULT_TELEMETRY };
-  const rawTelemetry = (source.telemetry ?? {})                           ;
-  for (const key of ['sessionJsonl', 'controlJsonl']         ) {
+  const rawTelemetry = (source.telemetry ?? {})                           ;  for (const key of ['sessionJsonl', 'controlJsonl']         ) {
     const value = rawTelemetry[key];
     if (value === undefined) continue;
     if (typeof value !== 'string' || value.trim() === '') {
@@ -99,6 +117,17 @@ export function resolvePluginConfig(raw                             )           
     laya: laya.config,
   }                     ;
 
+  // Observation mode is validated here (not in core): it is a plugin-level switch, not part of the
+  // frozen assembly policy. Fail-safe like everything else — an unknown value keeps the default.
+  const observationErrors           = [];
+  let observation                = 'log';
+  const rawObservation = source.observation;
+  if (rawObservation !== undefined) {
+    if (rawObservation === 'off' || rawObservation === 'log') observation = rawObservation;
+    else observationErrors.push(`observation must be "off" or "log" (default kept: ${observation})`);
+  }
+  config.observation = observation;
+
   return {
     config,
     policy,
@@ -106,6 +135,8 @@ export function resolvePluginConfig(raw                             )           
     telemetry,
     conflicts: singleBackendIssues(config.s1, laya.config),
     telemetryErrors,
+    observation,
+    observationErrors,
   };
 }
 
@@ -263,13 +294,14 @@ export class LayaRuntime {
  */
 export function preStepMiddleware(
   ctx               ,
+  observer               ,
 )                                                                       {
-  return async (_payload, next) => {
+  return async (payload, next) => {
     const decision = await next();
     try {
-      // M1 observes the step here (segment new events, update the RG asynchronously).
-      // Nothing is rewritten yet: S1CAP stays inert until replay-correctness tests exist.
-      void ctx;
+      // M1 observation mode: segment, recall and assemble for real, record the result in the control
+      // plane, and return the decision completely untouched. `observe()` never throws.
+      observer?.observe(payload);
     } catch (err) {
       ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
     }
@@ -311,6 +343,7 @@ function applyInner(ctx               , raw                             )       
     ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message} (default kept)`);
   }
   for (const message of resolved.telemetryErrors) ctx.logger?.warn(`[s1cap] config telemetry: ${message}`);
+  for (const message of resolved.observationErrors) ctx.logger?.warn(`[s1cap] config observation: ${message}`);
 
   // One S1 backend at a time (docs/AGENT_BRIEF.md §0.9). A conflict is reported and the session
   // degrades to observation mode rather than silently picking a governor.
@@ -345,10 +378,44 @@ function applyInner(ctx               , raw                             )       
       .catch((err         ) => ctx.logger?.warn(`[s1cap] laya startup failed: ${String(err)}`));
   }
 
+  // M1 observation mode. Real SEGMENTER + RECALL + ASSEMBLER on every LLM call, recorded in the
+  // control plane, with the prompt the model receives returned untouched — nothing here can change a
+  // round. `off` skips it entirely. The context window comes from constants for now: `ctx.tokenMeter`'s
+  // semantics are not verified yet, and a wrong window would silently distort every budget number.
+  let observer                          ;
+  if (resolved.observation === 'log') {
+    const sink = createControlSink({
+      path: resolveTelemetryPath(resolved.telemetry.controlJsonl),
+      onError: (message) => ctx.logger?.warn?.(`[s1cap] control sink: ${message}`),
+    });
+    const controlLog = new ControlPlaneLog((line) => sink.write(line));
+    observer = createStepObserver({
+      policy: config,
+      emit: (event) => {
+        try {
+          controlLog.emit(event);
+        } catch (err) {
+          // I4 in reverse: a session segment must never reach the control-plane log.
+          ctx.logger?.warn?.(`[s1cap] control record rejected: ${String(err)}`);
+        }
+      },
+      now: () => Date.now(),
+      contextWindow: CONTEXT_WINDOW_DEFAULT,
+      reserveOutputTokens: RESERVE_OUTPUT_DEFAULT,
+      fixedOverheadTokens: FIXED_OVERHEAD_DEFAULT,
+      lambdaMs: DECAY_LAMBDA_MS,
+      onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
+      onObserved: (summary) => ctx.logger?.info?.(`[s1cap] observed ${summary}`),
+    });
+    ctx.logger?.info?.(`[s1cap] observation mode: log -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)} (prompt untouched)`);
+  } else {
+    ctx.logger?.info?.('[s1cap] observation mode: off');
+  }
+
   // The only lifecycle hook we register, in the verified middleware shape. `agent/request-error`
   // is deliberately NOT registered: its contract is unverified, and an unverified hook is exactly
   // what took a round down before.
-  ctx.on('agent/pre-step', preStepMiddleware(ctx));
+  ctx.on('agent/pre-step', preStepMiddleware(ctx, observer));
 
   // The `/s1` surface. Registration follows the verified Cordis shape:
   // is ctx.effect(() => ctx.commands.register({ name, description, input, handler })) - all verified
@@ -378,6 +445,9 @@ function applyInner(ctx               , raw                             )       
             questionsPerCall: config.s1.questionsPerCall,
           },
           laya: runtime.summary(),
+          observation: observer
+            ? { mode: resolved.observation, sink: resolved.telemetry.controlJsonl, ...observer.stats() }
+            : { mode: resolved.observation, steps: 0, observed: 0, skipped: 0, errors: 0 },
           telemetry: resolved.telemetry,
           configIssues: {
             errors: resolved.policy.errors.concat(resolved.laya.errors           ).map((i) => `${i.path}: ${i.message}`),

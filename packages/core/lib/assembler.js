@@ -42,7 +42,8 @@ export function assemble(input               )                 {
   const total = Math.max(0, input.contextWindow - input.reserveOutputTokens - input.fixedOverheadTokens);
 
   const proxy = policy.tas.on ? (stateProxy ?? '') : '';
-  const proxyTokens = policy.tas.on ? estimateTokens(proxy) : 0;
+  // an empty T is 0 tokens, not estimateTokens('') = 1 (found by a real round: blocks.stateProxy was 1)
+  const proxyTokens = policy.tas.on && proxy !== '' ? estimateTokens(proxy) : 0;
 
   const fixed            = [current];
   const pinnedTokens = totalTokens(pinned);

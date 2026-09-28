@@ -83,6 +83,8 @@ export interface AssemblyEvent {
   type: 'assembly';
   schema: typeof TELEMETRY_SCHEMA_VERSION;
   ts: number;
+  /** the harness session this observation belongs to (added 2026-09-28: without it, records from several sessions are indistinguishable) */
+  sessionId?: string;
   seq: number;
   candidates: number;
   selected: number;
