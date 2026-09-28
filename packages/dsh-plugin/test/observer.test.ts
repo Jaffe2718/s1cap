@@ -206,3 +206,71 @@ test('an unknown observation value falls back to the default and is reported', (
   const status = h.commands.get('s1')?.({}) as { observation: { mode: string } };
   assert.equal(status.observation.mode, 'log', 'the default is kept, fail-safe');
 });
+
+// --- N1 / N2 (2026-09-28): the pinned block gets the real system prompt, upkeep leaves the critical path ---
+
+test('a captured system prompt becomes the pinned block, and upkeep never runs inside observe()', async () => {
+  const records: { blocks?: Record<string, number>; prefixTokensStable?: number }[] = [];
+  const ticks: (() => void)[] = [];
+  const observer = createStepObserver({
+    policy: defaultPolicy(),
+    emit: (event) => records.push(event as never),
+    now: () => 1_790_000_000_000,
+    contextWindow: 128_000,
+    reserveOutputTokens: 8_000,
+    fixedOverheadTokens: 1_200,
+    lambdaMs: 36 * 60 * 60 * 1000,
+    maxLagTurns: 2,
+    schedule: (tick) => ticks.push(tick),
+  });
+  const middleware = preStepMiddleware(harness().ctx, observer);
+
+  // one session event carries the rendered system prompt, another is an ordinary message
+  observer.noteSessionEvent({
+    type: 'step/end',
+    message: { role: 'system', content: [{ type: 'text', text: 'You are a coding agent with tools.' }] },
+  });
+  observer.noteSessionEvent({ message: { role: 'user', content: [{ type: 'text', text: 'go' }] } });
+
+  const statsBefore = observer.stats();
+  assert.equal(statsBefore.upkeep.enqueued, 2, 'session events are queued, not applied inline');
+  assert.equal(statsBefore.upkeep.applied, 0, 'observe() must not drain upkeep');
+  assert.ok(statsBefore.systemPromptTokens > 0, 'the prompt is tokenised for the pinned block');
+  assert.equal(ticks.length, 1, 'one deferred tick was scheduled, not one per event');
+
+  await middleware({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'accept', messages: [] }));
+
+  const record = records[records.length - 1];
+  assert.ok((record?.blocks?.['pinned'] ?? 0) > 0, 'the pinned block is no longer empty');
+  assert.equal(record?.prefixTokensStable, record?.blocks?.['pinned'], 'the cache-stable prefix is the pinned block');
+  assert.equal(observer.stats().upkeep.applied, 0, 'assembly did not wait for upkeep');
+
+  // the deferred tick drains the queue outside the hook
+  ticks[0]?.();
+  const after = observer.stats();
+  assert.equal(after.upkeep.applied, 2);
+  assert.equal(after.upkeep.pending, 0);
+  assert.ok(after.graphSegments >= MESSAGES.length, 'the graph has the session events');
+  assert.equal(after.upkeep.overLag, false);
+});
+
+test('upkeep lag is visible in the stats and clears when the tick runs', () => {
+  const ticks: (() => void)[] = [];
+  const observer = createStepObserver({
+    policy: defaultPolicy(),
+    emit: () => undefined,
+    now: () => 0,
+    contextWindow: 128_000,
+    reserveOutputTokens: 8_000,
+    fixedOverheadTokens: 1_200,
+    lambdaMs: 1,
+    maxLagTurns: 1,
+    schedule: (tick) => ticks.push(tick),
+  });
+  observer.noteSessionEvent({ message: { role: 'user', content: [{ type: 'text', text: 'a' }] } });
+  observer.noteSessionEvent({ message: { role: 'user', content: [{ type: 'text', text: 'b' }] } });
+
+  assert.equal(observer.stats().upkeep.overLag, true, 'two pending against maxLagTurns 1');
+  ticks[0]?.();
+  assert.equal(observer.stats().upkeep.overLag, false);
+});

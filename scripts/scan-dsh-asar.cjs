@@ -8,6 +8,15 @@ const ROOT = 'D:\\Program Files\\DeepSeek Harness\\resources\\app.asar\\dsh\\nod
 const NEEDLES = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['agent/pre-step', 'agent/request-error'];
 // `--dump <path relative to @deepseek-ai> [maxLines]` prints one packaged file, so a contract can be read
 // in full instead of guessed from snippets.
+const lsIndex = process.argv.indexOf('--ls');
+if (lsIndex > 0) {
+  const dir = path.join(ROOT, process.argv[lsIndex + 1]);
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    console.log(`${entry.isDirectory() ? 'd' : '-'} ${entry.name}${entry.isDirectory() ? '' : ` (${fs.statSync(full).size} bytes)`}`);
+  }
+  process.exit(0);
+}
 const dumpIndex = process.argv.indexOf('--dump');
 if (dumpIndex > 0) {
   const rel = process.argv[dumpIndex + 1];

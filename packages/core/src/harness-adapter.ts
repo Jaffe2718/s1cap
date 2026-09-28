@@ -43,6 +43,44 @@ export interface AdapterReport {
   rawParts: number;
 }
 
+/**
+ * Best-effort read of a rendered system prompt out of a harness session event.
+ *
+ * Why this is defensive rather than contract-driven: the session-event vocabulary is only partly verified
+ * (`event.type === 'step/end'` is confirmed in `dsh-agent-instructions`) and `dsh-llm` renders system
+ * prompts through `createSystemMessage(text)` → `{ role: 'system', content: [{ type: 'text', text }] }`.
+ * So this function accepts anything shaped like a system message — directly, or wrapped in an event's
+ * `message`/`data`/`payload` field — and returns `undefined` rather than guessing. Anything it cannot read
+ * stays reported by `AdapterReport`, never silently dropped.
+ */
+export function extractSystemPrompt(event: unknown): string | undefined {
+  // Unwrap up to two levels: the harness emits `{ type, message }` for some events and `{ type, data: { … } }`
+  // for others, so `data.message` has to be reachable without guessing what `data` holds.
+  const queue: unknown[] = [event];
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 3 && queue.length > 0; depth += 1) {
+    const batch = queue.splice(0, queue.length);
+    for (const candidate of batch) {
+      if (typeof candidate !== 'object' || candidate === null || seen.has(candidate)) continue;
+      seen.add(candidate);
+      const record = candidate as HarnessMessage & { message?: unknown; data?: unknown; payload?: unknown };
+      if (record.role === 'system' || record.role === 'developer') {
+        const parts = Array.isArray(record.content) ? record.content : [];
+        const report = newAdapterReport();
+        const text = parts
+          .map((part) => partText(part, report, new Set(DEFAULT_REASONING_PART_TYPES)))
+          .join('\n')
+          .trim();
+        if (text !== '') return text;
+      }
+      for (const key of ['message', 'data', 'payload'] as const) {
+        if (record[key] !== undefined) queue.push(record[key]);
+      }
+    }
+  }
+  return undefined;
+}
+
 export function newAdapterReport(): AdapterReport {
   return { messages: 0, empty: 0, parts: 0, roles: {}, unknownRoles: [], unknownPartTypes: [], rawParts: 0 };
 }

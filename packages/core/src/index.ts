@@ -3,6 +3,8 @@ export * from './config.ts';
 export * from './segmenter.ts';
 export * from './harness-adapter.ts';
 export * from './observer.ts';
+export * from './upkeep-queue.ts';
+export * from './replay.ts';
 export * from './assoc-graph.ts';
 export * from './assembler.ts';
 export * from './plan-gate.ts';

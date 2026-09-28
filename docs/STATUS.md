@@ -34,9 +34,9 @@ verified, it says so instead of guessing.
 
 ### Next (M1 blocks 3+)
 
-- [ ] **N1** Source the system prompt so the pinned block is not empty
-- [ ] **N2** Move association-graph upkeep onto the asynchronous lane (session-event driven)
-- [ ] **N3** Replay-parity harness over a recorded tape (the gate before any prompt rewrite)
+- [~] **N1** Source the system prompt so the pinned block is not empty — plumbing done (systemPrompt input, extractSystemPrompt, pinned block, tests green); the *source* is still open: a real round proved the prompt is not delivered as a session event, so it must come from the dsh-system-prompt service
+- [x] **N2** Association-graph upkeep on the asynchronous lane (createUpkeepQueue, session/event subscription, lag bound, /s1 stats)
+- [x] **N3** Replay-parity harness (packages/core/src/replay.ts, synthetic fixture, scripts/replay-tape.mjs, observation: tape recorder)
 - [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
 - [ ] **N5** `llm_call` telemetry so cost and cache-hit rate become real numbers
 - [ ] **N6** The actual context rewrite (`decision.messages`), feature-flagged per ablation cell

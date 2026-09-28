@@ -3,6 +3,8 @@ export * from './config.js';
 export * from './segmenter.js';
 export * from './harness-adapter.js';
 export * from './observer.js';
+export * from './upkeep-queue.js';
+export * from './replay.js';
 export * from './assoc-graph.js';
 export * from './assembler.js';
 export * from './plan-gate.js';

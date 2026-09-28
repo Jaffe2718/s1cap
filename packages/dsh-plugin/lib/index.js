@@ -45,24 +45,27 @@ import { createStepObserver } from './step-observer.js';
                                                                                                    
                                                                                                       
      
-                              
+                                       
      
                                                                                        
                                                                                  
                                                           
      
-                                                               
+                                                                                   
                     
  
 
                                  
                        
                        
+                                                                                      
+                    
  
 
 export const DEFAULT_TELEMETRY                 = {
   sessionJsonl: './.s1cap/session.jsonl',
   controlJsonl: './.s1cap/control.jsonl',
+  tapeJsonl: './.s1cap/tape.jsonl',
 };
 
                                        
@@ -74,7 +77,7 @@ export const DEFAULT_TELEMETRY                 = {
                       
                             
                                                                                
-                             
+                                      
                               
  
 
@@ -120,11 +123,11 @@ export function resolvePluginConfig(raw                             )           
   // Observation mode is validated here (not in core): it is a plugin-level switch, not part of the
   // frozen assembly policy. Fail-safe like everything else — an unknown value keeps the default.
   const observationErrors           = [];
-  let observation                = 'log';
+  let observation                         = 'log';
   const rawObservation = source.observation;
   if (rawObservation !== undefined) {
-    if (rawObservation === 'off' || rawObservation === 'log') observation = rawObservation;
-    else observationErrors.push(`observation must be "off" or "log" (default kept: ${observation})`);
+    if (rawObservation === 'off' || rawObservation === 'log' || rawObservation === 'tape') observation = rawObservation;
+    else observationErrors.push(`observation must be "off", "log" or "tape" (default kept: ${observation})`);
   }
   config.observation = observation;
 
@@ -383,7 +386,14 @@ function applyInner(ctx               , raw                             )       
   // round. `off` skips it entirely. The context window comes from constants for now: `ctx.tokenMeter`'s
   // semantics are not verified yet, and a wrong window would silently distort every budget number.
   let observer                          ;
-  if (resolved.observation === 'log') {
+  if (resolved.observation !== 'off') {
+    const tapeSink =
+      resolved.observation === 'tape'
+        ? createControlSink({
+            path: resolveTelemetryPath(resolved.telemetry.tapeJsonl),
+            onError: (message) => ctx.logger?.warn?.(`[s1cap] tape sink: ${message}`),
+          })
+        : undefined;
     const sink = createControlSink({
       path: resolveTelemetryPath(resolved.telemetry.controlJsonl),
       onError: (message) => ctx.logger?.warn?.(`[s1cap] control sink: ${message}`),
@@ -404,10 +414,27 @@ function applyInner(ctx               , raw                             )       
       reserveOutputTokens: RESERVE_OUTPUT_DEFAULT,
       fixedOverheadTokens: FIXED_OVERHEAD_DEFAULT,
       lambdaMs: DECAY_LAMBDA_MS,
+      maxLagTurns: config.rgMaintenance.maxLagTurns,
       onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
       onObserved: (summary) => ctx.logger?.info?.(`[s1cap] observed ${summary}`),
+      ...(resolved.observation === 'tape'
+        ? {
+            onTape: (step        , messages                    , systemPrompt                    ) => {
+              tapeSink?.write(
+                `${JSON.stringify({ schema: 1, sessionId: 'live', step, ...(systemPrompt !== undefined ? { systemPrompt } : {}), messages })}\n`,
+              );
+            },
+          }
+        : {}),
     });
-    ctx.logger?.info?.(`[s1cap] observation mode: log -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)} (prompt untouched)`);
+    ctx.logger?.info?.(`[s1cap] observation mode: ${resolved.observation} -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)}${resolved.observation === 'tape' ? ` + tape ${resolveTelemetryPath(resolved.telemetry.tapeJsonl)}` : ''} (prompt untouched)`);
+
+    // Asynchronous upkeep lane: session events feed the graph off the critical path. The hook name and its
+    // payload shape are verified (`ctx.on("session/event", (session, event) => …)` in dsh-agent-instructions);
+    // what each event *contains* is read defensively and every shape without a rule is reported.
+    ctx.on('session/event', (_session         , event         ) => {
+      observer?.noteSessionEvent(event);
+    });
   } else {
     ctx.logger?.info?.('[s1cap] observation mode: off');
   }

@@ -45,24 +45,27 @@ export interface S1CapPluginConfig extends AssemblyPolicy {
    * writes the result to the control-plane log **without touching the prompt the model receives**;
    * `off` does nothing. Rewriting the model view is a separate, later switch that does not exist yet.
    */
-  observation?: 'off' | 'log';
+  observation?: 'off' | 'log' | 'tape';
   /**
    * Two independent sinks (docs/CONTROL_PLANE_LOGGING.md): the session log is the only
    * source of segments; the control-plane log records LLM/S1/tool calls and gate
    * decisions and is never segmented or sent to System-1.
    */
-  telemetry?: { sessionJsonl?: string; controlJsonl?: string };
+  telemetry?: { sessionJsonl?: string; controlJsonl?: string; tapeJsonl?: string };
   laya?: LayaConfig;
 }
 
 export interface TelemetrySinks {
   sessionJsonl: string;
   controlJsonl: string;
+  /** M1 N3: replay tape (session content) - written only in observation: tape mode */
+  tapeJsonl: string;
 }
 
 export const DEFAULT_TELEMETRY: TelemetrySinks = {
   sessionJsonl: './.s1cap/session.jsonl',
   controlJsonl: './.s1cap/control.jsonl',
+  tapeJsonl: './.s1cap/tape.jsonl',
 };
 
 export interface ResolvedPluginConfig {
@@ -74,7 +77,7 @@ export interface ResolvedPluginConfig {
   conflicts: string[];
   telemetryErrors: string[];
   /** effective M1 observation mode (`log` unless the config says otherwise) */
-  observation: 'off' | 'log';
+  observation: 'off' | 'log' | 'tape';
   observationErrors: string[];
 }
 
@@ -120,11 +123,11 @@ export function resolvePluginConfig(raw?: Partial<S1CapPluginConfig>): ResolvedP
   // Observation mode is validated here (not in core): it is a plugin-level switch, not part of the
   // frozen assembly policy. Fail-safe like everything else — an unknown value keeps the default.
   const observationErrors: string[] = [];
-  let observation: 'off' | 'log' = 'log';
+  let observation: 'off' | 'log' | 'tape' = 'log';
   const rawObservation = source.observation;
   if (rawObservation !== undefined) {
-    if (rawObservation === 'off' || rawObservation === 'log') observation = rawObservation;
-    else observationErrors.push(`observation must be "off" or "log" (default kept: ${observation})`);
+    if (rawObservation === 'off' || rawObservation === 'log' || rawObservation === 'tape') observation = rawObservation;
+    else observationErrors.push(`observation must be "off", "log" or "tape" (default kept: ${observation})`);
   }
   config.observation = observation;
 
@@ -383,7 +386,14 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // round. `off` skips it entirely. The context window comes from constants for now: `ctx.tokenMeter`'s
   // semantics are not verified yet, and a wrong window would silently distort every budget number.
   let observer: StepObserver | undefined;
-  if (resolved.observation === 'log') {
+  if (resolved.observation !== 'off') {
+    const tapeSink =
+      resolved.observation === 'tape'
+        ? createControlSink({
+            path: resolveTelemetryPath(resolved.telemetry.tapeJsonl),
+            onError: (message) => ctx.logger?.warn?.(`[s1cap] tape sink: ${message}`),
+          })
+        : undefined;
     const sink = createControlSink({
       path: resolveTelemetryPath(resolved.telemetry.controlJsonl),
       onError: (message) => ctx.logger?.warn?.(`[s1cap] control sink: ${message}`),
@@ -404,10 +414,27 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       reserveOutputTokens: RESERVE_OUTPUT_DEFAULT,
       fixedOverheadTokens: FIXED_OVERHEAD_DEFAULT,
       lambdaMs: DECAY_LAMBDA_MS,
+      maxLagTurns: config.rgMaintenance.maxLagTurns,
       onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
       onObserved: (summary) => ctx.logger?.info?.(`[s1cap] observed ${summary}`),
+      ...(resolved.observation === 'tape'
+        ? {
+            onTape: (step: number, messages: readonly unknown[], systemPrompt: string | undefined) => {
+              tapeSink?.write(
+                `${JSON.stringify({ schema: 1, sessionId: 'live', step, ...(systemPrompt !== undefined ? { systemPrompt } : {}), messages })}\n`,
+              );
+            },
+          }
+        : {}),
     });
-    ctx.logger?.info?.(`[s1cap] observation mode: log -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)} (prompt untouched)`);
+    ctx.logger?.info?.(`[s1cap] observation mode: ${resolved.observation} -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)}${resolved.observation === 'tape' ? ` + tape ${resolveTelemetryPath(resolved.telemetry.tapeJsonl)}` : ''} (prompt untouched)`);
+
+    // Asynchronous upkeep lane: session events feed the graph off the critical path. The hook name and its
+    // payload shape are verified (`ctx.on("session/event", (session, event) => …)` in dsh-agent-instructions);
+    // what each event *contains* is read defensively and every shape without a rule is reported.
+    ctx.on('session/event', (_session: unknown, event: unknown) => {
+      observer?.noteSessionEvent(event);
+    });
   } else {
     ctx.logger?.info?.('[s1cap] observation mode: off');
   }

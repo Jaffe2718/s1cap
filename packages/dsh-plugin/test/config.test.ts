@@ -88,7 +88,7 @@ test('apply() registers the hooks and commands, and a conflict degrades to obser
   const h = harness();
   apply(h.ctx, { enabled: true, s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: layaIdle });
 
-  assert.deepEqual(h.events, ['agent/pre-step'], 'agent/request-error stays unregistered until its contract is verified');
+  assert.deepEqual(h.events, ['session/event', 'agent/pre-step'], 'agent/request-error stays unregistered until its contract is verified');
   assert.deepEqual([...h.commands.keys()], ['s1', 's1-ping', 's1-laya']);
   assert.ok(h.logs.some((l) => l.includes('command registered: /s1')));
   assert.ok(h.warns.some((w) => w.includes('only one S1 backend')));

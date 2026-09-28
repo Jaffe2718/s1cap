@@ -13,7 +13,7 @@
  */
 import type { AssemblyPolicy, Segment } from './types.ts';
 import { AssociationGraph } from './assoc-graph.ts';
-import { segmentEvent } from './segmenter.ts';
+import { segmentEvent, estimateTokens } from './segmenter.ts';
 import { assemble, totalTokens } from './assembler.ts';
 import { adaptMessages } from './harness-adapter.ts';
 import type { AdapterReport } from './harness-adapter.ts';
@@ -28,6 +28,12 @@ export interface ObserveStepInput {
   seq: number;
   /** harness message list as offered to this LLM call (DSH shape; see harness-adapter.ts) */
   messages: readonly unknown[];
+  /**
+   * Rendered system prompt, when the caller has one. The `agent/pre-step` payload's `messages` array does
+   * not carry it — verified in a real round, where `blocks.pinned` came out 0 — so the harness's own
+   * system-prompt surface supplies it; `extractSystemPrompt()` reads it out of a session event.
+   */
+  systemPrompt?: string;
   policy: AssemblyPolicy;
   now: number;
   contextWindow: number;
@@ -72,6 +78,20 @@ export function observeStep(input: ObserveStepInput): StepObservation {
   input.graph.addSegments(segments);
 
   const pinned = segments.filter((s) => s.kind === 'systemPinned');
+  // The rendered system prompt is pinned, never a recall candidate: it has to stay byte-stable at the front
+  // of the prompt (that is what the prefix cache hits on) and relevance may not drop it.
+  const promptText = input.systemPrompt?.trim() ?? '';
+  if (promptText !== '') {
+    pinned.unshift({
+      id: 'system-prompt',
+      sessionId: input.sessionId,
+      kind: 'systemPinned',
+      seq: input.seq,
+      ts: input.now,
+      tokens: estimateTokens(promptText),
+      text: promptText,
+    });
+  }
   const anchor = lastIndexWhere(segments, (s) => s.kind === 'user');
   const current = anchor >= 0 ? segments[anchor] : segments[segments.length - 1]!;
   const before = (anchor >= 0 ? segments.slice(0, anchor) : segments.slice(0, -1)).filter(

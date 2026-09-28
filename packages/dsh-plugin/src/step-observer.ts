@@ -1,16 +1,17 @@
 /**
- * STEP OBSERVER — the plugin's read-only wiring of the M1 observation mode.
+ * STEP OBSERVER — the plugin's read-only wiring of M1.
  *
- * Split out of `index.ts` on purpose: this module contains the logic (extract the payload, run the
- * observer, emit the record, keep counters) and no Cordis, no filesystem and no clock of its own — the
- * clock and the emit function are injected. That keeps the plugin's own tests deterministic and lets the
- * wiring stay a few lines.
+ * Contains the logic (capture the system prompt, keep the graph fresh off the critical path, run the
+ * observer, emit the record, keep counters) with no Cordis, no filesystem and no clock of its own: the clock,
+ * the scheduler and the emit function are injected. That keeps the plugin's tests deterministic and the
+ * wiring in `index.ts` a few lines.
  *
  * Nothing here can change a round: `observe()` never throws, never rewrites the payload, and is called
- * *after* the harness's own middleware chain has produced its decision.
+ * *after* the harness's own middleware chain produced its decision. Upkeep never runs inside it — new session
+ * events go into a bounded queue and are folded into the graph on a later tick.
  */
-import { AssociationGraph, observeStep } from '@s1cap/core';
-import type { AssemblyPolicy, TelemetryEvent } from '@s1cap/core';
+import { AssociationGraph, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep } from '@s1cap/core';
+import type { AssemblyPolicy, TelemetryEvent, UpkeepQueueStats } from '@s1cap/core';
 
 export interface StepObserverOptions {
   policy: AssemblyPolicy;
@@ -21,9 +22,15 @@ export interface StepObserverOptions {
   reserveOutputTokens: number;
   fixedOverheadTokens: number;
   lambdaMs: number;
+  /** how far the graph may lag the session, in turns (policy: rgMaintenance.maxLagTurns) */
+  maxLagTurns?: number;
   sessionId?: string;
   onWarn?(message: string): void;
   onObserved?(summary: string): void;
+  /** M1 N3: record one tape line per call (opt-in; a tape contains session content) */
+  onTape?(step: number, messages: readonly unknown[], systemPrompt: string | undefined): void;
+  /** schedule one deferred upkeep tick; injected so tests can drive it by hand */
+  schedule?(tick: () => void): void;
 }
 
 export interface StepObserverStats {
@@ -42,14 +49,22 @@ export interface StepObserverStats {
   lastSegments: number;
   lastObserveMs: number;
   sessionId: string;
+  /** tokens of the rendered system prompt currently pinned (0 while none has been seen) */
+  systemPromptTokens: number;
   unknownPartTypes: string[];
   unknownRoles: string[];
   graphSegments: number;
   graphEdges: number;
+  upkeep: UpkeepQueueStats;
 }
 
 export interface StepObserver {
+  /** `agent/pre-step`: observe one LLM call, change nothing */
   observe(payload: unknown): void;
+  /** `session/event`: capture the system prompt and queue the event for asynchronous upkeep */
+  noteSessionEvent(event: unknown): void;
+  /** drain deferred upkeep now (tests, shutdown) */
+  flushUpkeep(): number;
   stats(): StepObserverStats;
 }
 
@@ -66,8 +81,8 @@ function readStep(payload: unknown): number {
 }
 
 /**
- * Opportunistic session id: the payload carries `agent`, and a session exposes an id. Read defensively —
- * an absent id only costs correlation in the control-plane log, never correctness.
+ * Opportunistic session id: the payload carries `agent`, and a session exposes an id. Read defensively — an
+ * absent id only costs correlation in the control-plane log, never correctness.
  */
 function readSessionId(payload: unknown, fallback: string): string {
   if (typeof payload !== 'object' || payload === null) return fallback;
@@ -81,6 +96,9 @@ function readSessionId(payload: unknown, fallback: string): string {
 
 export function createStepObserver(opts: StepObserverOptions): StepObserver {
   const graph = new AssociationGraph();
+  let systemPrompt: string | undefined;
+  let systemPromptTokens = 0;
+  let scheduled = false;
   const stats: StepObserverStats = {
     steps: 0,
     observed: 0,
@@ -92,14 +110,71 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     lastSegments: 0,
     lastObserveMs: 0,
     sessionId: opts.sessionId ?? 'unassigned',
+    systemPromptTokens: 0,
     unknownPartTypes: [],
     unknownRoles: [],
     graphSegments: 0,
     graphEdges: 0,
+    upkeep: {
+      enqueued: 0,
+      applied: 0,
+      dropped: 0,
+      errors: 0,
+      pending: 0,
+      flushes: 0,
+      overLag: false,
+      maxLagTurns: opts.maxLagTurns ?? 2,
+    },
   };
-  /** own monotonic sequence: the harness's session-log sequence is not exposed on this payload */
+  /** own monotonic sequence: the harness's session-log sequence is not exposed on the pre-step payload */
   let seq = 0;
   let announcedShapes = false;
+
+  const schedule =
+    opts.schedule ??
+    ((tick: () => void): void => {
+      const timer = setTimeout(tick, 0);
+      // never hold the process open just to drain a queue
+      if (typeof (timer as { unref?: () => void }).unref === 'function') (timer as { unref: () => void }).unref();
+    });
+
+  const queue = createUpkeepQueue<unknown>({
+    maxLagTurns: opts.maxLagTurns ?? 2,
+    onWarn: (message) => opts.onWarn?.(message),
+    onEvent: (event) => {
+      // A session event may be a message, or wrap one; the adapter reports anything it cannot read.
+      const wrapped =
+        typeof event === 'object' && event !== null && (event as { message?: unknown }).message !== undefined
+          ? [(event as { message: unknown }).message]
+          : [event];
+      const observation = observeStep({
+        sessionId: stats.sessionId,
+        step: 0,
+        seq,
+        messages: wrapped,
+        systemPrompt,
+        policy: opts.policy,
+        now: opts.now(),
+        contextWindow: opts.contextWindow,
+        reserveOutputTokens: opts.reserveOutputTokens,
+        fixedOverheadTokens: opts.fixedOverheadTokens,
+        lambdaMs: opts.lambdaMs,
+        graph,
+      });
+      seq += wrapped.length;
+      for (const type of observation.report.unknownPartTypes) {
+        if (!stats.unknownPartTypes.includes(type)) stats.unknownPartTypes.push(type);
+      }
+      for (const role of observation.report.unknownRoles) {
+        if (!stats.unknownRoles.includes(role)) stats.unknownRoles.push(role);
+      }
+    },
+  });
+
+  function tick(): void {
+    scheduled = false;
+    queue.flush();
+  }
 
   return {
     observe(payload: unknown): void {
@@ -117,6 +192,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           step: readStep(payload),
           seq,
           messages,
+          systemPrompt,
           policy: opts.policy,
           now: started,
           contextWindow: opts.contextWindow,
@@ -129,6 +205,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
 
         const elapsed = Math.max(0, opts.now() - started);
         opts.emit(observation.event);
+        opts.onTape?.(readStep(payload), messages, systemPrompt);
 
         stats.observed += 1;
         stats.sessionId = sessionId;
@@ -137,9 +214,6 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         stats.lastCandidates = observation.event.candidates;
         stats.lastSegments = observation.segments.length;
         stats.lastObserveMs = elapsed;
-        const graphStats = graph.stats();
-        stats.graphSegments = graphStats.segments;
-        stats.graphEdges = graphStats.edges;
         for (const type of observation.report.unknownPartTypes) {
           if (!stats.unknownPartTypes.includes(type)) stats.unknownPartTypes.push(type);
         }
@@ -147,8 +221,6 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           if (!stats.unknownRoles.includes(role)) stats.unknownRoles.push(role);
         }
 
-        // One line per observed step is the visible proof that observation mode is alive; the first
-        // observation additionally names any harness shape we do not yet have a rule for.
         opts.onObserved?.(
           `step ${readStep(payload)}: ${observation.segments.length} segments, ` +
             `${observation.event.selected} recalled of ${observation.event.candidates} candidates, ` +
@@ -166,9 +238,39 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         opts.onWarn?.(`observation failed (ignored): ${String(err)}`);
       }
     },
+
+    noteSessionEvent(event: unknown): void {
+      try {
+        const prompt = extractSystemPrompt(event);
+        if (prompt !== undefined && prompt !== systemPrompt) {
+          systemPrompt = prompt;
+          systemPromptTokens = estimateTokens(prompt);
+          stats.systemPromptTokens = systemPromptTokens;
+        }
+        queue.enqueue(event);
+        if (!scheduled) {
+          scheduled = true;
+          schedule(tick);
+        }
+      } catch (err) {
+        stats.errors += 1;
+        opts.onWarn?.(`session event ignored: ${String(err)}`);
+      }
+    },
+
+    flushUpkeep(): number {
+      return queue.drain();
+    },
+
     stats(): StepObserverStats {
       const graphStats = graph.stats();
-      return { ...stats, graphSegments: graphStats.segments, graphEdges: graphStats.edges };
+      return {
+        ...stats,
+        systemPromptTokens,
+        graphSegments: graphStats.segments,
+        graphEdges: graphStats.edges,
+        upkeep: queue.stats(),
+      };
     },
   };
 }
