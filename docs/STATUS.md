@@ -320,7 +320,7 @@ verified, it says so instead of guessing.
     so the linked plugin may need a reinstall (`dsh plugin --profile s1captest remove` + `add link:…`) or an
     additional declaration field before the entry appears. Also note the shipped client ids are **package names**
     (`@deepseek-ai/dsh-client-ui-…`), which our `id: 'dsh-s1cap'` matches.
-- [ ] **N4** Settings panel + Jev key through the credential service *(user decision: the key is typed by the user in a panel)*
+- [x] **N4** Settings panel shipped: the browser half is registered and served, and the key is entered there and stored by the credential service (evidence below)
   - **N1 detail (verified 2026-09-28, round 1):** `dsh-system-prompt` registers a Cordis **Service named
     `systemPrompt`** (`super(ctx, "systemPrompt")`), so the host half can read `ctx.systemPrompt` once
     `'systemPrompt'` is added to `inject` (Cordis throws on uninjected access — that is how the earlier
@@ -342,6 +342,24 @@ verified, it says so instead of guessing.
 - [ ] **N5** `llm_call` telemetry so cost and cache-hit rate become real numbers
 - [ ] **N6** The actual context rewrite (`decision.messages`), feature-flagged per ablation cell
 
+### N4 evidence (round 18)
+
+The registration gap was an **install-metadata** problem, not a declaration problem: after
+`dsh plugin --profile s1captest remove dsh-s1cap` and `add link:…`, `window.__DSH_BOOT__` lists our browser half
+among its 66 client entries —
+
+```json
+{"id":"dsh-s1cap","url":"plugins/??dsh-s1cap/client.js&rev=dae1139fcd91",
+ "inject":["@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-connection"]}
+```
+
+— and fetching that URL returns `200`, 7174 bytes, containing `__ModuleLoader__`, `settings.section` and
+`remote.credentials`. So the half loads, registers into the settings slot, and reaches the credential RPC.
+The panel itself (plain JS, `React.createElement`, no bundler): shows whether a key is stored via
+`ctx.remote.credentials.describe([ref])`, saves it through `set`/`write` with ref `s1cap/jev`, clears it, and
+never echoes the value; the host half reads the same ref back (`packages/dsh-plugin/src/credentials.ts`).
+**Lesson worth keeping:** a linked plugin needs a reinstall before DSH registers its client entry — the boot
+table is built from install metadata, not from the package.json on disk.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
