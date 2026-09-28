@@ -8,6 +8,20 @@ const ROOT = 'D:\\Program Files\\DeepSeek Harness\\resources\\app.asar\\dsh\\nod
 const NEEDLES = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['agent/pre-step', 'agent/request-error'];
 // `--dump <path relative to @deepseek-ai> [maxLines]` prints one packaged file, so a contract can be read
 // in full instead of guessed from snippets.
+// `--members <relpath>`: every method/lambda name a file declares, indentation- and quote-agnostic. Written
+// because reading a class body by pattern-matching an indentation style failed three times in a row: DSH's
+// packaged files mix tabs and spaces, and a too-narrow pattern silently prints nothing.
+const membersIndex = process.argv.indexOf('--members');
+if (membersIndex > 0) {
+  const rel = process.argv[membersIndex + 1];
+  const text = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+  const names = new Set();
+  const re = /(?:^|\n)[ \t]*(?:async\s+|static\s+|get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g;
+  let match;
+  while ((match = re.exec(text)) !== null) names.add(match[1]);
+  console.log(`${rel}\n${[...names].sort().join(' ')}`);
+  process.exit(0);
+}
 const grepIndex = process.argv.indexOf('--grep');
 if (grepIndex > 0) {
   const rel = process.argv[grepIndex + 1];
