@@ -33,7 +33,7 @@ Everything is **measured, not assumed**: solve rate, token cost split by prompt-
 
 ## Architecture
 
-![Conceptual S1CAP architecture: selected context enters the System-2 LLM; System-1 relevance scoring maintains an association graph, while choice scoring orders candidate plans before execution.](./docs/figures/s1cap-architecture-overview.png)
+![S1CAP method overview: chronological session events feed task-conditioned context selection over an association graph; selected evidence reaches the System-2 LLM, whose candidate plans are scored and ordered before model-owned execution.](./docs/figures/s1cap-method-overview-v2.png)
 
 For exact control flow and asynchronous boundaries, see the [detailed technical route](docs/figures/s1cap-technical-route.light.svg) ([dark version](docs/figures/s1cap-technical-route.dark.svg)).
 
