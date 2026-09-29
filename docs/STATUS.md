@@ -529,6 +529,27 @@ path-addressed op list from the panel, (4) confirm with a real session that `/s1
 **Where the feature stands:** the panel carries both knobs with the requested rules, the host reads and applies
 whatever is stored, and the write path is the only thing missing — so a session still runs at the policy defaults.
 The panel states this itself instead of implying success.
+### Round 27: the recall knobs take effect — proven in a real session
+
+Rather than keep chasing the settings RPC (whose `ops` shape is still unknown), the knobs got a channel that works
+today and a store the plugin owns; the panel keeps its fields and validation, and `/s1-tune` drives the host:
+
+- **`/s1-tune d r`** (also `d=3`, `r=0.7`, or either alone) validates with the same two rules — d an integer > 0,
+  0 <= r <= 1, out-of-range dropped rather than clamped — applies them to the live policy **immediately**, and
+  persists them to `~/.dsh/.s1cap/tuning.json` (the plugin's own directory, alongside the control log and tapes);
+- at session start the host reads that file and applies it, which a real headless round now proves:
+
+  ```json
+  {"schema":0,"kind":"tuning-file","read":{"depth":3,"tau":0.7},"effective":{"depth":3,"tau":0.7}}
+  ```
+
+  `effective` equals `read`: the session ran at the chosen depth and threshold, not at the defaults. `/s1` reports
+  the same pair under `tuning`.
+
+**Still open, and only this:** the panel's *Save tuning* button cannot write yet — `settings/mutate` needs the
+namespace declared (via `dsh-storage-domain`) and the path-addressed `ops` shape. Until that lands, the panel shows
+the two fields and their validation while `/s1-tune` is the working path; the panel says so in its message instead
+of implying a save. Panel-side tests and the host-side parser: 107/107 green.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)

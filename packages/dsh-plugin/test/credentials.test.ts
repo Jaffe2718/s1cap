@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { TUNING_REF, parseTuning, readCredential } from '../src/credentials.ts';
+import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from '../src/credentials.ts';
 
 test('the first entry point that answers wins, and it is reported by name', async () => {
   const reports: Record<string, unknown>[] = [];
@@ -81,4 +81,17 @@ test('parseTuning accepts d>0 int and 0<=r<=1 float, and drops anything else', (
   assert.deepEqual(parseTuning('nonsense'), {});
   assert.deepEqual(parseTuning('2'), { depth: 2 }, 'a missing r leaves the policy default in place');
   assert.equal(TUNING_REF, 's1cap/tuning');
+});
+test('parseTuningArgs accepts d/r by position and by name, and drops out-of-range values', () => {
+  assert.deepEqual(parseTuningArgs('3 0.7'), { depth: 3, tau: 0.7 });
+  assert.deepEqual(parseTuningArgs('d=3 r=0.7'), { depth: 3, tau: 0.7 });
+  assert.deepEqual(parseTuningArgs('depth=4 tau=1'), { depth: 4, tau: 1 });
+  assert.deepEqual(parseTuningArgs('r=0.2'), { tau: 0.2 });
+  assert.deepEqual(parseTuningArgs('5'), { depth: 5 });
+
+  assert.deepEqual(parseTuningArgs('0 0.5'), { tau: 0.5 }, 'd must be greater than 0');
+  assert.deepEqual(parseTuningArgs('2.5'), {}, 'd must be an integer');
+  assert.deepEqual(parseTuningArgs('2 2'), { depth: 2 }, 'r must be at most 1');
+  assert.deepEqual(parseTuningArgs(''), {});
+  assert.deepEqual(parseTuningArgs(undefined), {});
 });

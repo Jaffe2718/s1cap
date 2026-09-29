@@ -124,3 +124,31 @@ export function parseTuning(value: string | undefined): Tuning {
   if (Number.isFinite(tau) && tau >= 0 && tau <= 1) out.tau = tau;
   return out;
 }
+/**
+ * Parse a tuning command line. Accepts `3 0.7`, `d=3 r=0.7`, `depth=3 tau=0.7`, or either field alone; the same
+ * two rules apply (d an integer > 0, 0 <= r <= 1) and anything else is dropped rather than clamped.
+ */
+export function parseTuningArgs(input: string | undefined): Tuning {
+  if (typeof input !== 'string') return {};
+  const out: Tuning = {};
+  const assign = (key: string, raw: string): void => {
+    const value = Number(raw);
+    if (key === 'depth' || key === 'd') {
+      if (Number.isInteger(value) && value > 0) out.depth = value;
+      return;
+    }
+    if (key === 'tau' || key === 'r') {
+      if (Number.isFinite(value) && value >= 0 && value <= 1) out.tau = value;
+    }
+  };
+  const positional: string[] = [];
+  for (const token of input.trim().split(/\s+/)) {
+    if (token === '') continue;
+    const match = /^(depth|d|tau|r)\s*=\s*(\S+)$/.exec(token);
+    if (match && match[1] !== undefined && match[2] !== undefined) assign(match[1], match[2]);
+    else positional.push(token);
+  }
+  if (positional[0] !== undefined) assign('depth', positional[0]);
+  if (positional[1] !== undefined) assign('tau', positional[1]);
+  return out;
+}

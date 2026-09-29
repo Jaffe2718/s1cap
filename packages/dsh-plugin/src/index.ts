@@ -34,8 +34,9 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
 import type { ResolvedS1Backend } from '@s1cap/s1-client';
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.ts';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { primeSystemPrompt } from './system-prompt.ts';
-import { TUNING_REF, parseTuning, readCredential } from './credentials.ts';
+import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from './credentials.ts';
 import type { Tuning } from './credentials.ts';
 import { createStepObserver } from './step-observer.ts';
 import type { StepObserver } from './step-observer.ts';
@@ -311,6 +312,32 @@ let credentialKey: string | undefined;
 let credentialSource = 'config-or-env';
 /** recall tuning the panel stored, applied to the live policy at session start */
 let appliedTuning: Tuning = {};
+/** the plugin's own store for the two recall knobs; relative paths resolve against DSH_HOME */
+const TUNING_FILE = './.s1cap/tuning.json';
+
+function readTuningFile(): Tuning {
+  try {
+    const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
+    const parsed = JSON.parse(raw) as { depth?: unknown; tau?: unknown };
+    const out: Tuning = {};
+    if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth > 0) out.depth = parsed.depth;
+    if (typeof parsed.tau === 'number' && parsed.tau >= 0 && parsed.tau <= 1) out.tau = parsed.tau;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeTuningFile(values: Tuning): boolean {
+  try {
+    const path = resolveTelemetryPath(TUNING_FILE);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(values) + '\\n', 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The session-event lane is wired at the very top of `applyInner`, before anything that can throw, so an
@@ -594,8 +621,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         report: (line) => probeSink?.write(JSON.stringify({ ...line, kind: 'credential-tuning' }) + '\n'),
       });
       appliedTuning = parseTuning(tuningRead.key);
+      const fromFile = readTuningFile();
+      if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
+      if (fromFile.tau !== undefined) appliedTuning.tau = fromFile.tau;
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.tau !== undefined) config.recall.tau = appliedTuning.tau;
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, tau: config.recall.tau } }) + '\n');
       await primeSystemPrompt({
         service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
         observer,
@@ -624,6 +655,25 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // is ctx.effect(() => ctx.commands.register({ name, description, input, handler })) - all verified
   // `/s1 status` never prints the API key: the resolved backend goes through redactKey().
   registerCommands(ctx, [
+    {
+      name: 's1-tune',
+      description: 'S1CAP: set the two recall knobs — BFS depth d (integer > 0) and relevance threshold r (0..1)',
+      input: { hint: 'd r   (e.g. "3 0.7", or "d=3", or "r=0.7")' },
+      handler: ({ rawInput }) => {
+        const parsed = parseTuningArgs(rawInput);
+        if (parsed.depth === undefined && parsed.tau === undefined) {
+          return { ok: false, reason: 'nothing to set: depth d must be an integer > 0 and threshold r between 0 and 1' };
+        }
+        appliedTuning = { ...appliedTuning, ...parsed };
+        if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
+        if (parsed.tau !== undefined) config.recall.tau = parsed.tau;
+        const persisted = writeTuningFile(appliedTuning);
+        ctx.logger?.info?.(
+          `[s1cap] recall tuning: depth=${config.recall.depth} tau=${config.recall.tau}${persisted ? '' : ' (not persisted: file write failed)'}`,
+        );
+        return { ok: true, effective: { depth: config.recall.depth, tau: config.recall.tau }, persisted };
+      },
+    },
     {
       name: 's1',
       description: 'S1CAP status: policy, resolved System-1 backend, Laya state, sinks',
