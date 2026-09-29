@@ -846,6 +846,34 @@ be written against the union of the dump and the test profile's patch, not the d
 
 The plugin's public surface, for reference: `apply`, `inject`, `name`, `preStepMiddleware`, `resolveConfig`,
 `resolvePluginConfig`, `LayaRuntime`, `DEFAULT_TELEMETRY`.
+### Round 41: the volatile Config route is closed to an out-of-tree plugin - and round 13's conclusion was wrong
+
+Two steps, gated separately, and the difference between them is the answer:
+
+| step | suite | control records |
+| --- | --- | --- |
+| `config-schema.ts` present, **not** exported | 109/109 green | 1 (plugin working) |
+| the same file **exported** as `Config` | the test file fails to load at all | 0 (plugin not working) |
+
+The failure is an import error, before any assertion runs: `import z from '@deepseek-ai/schemastery'` cannot be
+resolved. In a plain Node run there is no loader to map host packages, and in the real profile the control records
+stop too - so the loader does not provide it to our bundle either.
+
+**Correction to round 33/34.** That round tested `import type z from '@deepseek-ai/schemastery'`, which the TypeScript
+stripper erases: nothing was imported at runtime, so the round's success proved only that an erased import changes
+nothing. The third-party precedents (`dsh-browser` and another installed plugin) do import schemastery at runtime -
+but they are installed **inside the application archive**, where host packages resolve, whereas an out-of-tree plugin
+under a profile gets no such mapping, and schemastery is not published to npm, so it cannot be added as a dependency.
+
+**Consequence, exactly as the user's instruction anticipated:** option (a) - write through the plugin's own config
+namespace - is closed for an out-of-tree plugin, and the plugin is not going to ship a schema it cannot import. The
+panel therefore keeps the honest design it already has: the three knobs are validated in the panel, `/s1-tune` writes
+them and the host applies them at session start and on volatile updates, and the panel's Save reports the gateway's
+refusal verbatim rather than implying a save. Option (b), `remote.commands`, remains untried.
+
+`scripts/gen-config-schema.mjs` is kept: it generates the schema from the resolved shape, which is the right
+technique if this route ever opens (for an in-tree build or a published host package), and it is how the 44-field
+coverage was measured.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
