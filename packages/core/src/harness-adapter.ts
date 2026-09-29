@@ -160,8 +160,22 @@ export function adaptSessionEvent(event: unknown, opts: AdaptOptions): { events:
   const logSeq = typeof record.seq === 'number' && Number.isFinite(record.seq) ? record.seq : opts.startSeq;
   const withSeq = { ...opts, startSeq: logSeq };
 
-  if (record.message !== undefined) {
-    const sub = adaptMessages([record.message], withSeq);
+  // The payload is under `data`, and where the message sits inside it depends on the event. Measured on a live
+  // session (probe: `session-event-probe`), the envelope is `{type, seq, time, data}` and:
+  //   - `user/message`      -> `data` IS the message: `{content, source, role, id}`
+  //   - `assistant/message` -> `data` is a wrapper: `{turn, step, message, usage, stream}`
+  //   - `tool/call`         -> `{turn, step, callId, name, arguments}`
+  //   - `tool/result`       -> `{turn, step, message}`
+  // The first version read `record.message` at the top level, which exists on none of them, so every content
+  // event produced zero segments - and `upkeepEmpty` counted them as lifecycle noise, so the counters read as
+  // "the stream carries nothing" rather than "the reader is looking in the wrong place".
+  const data =
+    typeof record.data === 'object' && record.data !== null ? (record.data as Record<string, unknown>) : undefined;
+  const message = data?.message ?? (data !== undefined && 'content' in data ? data : undefined);
+  const payload = { ...record, ...(data ?? {}) };
+
+  if (message !== undefined) {
+    const sub = adaptMessages([message], withSeq);
     mergeReport(report, sub.report);
     return { events: sub.events, report };
   }
@@ -169,13 +183,13 @@ export function adaptSessionEvent(event: unknown, opts: AdaptOptions): { events:
   // tool/call has no message. Render it: the arguments are the model's stated intent, which is the part a
   // later step can be related to, and the part that would otherwise be lost while the result is kept.
   if (type === 'tool/call') {
-    const name = typeof record.name === 'string' && record.name !== '' ? record.name : '(unnamed)';
+    const name = typeof payload.name === 'string' && payload.name !== '' ? payload.name : '(unnamed)';
     const rawArgs =
-      typeof record.arguments === 'string'
-        ? record.arguments
-        : JSON.stringify(record.arguments ?? null) ?? '';
+      typeof payload.arguments === 'string'
+        ? payload.arguments
+        : JSON.stringify(payload.arguments ?? null) ?? '';
     const args = rawArgs.length > TOOL_ARGS_MAX_CHARS ? `${rawArgs.slice(0, TOOL_ARGS_MAX_CHARS)}…` : rawArgs;
-    const id = typeof record.callId === 'string' && record.callId !== '' ? record.callId : `toolcall-${logSeq}`;
+    const id = typeof payload.callId === 'string' && payload.callId !== '' ? payload.callId : `toolcall-${logSeq}`;
     report.messages += 1;
     report.roles['tool-call'] = 'toolCall';
     return {

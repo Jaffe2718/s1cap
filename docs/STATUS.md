@@ -1124,3 +1124,85 @@ Copy-Item packages/dsh-plugin/examples/profile.s1captest.cordis.patch.yml $env:U
 dsh --profile s1capobs "Reply with exactly: ok"
 Get-Content $env:USERPROFILE\.dsh\.s1cap\control.jsonl
 ```
+
+---
+
+## 6. Round of 2026-09-29 (night): the live path finally runs, and what it exposed
+
+The order was 3 → 4c → 2 → 4b → 4a, then a box-by-box audit against the method figure. All five landed. The
+short version: **S1CAP had never observed a live session, and six separate faults were hiding that.** Each was
+found by measurement, and the shape they share is worth naming before the list: every one of them produced a
+plausible-looking number rather than an error.
+
+### What now runs, with the evidence
+
+| Box in the figure | State | Evidence |
+| --- | --- | --- |
+| `input x` → segments | done | 4 content events → 4 segments in `upkeep-path.test.ts` |
+| Session-event stream is the pool | done | live `scoredPairs` 0→1→3→6→10→15, one assembly per step |
+| Bounded recall + budget | done | `selected=1 recalled=7 tail=21` on a live step |
+| Weights + decay | done | same records; `window-curve.mjs` shows max pairs/step == w exactly |
+| S1 Assoc backend (relevance) | done | stub backend counted 17 `score` questions from live sessions |
+| **Plan gate** (candidates → choice → advisory order) | done | live `plan_gate` record: `order=[p1,p2,p3]`, 1 `choice` question |
+| State proxy `T` | done | live `blocks.stateProxy = 41`, **byte-stable across every step of a task** |
+| Two layouts (`xFirst`) | done | one run, both arms: head 740 / tail-after-cut 0 vs head 700 |
+| Cache cut pricing | done | `layoutStableTokens`, `cutAfterBlock`, `tokensAfterCut` in every record |
+| Stop is model-owned | done | no code path from any gate decision to a stop; `executed: []` in the record |
+
+### The six faults (all fixed, all with a test that would have caught them)
+
+1. **The observer asserted non-null on an empty segment list.** `assembler.ts` then threw inside a never-throw
+   guard, so a live session looked healthy while nothing was observed at all.
+2. **The step payload carries no history.** `agent/pre-step` hands over `inbox.claim(...)`: one user message on
+   step 1, an empty array afterwards. The conversation lives in the session-event stream.
+3. **Upkeep never ran.** The queue only drains when something asks; `schedule` was never passed, so `flush()` was
+   called by tests and nothing else.
+4. **The event payload is under `data`.** Measured envelope: `{type, seq, time, data, surfaceOp}`, where
+   `user/message` keeps the message in `data` directly and `assistant/message` nests it at `data.message`. Reading
+   top-level `message` — which no event has — made every content event produce nothing, and `upkeepEmpty`
+   counted them as lifecycle noise.
+5. **The tail block was always empty.** The pool was "segments before the anchor", but the model's own output
+   arrives *after* the last user message, so the newest turns were exactly what got dropped.
+6. **`/s1*` was broken at the host boundary.** `normalizeResult` accepts only `{kind:'success', text?}` or
+   `{kind:'error', text}`; all four commands returned bare objects, and the tests read the raw object, so the
+   assertion and the contract never met.
+
+Two smaller ones found the same way: the observer's `onProbe` channel wrote a bare newline and **discarded its
+argument** (so diagnostics went nowhere while the tape looked healthy), and `flushUpkeep()` was called as a bare
+identifier from inside the object literal that defines it — a `ReferenceError` swallowed by the surrounding catch.
+
+### Open problems, in the order they matter
+
+1. **`tool/call` and `tool/result` shapes are still inferred, not measured.** The probe budget (one per type,
+   eight types) ran out before them. They are read as `data = {turn, step, callId, name, arguments}` and
+   `data = {turn, step, message}`, so tool segments work if that holds — but it is a reading of the source, and
+   every other shape in this list turned out to differ from the source reading. **Next round: run a session with
+   tool calls and read the two probe lines.**
+2. **The figure says `noul relevance`; the implementation asks `score` questions.** `s1-relevance.ts` currently
+   asks an ordered 4-level `score` question per candidate, which gives a graded weight and works, but it is not
+   what the figure specifies. Either the figure changes or the question type does — decide, do not leave both.
+3. **Relevance has never run against a real System-1 backend.** All live verification used
+   `scripts/stub-s1-backend.mjs`, a local stub that answers from token overlap. That is enough to prove the
+   plumbing (calls made, answers read, weights normalized, edges created), and nothing about quality. The Laya
+   checkpoint has not been started once.
+4. **`xFirst` is not a cell dimension.** `cellPolicy()` sets C1–C4 from `tas.on`/`tier1`/`planGate.on` and leaves
+   `xFirst` at its default for all four, so the ablation cannot currently show the position intervention on its
+   own. It needs to be a cell knob (or a fifth cell) before any table is reported.
+5. **Cost accounting is not wired.** `summarizeTask`, `llmCallCost` and the `llm_call` / `s1_call` telemetry
+   events exist and nothing emits them, so no record carries what a round cost. The pieces are there; the call
+   sites are not.
+6. **The `sessionJsonl` sink is declared in config and written by nothing.** Either implement it or remove it
+   from `TelemetryConfig` — a declared sink that stays empty reads as a broken feature.
+7. **The plan gate only sees markdown lists.** When the model records a plan through the todo tool instead of
+   writing `1. …` lines (observed live), the gate correctly skips, and its coverage is therefore narrower than
+   "the model's plans". Worth reading the todo call as a second plan source.
+8. **`pinned` is still a fixed 700 tokens of harness prompt.** The system prompt is captured and pinned, but no
+   attempt has been made to keep volatile content out of it (item 4a's leftover half).
+
+### Verification aid added this round
+
+`scripts/stub-s1-backend.mjs` — a local `/v1/systemone` that answers `score`, `noul` and `choice` from token
+overlap and counts what it was asked (`GET /health`). It exists because the Laya checkpoint is a large download
+and the plumbing had never been exercised; point a throwaway profile at it with `s1.baseUrl`. It is a
+**verification aid, not a deliverable**: numbers produced against it say nothing about quality.
+

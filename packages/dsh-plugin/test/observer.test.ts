@@ -255,8 +255,7 @@ test('a captured system prompt becomes the pinned block, and upkeep never runs i
   assert.equal(after.upkeep.overLag, false);
 });
 
-test('upkeep lag is visible in the stats and clears when the tick runs', async () => {
-  const ticks: (() => void)[] = [];
+test('upkeep lag is visible in the stats and clears when the tick runs', async () => {  const ticks: (() => void)[] = [];
   const observer = createStepObserver({
     policy: defaultPolicy(),
     emit: () => undefined,
@@ -274,4 +273,72 @@ test('upkeep lag is visible in the stats and clears when the tick runs', async (
   assert.equal(observer.stats().upkeep.overLag, true, 'two pending against maxLagTurns 1');
   ticks[0]?.();
   assert.equal(observer.stats().upkeep.overLag, false);
+});
+
+test('the plan gate is offered the model\'s own output, whether it arrives as a message or a trace', async () => {
+  // The bug this pins: a message whose parts are only text adapts to `assistant`, but a message carrying
+  // reasoning *and* text - which is what this model emits on every turn - adapts to `trace`. Filtering on
+  // `assistant` alone inspected nothing for a whole live session while the model was writing numbered plans
+  // throughout, and the only visible symptom was a counter reading zero.
+  const seen: string[] = [];
+  const ticks: (() => void)[] = [];
+  const observer = createStepObserver({
+    policy: defaultPolicy(),
+    emit: () => undefined,
+    now: () => 0,
+    contextWindow: 128_000,
+    reserveOutputTokens: 8_000,
+    fixedOverheadTokens: 1_200,
+    lambdaMs: 1,
+    maxLagTurns: 2,
+    schedule: (tick) => ticks.push(tick),
+    planGate: {
+      consider: async (text: string) => {
+        seen.push(text);
+        return undefined;
+      },
+    },
+  });
+
+  // The envelope is the measured one: `{type, seq, time, data}`, with the message inside `data` - directly for
+  // user messages, under `data.message` for assistant ones. The top-level `message` these fixtures used to carry
+  // exists on no real event, so they passed while every live content event produced nothing.
+  observer.noteSessionEvent({
+    type: 'assistant/message',
+    seq: 1,
+    data: {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'I should lay out the steps.' },
+          { type: 'text', text: '1. inventory\n2. read the config' },
+        ],
+      },
+    },
+  });
+  // and a plain text-only message, which is the other shape
+  observer.noteSessionEvent({
+    type: 'assistant/message',
+    seq: 2,
+    data: { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: '3. map the modules\n4. summarize' }] } },
+  });
+  // a user message must never be offered: the gate reorders the model's plans, not the user's instructions
+  observer.noteSessionEvent({
+    type: 'user/message',
+    seq: 3,
+    data: { role: 'user', content: [{ type: 'text', text: '1. do this\n2. then that' }] },
+  });
+
+  ticks[0]?.();
+  ticks[1]?.();
+  // The queue's handler is async (the scorer and the gate are both network calls), so the flush returns before
+  // the handler settles. Draining the microtask queue is part of the assertion, not padding.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(seen.length, 2, `expected the two model messages, got ${JSON.stringify(seen)}`);
+  assert.ok(seen.some((t) => t.includes('inventory')), 'the trace form is offered');
+  assert.ok(seen.some((t) => t.includes('map the modules')), 'the text-only form is offered');
+  assert.ok(!seen.some((t) => t.includes('then that')), 'a user message is not a candidate plan');
 });

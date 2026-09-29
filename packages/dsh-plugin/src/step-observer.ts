@@ -132,6 +132,13 @@ function readSessionId(payload: unknown, fallback: string): string {
   return typeof id === 'string' && id !== '' ? id : fallback;
 }
 
+/** The session event's own type, e.g. `turn/end`. Absent for a payload that is not a session event. */
+function readEventType(event: unknown): string | undefined {
+  if (typeof event !== 'object' || event === null) return undefined;
+  const type = (event as { type?: unknown }).type;
+  return typeof type === 'string' && type !== '' ? type : undefined;
+}
+
 export function createStepObserver(opts: StepObserverOptions): StepObserver {
   const graph = new AssociationGraph();
   // T's one-entry memo, alive for as long as the observer is. The observer is created once per activation and
@@ -178,6 +185,8 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   let seq = 0;
   let announcedShapes = false;
   let eventProbes = 0;
+  /** session-event types already probed; one shape line each, so the budget lands on distinct shapes */
+  const probedTypes = new Set<string>();
 
   const schedule =
     opts.schedule ??
@@ -236,13 +245,19 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       stats.upkeepScoredPairs += scored.scoredPairs;
       seq += raw.length;
 
-      // The plan gate reads the model's own step list out of its assistant messages. It runs here, after the
-      // segments are in the graph, because an assistant message is where both arrive, and its failure is
-      // contained here for the same reason the scoring is: an advisory order that cannot be computed must not
-      // cost the session a segment.
+      // The plan gate reads the model's own step list out of its own output. It runs here, after the segments
+      // are in the graph, because that output is where both arrive, and its failure is contained here for the
+      // same reason the scoring is: an advisory order that cannot be computed must not cost the session a
+      // segment.
+      //
+      // Both kinds count, and that is the correction of a real bug: a message whose parts are only text adapts
+      // to `assistant`, but a message carrying reasoning *and* text - which is what this model actually emits -
+      // adapts to `trace`, with the reasoning and the answer merged. Filtering on `assistant` alone silently
+      // inspected nothing: the gate reported `inspected: 0` for a whole session while the model was writing
+      // numbered plans the entire time.
       if (opts.planGate !== undefined) {
         for (const ev of raw) {
-          if (ev.kind !== 'assistant') continue;
+          if (ev.kind !== 'assistant' && ev.kind !== 'trace') continue;
           try {
             await opts.planGate.consider(ev.text, stats.sessionId, stats.upkeepEvents);
           } catch (err) {
@@ -347,11 +362,30 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           systemPromptTokens = estimateTokens(prompt);
           stats.systemPromptTokens = systemPromptTokens;
         }
-        if (eventProbes < 3) {
+        // Probe the first event of each interesting type rather than the first three events overall. The old rule
+        // spent its whole budget on `turn/start`, `step/start` and `agent/inbox/spliced` - the three lifecycle
+        // events that arrive first and carry nothing - so the shapes that actually matter were never recorded,
+        // and the question "does `assistant/message` really carry a `message` key" stayed unanswerable while
+        // looking answered. Bounded to one probe per type, at most six types.
+        const eventType = readEventType(event);
+        if (eventType !== undefined && !probedTypes.has(eventType) && probedTypes.size < 8) {
+          probedTypes.add(eventType);
           eventProbes += 1;
+          // `data` is the envelope this host actually uses: measured keys are `type, seq, time, data, surfaceOp`,
+          // so the harness message is not at the top level and a reader looking for `message` finds nothing at
+          // all. Probing one level in is what turns "the stream carries no content" into "the reader is looking
+          // in the wrong place", and the two look identical from every counter.
+          const record = typeof event === 'object' && event !== null ? (event as { data?: unknown }) : undefined;
+          const data = record?.data;
           const shape =
             typeof event === 'object' && event !== null
-              ? { type: (event as { type?: unknown }).type, keys: Object.keys(event as object).slice(0, 14) }
+              ? {
+                  type: eventType,
+                  keys: Object.keys(event as object).slice(0, 14),
+                  ...(typeof data === 'object' && data !== null
+                    ? { dataKeys: Object.keys(data as object).slice(0, 14) }
+                    : { dataType: typeof data }),
+                }
               : { type: typeof event };
           this.probe({ schema: 0, kind: 'session-event-probe', ...shape });
         }
@@ -360,6 +394,16 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           scheduled = true;
           schedule(tick);
         }
+        // A turn boundary drains the queue, and it is free to do so: the turn is over, nothing is waiting on
+        // this work, and the alternative is what a live session actually did - the model's own message sat in
+        // the queue while the session ended, so the plan gate never saw the plan it was built to reorder, and
+        // the graph carried every event of the turn except its last. `maxLagTurns` bounds the lag by counting;
+        // this bounds it by ending it.
+        //
+        // `queue.drain()` and not the `flushUpkeep` method: that is a property of the object being returned, not
+        // a binding in this scope, so calling it by name threw a ReferenceError straight into the catch below -
+        // where it was counted as a bad event and swallowed. The queue stayed full and nothing said so.
+        if (readEventType(event) === 'turn/end') queue.drain();
       } catch (err) {
         stats.errors += 1;
         opts.onWarn?.(`session event ignored: ${String(err)}`);

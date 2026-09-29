@@ -746,8 +746,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         const timer = setTimeout(tick, 0);
         if (typeof (timer as { unref?: () => void }).unref === 'function') (timer as { unref: () => void }).unref();
       },
-      onProbe: (line) => probeSink?.write(`
-`),
+      // The observer's diagnostic channel. This wrote a bare newline and dropped its argument, so every line the
+      // observer tried to report - the session-event shapes, the early-buffer drain - went nowhere while the
+      // tape still looked healthy, because the *other* probe sink (`probeOut`, used by the session/event hook)
+      // was writing fine. Two channels, one of them silently dead, and the dead one was the one that would have
+      // answered "which shapes actually arrive".
+      onProbe: (line) => probeSink?.write(JSON.stringify(line) + '\n'),
       ...(resolved.observation === 'tape'
         ? {
             onTape: (step: number, messages: readonly unknown[], systemPrompt: string | undefined) => {
