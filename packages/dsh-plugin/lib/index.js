@@ -325,7 +325,7 @@ function readTuningFile()         {
     // drop a researcher's stored threshold.
     const threshold = typeof parsed.relevanceThreshold === 'number' ? parsed.relevanceThreshold : (parsed                         ).releTao;
     if (typeof threshold === 'number' && threshold >= 0 && threshold <= 1) out.relevanceThreshold = threshold;
-    if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 1) out.window = parsed.window;
+    if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 64) out.window = parsed.window;
     return out;
   } catch {
     return {};

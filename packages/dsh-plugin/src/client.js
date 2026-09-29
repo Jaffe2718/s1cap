@@ -330,7 +330,7 @@ window.__ModuleLoader__.load({
               id: 's1cap-window',
               style: S.number,
               type: 'number',
-              min: '1',
+              min: '64',
               step: '1',
               value: win,
               placeholder: String(DEFAULT_WINDOW),

@@ -105,7 +105,7 @@ export const TUNING_REF = 's1cap/tuning';
 export interface Tuning {
   depth?: number;
   relevanceThreshold?: number;
-  /** S1 scoring window w (recall.window): integer >= 1 */
+  /** S1 scoring window w (recall.window): integer >= 64, default 1024, no upper bound */
   window?: number;
 }
 
@@ -125,7 +125,7 @@ export function parseTuning(value: string | undefined): Tuning {
   const relevanceThreshold = Number(parts[1]);
   if (Number.isFinite(relevanceThreshold) && relevanceThreshold >= 0 && relevanceThreshold <= 1) out.relevanceThreshold = relevanceThreshold;
   const window = Number(parts[2]);
-  if (Number.isInteger(window) && window >= 1) out.window = window;
+  if (Number.isInteger(window) && window >= 64) out.window = window;
   return out;
 }
 /**
@@ -142,7 +142,7 @@ export function parseTuningArgs(input: string | undefined): Tuning {
       return;
     }
     if (key === 'window' || key === 'w') {
-      if (Number.isInteger(value) && value >= 1) out.window = value;
+      if (Number.isInteger(value) && value >= 64) out.window = value;
       return;
     }
     if (key === 'relevanceThreshold' || key === 'r') {

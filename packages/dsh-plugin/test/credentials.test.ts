@@ -95,3 +95,12 @@ test('parseTuningArgs accepts d/r by position and by name, and drops out-of-rang
   assert.deepEqual(parseTuningArgs(''), {});
   assert.deepEqual(parseTuningArgs(undefined), {});
 });
+test('the scoring window floor is 64, and it is dropped rather than clamped below it', () => {
+  assert.deepEqual(parseTuning('3 0.7 512'), { depth: 3, relevanceThreshold: 0.7, window: 512 });
+  assert.deepEqual(parseTuning('3 0.7 64'), { depth: 3, relevanceThreshold: 0.7, window: 64 });
+  assert.deepEqual(parseTuning('3 0.7 63'), { depth: 3, relevanceThreshold: 0.7 }, 'below the floor: dropped');
+  assert.deepEqual(parseTuning('3 0.7 -1'), { depth: 3, relevanceThreshold: 0.7 });
+  assert.deepEqual(parseTuningArgs('3 0.7 512'), { depth: 3, relevanceThreshold: 0.7, window: 512 });
+  assert.deepEqual(parseTuningArgs('w=64'), { window: 64 });
+  assert.deepEqual(parseTuningArgs('w=63'), {}, 'below the floor: dropped');
+});
