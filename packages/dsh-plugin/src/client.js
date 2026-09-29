@@ -41,6 +41,7 @@ window.__ModuleLoader__.load({
     const TUNING_REF = 's1cap/tuning';
     const DEFAULT_DEPTH = 2;
     const DEFAULT_TAU = 0.55;
+    const DEFAULT_WINDOW = 1024;
 
     const name = 'dsh-s1cap';
     const inject = ['slots', 'remote', 'remote.credentials', 'remote.settings'];
@@ -71,6 +72,7 @@ window.__ModuleLoader__.load({
         const [draft, setDraft] = React.useState('');
         const [depth, setDepth] = React.useState('');
         const [tau, setTau] = React.useState('');
+        const [win, setWin] = React.useState('');
 
         /**
          * Read one stored string. The store declares several read entry points and the host probes them the same
@@ -106,15 +108,19 @@ window.__ModuleLoader__.load({
             const tuning = await readValue(TUNING_REF);
             let nextDepth = '';
             let nextTau = '';
+            let nextWin = '';
             if (typeof tuning === 'string') {
               const parts = tuning.trim().split(/\s+/);
               const d = Number(parts[0]);
               const r = Number(parts[1]);
+              const w = Number(parts[2]);
               if (Number.isInteger(d) && d > 0) nextDepth = String(d);
               if (Number.isFinite(r) && r >= 0 && r <= 1) nextTau = String(r);
+              if (Number.isInteger(w) && w >= 1) nextWin = String(w);
             }
             setDepth(nextDepth);
             setTau(nextTau);
+            setWin(nextWin);
             setState({ phase: 'ready', configured: key !== undefined, message: '' });
           } catch (err) {
             setState({ phase: 'ready', configured: false, message: 'could not read the credential store: ' + String(err) });
@@ -180,6 +186,7 @@ window.__ModuleLoader__.load({
         const saveTuning = React.useCallback(async () => {
           const d = Number(depth);
           const r = Number(tau);
+          const w = Number(win);
           if (depth.trim() === '' || !Number.isInteger(d) || d <= 0) {
             setState((s) => ({ ...s, message: 'depth d must be an integer greater than 0' }));
             return;

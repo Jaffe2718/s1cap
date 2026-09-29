@@ -626,6 +626,7 @@ function applyInner(ctx               , raw                             )       
       if (fromFile.releTao !== undefined) appliedTuning.releTao = fromFile.releTao;
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.releTao !== undefined) config.recall.releTao = appliedTuning.releTao;
+      if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
       probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, releTao: config.recall.releTao } }) + '\n');
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
@@ -657,8 +658,8 @@ function applyInner(ctx               , raw                             )       
   registerCommands(ctx, [
     {
       name: 's1-tune',
-      description: 'S1CAP: set the two recall knobs — BFS depth d (integer > 0) and relevance threshold r (0..1)',
-      input: { hint: 'd r   (e.g. "3 0.7", or "d=3", or "r=0.7")' },
+      description: 'S1CAP: set the three recall knobs — BFS depth d (integer > 0) and relevance threshold r (0..1)',
+      input: { hint: 'd r w   (e.g. "3 0.7 512", or "d=3", "r=0.7", "w=512")' },
       handler: ({ rawInput }) => {
         const parsed = parseTuningArgs(rawInput);
         if (parsed.depth === undefined && parsed.releTao === undefined) {
@@ -667,11 +668,12 @@ function applyInner(ctx               , raw                             )       
         appliedTuning = { ...appliedTuning, ...parsed };
         if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
         if (parsed.releTao !== undefined) config.recall.releTao = parsed.releTao;
+        if (parsed.window !== undefined) config.recall.window = parsed.window;
         const persisted = writeTuningFile(appliedTuning);
         ctx.logger?.info?.(
           `[s1cap] recall tuning: depth=${config.recall.depth} releTao=${config.recall.releTao}${persisted ? '' : ' (not persisted: file write failed)'}`,
         );
-        return { ok: true, effective: { depth: config.recall.depth, releTao: config.recall.releTao }, persisted };
+        return { ok: true, effective: { depth: config.recall.depth, releTao: config.recall.releTao, window: config.recall.window }, persisted };
       },
     },
     {

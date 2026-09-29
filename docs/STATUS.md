@@ -594,6 +594,27 @@ rule this reinforces: **edit these files line-based with ASCII-only anchors, and
 Still to do: wire `scoreNew` into the observation path and add the two add-only telemetry fields (`windowN`,
 `scoredPairs`); panel third field plus `/s1-tune ... w=`; the four documents; the real-session evidence
 (`/s1-tune d=3 r=0.7 w=512` -> `read == effective` with `windowN: 512`).
+### Round 30: `w` reaches the host; the panel input is still missing
+
+Green and committed (107/107):
+
+- `Tuning` carries `window`, `parseTuning` reads it as the third field of `"<d> <r> <w>"` (integer >= 1, otherwise
+  dropped like every other out-of-range field), and `parseTuningArgs` accepts `w=512` / `window=512` / a third
+  positional value;
+- `/s1-tune d r w` applies it to `config.recall.window`, persists it, and reports
+  `effective: { depth, releTao, window }` — so the host half of the parameter is complete;
+- the panel half is **not**: its state and read-back learned about the window, but the input row, the local
+  validation and the third value in the saved string are missing, because the patch anchor for the save path did
+  not match and I did not re-check the post-condition for the UI row. The panel therefore still shows two fields.
+
+Also missed (cosmetic): one log line in `index.ts` still prints only depth and releTao.
+
+**Next:** add the third input row to the panel (label `w`, `min=1`, `step=1`, placeholder 1024), its local
+validation, and `String(w)` in the persisted payload; then the real-session evidence
+(`/s1-tune d=3 r=0.7 w=512` -> `read == effective` with `windowN: 512`) and the four documents.
+
+**Note on method:** this round I asserted post-conditions for the files I patched, which is how the two misses were
+caught instead of shipping a half-wired parameter. The remaining gap is exactly what those assertions said.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
