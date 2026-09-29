@@ -484,6 +484,29 @@ without any change to the panel.
 `parseTuning` as the fail-safe gate. Until then the two knobs are visible and validated in the panel while a
 session runs at the policy defaults — stated here so the panel is not mistaken for evidence that a run used a
 non-default depth.
+### Tuning persistence: the settings endpoint is reachable, only the `ops` shape is missing (round 25)
+
+Adding `'remote.settings'` to the client half's `inject` list cleared the last Cordis refusal
+(*"cannot get property \"remote.settings\" without inject"* — the same rule that produced the earlier `remote`
+error), and the panel now reaches `settings/mutate` on the gateway. Three candidate `ops` payloads were probed;
+all three came back identically:
+
+```json
+{"ok":false,"error":{"code":"gateway/input-invalid",
+                     "details":{"endpoint":"settings/mutate","field":"ops"},
+                     "isDSHRemoteError":true,"name":"RemoteError"}}
+```
+
+So the namespace argument passes validation and **`ops` is the only wrong part**. **Next step, exactly:** read the
+`ops` schema from the typert host declaration — `dsh-api-settings-controller` carries the type symbols
+`…settings/mutate:ns`, `…settings/mutate:ops`, `…settings/mutate:expectedRevision`, so
+`--grep "dsh-api-settings-controller\lib\typert.host.js" "mutate:ops"` with a wider context prints the op union
+(names, likely a discriminated `{ op: … }` with `path`/`value` or a JSON-patch style list), after which the panel
+sends that shape and the knobs persist.
+
+State of the feature, plainly: the two knobs are **on the panel, validated, and the host reads/applies them at
+session start** — but nothing writes them yet, so a session still runs at the policy defaults until the `ops` shape
+lands. The panel says so in its own message rather than claiming success.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)

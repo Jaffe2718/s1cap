@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
     const DEFAULT_TAU = 0.55;
 
     const name = 'dsh-s1cap';
-    const inject = ['slots', 'remote', 'remote.credentials'];
+    const inject = ['slots', 'remote', 'remote.credentials', 'remote.settings'];
 
     const S = {
       wrap: { display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '640px' },
@@ -189,10 +189,33 @@ window.__ModuleLoader__.load({
             return;
           }
           try {
-            const response = await write(TUNING_REF, String(d) + ' ' + String(r));
+            const response = await write(TUNING_REF, { depth: d, tau: r });
             const refused = refusal(response);
             if (refused !== undefined) {
-              setState((s) => ({ ...s, message: 'tuning save refused: ' + refused }));
+              // Probe the settings channel as well: the plugin's own config may be exposed as a settings namespace
+              // (its patch row id is "s1cap"), which is the designed home for non-secret values. The response is
+              // reported verbatim so the accepted shape is learned rather than guessed at.
+              const settings = ctx.remote.settings;
+              let probe = 'no remote.settings';
+              if (settings && typeof settings.mutate === 'function') {
+                const shapes = [
+                  ['set-path', [{ op: 'set', path: 'recall.depth', value: d }, { op: 'set', path: 'recall.tau', value: r }]],
+                  ['set-op', [{ set: { 'recall.depth': d, 'recall.tau': r } }]],
+                  ['merge', [{ merge: { recall: { depth: d, tau: r } } }]],
+                ];
+                const results = [];
+                for (const [label, ops] of shapes) {
+                  try {
+                    const answer = await settings.mutate('s1cap', ops, undefined);
+                    results.push(label + ':' + JSON.stringify(answer));
+                    if (answer && answer.ok !== false) break;
+                  } catch (err) {
+                    results.push(label + ':threw ' + String(err));
+                  }
+                }
+                probe = results.join(' | ');
+              }
+              setState((s) => ({ ...s, message: 'credentials refused (' + refused + '); settings probe → ' + probe }));
               return;
             }
             const stored = await readValue(TUNING_REF);
