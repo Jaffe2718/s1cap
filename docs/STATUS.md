@@ -462,6 +462,28 @@ a settings namespace registered on the host through `dsh-settings`, written by t
 `remote.settings.mutate(ns, ops, expectedRevision)` (wire shape confirmed: `:ns`, `:ops`, `:expectedRevision`, view
 type `@deepseek-ai/dsh-settings/types#SettingsNamespaceView`). The panel's `write()` is left as the verified
 two-argument call plus the truthful `{ ok, error }` handling, so nothing fake ships in the meantime.
+### The last API for tuning persistence: a credential *provider* (round 24)
+
+Two reads narrowed it to one mechanism:
+
+- `dsh-settings` exposes only `mutate`, `schema` and `write`; its namespace registration lives on the Service base
+  (`SettingsNamespaceView` is the view type the RPC returns), so writing a namespace from a plugin needs a
+  namespace declaration that is not part of that surface;
+- `dsh-credentials` **exports a `CredentialProvider` base class** (`class extends Service`) — and that is the piece
+  that explains the refusal. A credentials ref belongs to a **registered provider**; `set` admits the refs its
+  providers own and rejects everything else with *"invalid payload"*, which is exactly what `s1cap/tuning` drew.
+
+So the correct, designed path — and the one the shipped LLM key UI itself walks — is for the host half to register a
+provider for the `s1cap` scope (extending `CredentialProvider`), declaring the fields it owns (`apiKey`, and the
+tuning payload). With that provider registered, the panel's existing `set(ref, value)` calls start being accepted
+without any change to the panel.
+
+**Next concrete step:** read the `CredentialProvider` subclass contract (`--members`/`--dump` on
+`dsh-credentials\lib\index.js` around the exported class, plus one shipped provider such as
+`dsh-llm-deepseek-api-key` as the working precedent), register the `s1cap` provider in the host half, and keep
+`parseTuning` as the fail-safe gate. Until then the two knobs are visible and validated in the panel while a
+session runs at the policy defaults — stated here so the panel is not mistaken for evidence that a run used a
+non-default depth.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
