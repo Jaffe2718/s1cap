@@ -106,9 +106,9 @@ window.__ModuleLoader__.load({
           try {
             const key = await readValue(REF);
             const tuning = await readValue(TUNING_REF);
-            let nextDepth = '';
-            let nextTau = '';
-            let nextWin = '';
+            let nextDepth = String(DEFAULT_DEPTH);
+            let nextTau = String(DEFAULT_TAU);
+            let nextWin = String(DEFAULT_WINDOW);
             if (typeof tuning === 'string') {
               const parts = tuning.trim().split(/\s+/);
               const d = Number(parts[0]);
@@ -183,22 +183,29 @@ window.__ModuleLoader__.load({
          * Validate against the two rules the panel states — d an integer greater than 0, r between 0 and 1 — and
          * refuse anything else instead of sending a value the host would silently drop.
          */
-        const saveTuning = React.useCallback(async () => {
-          const d = Number(depth);
-          const r = Number(tau);
-          const w = Number(win);
-          if (depth.trim() === '' || !Number.isInteger(d) || d <= 0) {
-            setState((s) => ({ ...s, message: 'depth d must be an integer greater than 0' }));
-            return;
-          }
-          if (win.trim() === '' || !Number.isInteger(w) || w < 1) {
-            setState((s) => ({ ...s, message: 'window w must be an integer of at least 1' }));
-            return;
-          }
-          if (tau.trim() === '' || !Number.isFinite(r) || r < 0 || r > 1) {
-            setState((s) => ({ ...s, message: 'threshold r must be a number between 0 and 1' }));
-            return;
-          }
+          /**
+           * Validate against the three stated rules and report **every** offending field, each with its own
+           * letter. A single first-failure message reads as if it were about the field just edited, which is how
+           * this misled us once when depth was still empty and the window was the field being typed into.
+           */
+          const saveTuning = React.useCallback(async () => {
+            const d = Number(depth);
+            const r = Number(tau);
+            const w = Number(win);
+            const problems = [];
+            if (depth.trim() === '' || !Number.isInteger(d) || d <= 0) {
+              problems.push('depth d must be an integer greater than 0');
+            }
+            if (tau.trim() === '' || !Number.isFinite(r) || r < 0 || r > 1) {
+              problems.push('threshold r must be a number between 0 and 1');
+            }
+            if (win.trim() === '' || !Number.isInteger(w) || w < 64) {
+              problems.push('window w must be an integer of at least 64');
+            }
+            if (problems.length > 0) {
+              setState((s) => ({ ...s, message: problems.join('; ') }));
+              return;
+            }
           try {
             const response = await write(TUNING_REF, { depth: d, tau: r });
             const refused = refusal(response);
