@@ -33,7 +33,7 @@ Everything is **measured, not assumed**: solve rate, token cost split by prompt-
 
 ## Architecture
 
-![S1CAP method overview: chronological session events feed task-conditioned context selection over an association graph; selected evidence reaches the System-2 LLM, whose candidate plans are scored and ordered before model-owned execution.](./docs/figures/s1cap-method-overview-v2.png)
+![S1CAP method overview: a chronological session log feeds task-conditioned context assembly over a semantic association graph; System-2 generates candidate plans, System-1 reorders them, and the model owns the stop decision.](./docs/figures/s1cap-method-overview.png)
 
 For exact control flow and asynchronous boundaries, see the [detailed technical route](docs/figures/s1cap-technical-route.light.svg) ([dark version](docs/figures/s1cap-technical-route.dark.svg)).
 
