@@ -36,25 +36,27 @@ import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.ts';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { primeSystemPrompt } from './system-prompt.ts';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from './credentials.ts';
 import type { Tuning } from './credentials.ts';
 import { createStepObserver } from './step-observer.ts';
 import type { StepObserver } from './step-observer.ts';
 
 export interface S1CapPluginConfig extends AssemblyPolicy {
-  /** master switch: anything other than true keeps the plugin completely inert (default false) */
+  /** master switch: anything other than true keeps the plugin completely inert (default false)
+ */
   enabled?: boolean;
   /**
    * Per-LLM-call observation (M1). `log` (default) runs SEGMENTER → RECALL → ASSEMBLER on every call and
    * writes the result to the control-plane log **without touching the prompt the model receives**;
    * `off` does nothing. Rewriting the model view is a separate, later switch that does not exist yet.
-   */
+ */
   observation?: 'off' | 'log' | 'tape';
   /**
    * Two independent sinks (docs/CONTROL_PLANE_LOGGING.md): the session log is the only
    * source of segments; the control-plane log records LLM/S1/tool calls and gate
    * decisions and is never segmented or sent to System-1.
-   */
+ */
   telemetry?: { sessionJsonl?: string; controlJsonl?: string; tapeJsonl?: string };
   laya?: LayaConfig;
 }
@@ -62,7 +64,8 @@ export interface S1CapPluginConfig extends AssemblyPolicy {
 export interface TelemetrySinks {
   sessionJsonl: string;
   controlJsonl: string;
-  /** M1 N3: replay tape (session content) - written only in observation: tape mode */
+  /** M1 N3: replay tape (session content) - written only in observation: tape mode
+ */
   tapeJsonl: string;
 }
 
@@ -77,15 +80,18 @@ export interface ResolvedPluginConfig {
   policy: ValidationResult;
   laya: LayaValidation;
   telemetry: TelemetrySinks;
-  /** single-backend violations: a conflict degrades the session to observation mode */
+  /** single-backend violations: a conflict degrades the session to observation mode
+ */
   conflicts: string[];
   telemetryErrors: string[];
-  /** effective M1 observation mode (`log` unless the config says otherwise) */
+  /** effective M1 observation mode (`log` unless the config says otherwise)
+ */
   observation: 'off' | 'log' | 'tape';
   observationErrors: string[];
 }
 
-/** Context accounting defaults, used when the harness token meter is unavailable. */
+/** Context accounting defaults, used when the harness token meter is unavailable.
+ */
 const CONTEXT_WINDOW_DEFAULT = 128_000;
 const RESERVE_OUTPUT_DEFAULT = 8_000;
 const FIXED_OVERHEAD_DEFAULT = 1_200;
@@ -147,12 +153,14 @@ export function resolvePluginConfig(raw?: Partial<S1CapPluginConfig>): ResolvedP
   };
 }
 
-/** Kept for callers that only want the merged config. */
+/** Kept for callers that only want the merged config.
+ */
 export function resolveConfig(raw?: Partial<S1CapPluginConfig>): S1CapPluginConfig {
   return resolvePluginConfig(raw).config;
 }
 
-/** Minimal structural shape of the Cordis plugin context we rely on (verified against DSH 0.1.7-rc.2). */
+/** Minimal structural shape of the Cordis plugin context we rely on (verified against DSH 0.1.7-rc.2).
+ */
 export interface CommandSpec {
   name: string;
   description: string;
@@ -162,9 +170,11 @@ export interface CommandSpec {
 
 export interface PluginContext {
   on(event: string, handler: (...args: unknown[]) => unknown, options?: { prepend?: boolean }): void;
-  /** Cordis disposal helper: registrations inside it are torn down when the plugin unloads */
+  /** Cordis disposal helper: registrations inside it are torn down when the plugin unloads
+ */
   effect?(fn: () => unknown): unknown;
-  /** the command service (`commands`, injected as an optional dependency) */
+  /** the command service (`commands`, injected as an optional dependency)
+ */
   commands?: { register?(spec: CommandSpec): unknown };
   tokenMeter?: { total(): number; fixedOverhead(): number };
   logger?: { info?(msg: string): void; warn?(msg: string): void };
@@ -178,10 +188,12 @@ export const name = 'dsh-s1cap';
  * service literally named "optional". `commands` comes from `@deepseek-ai/dsh-commands`, which every
  * profile mounts through `@deepseek-ai/dsh-base`; the defensive checks below still tolerate its
  * absence (tests, stripped-down profiles).
+ * webServer is deliberately NOT declared here: declaring it makes a profile without the service refuse to apply this
  */
 export const inject = ['commands'];
 
-/** Register the `/s1` surface; tolerant of a profile that does not mount the command service. */
+/** Register the `/s1` surface; tolerant of a profile that does not mount the command service.
+ */
 function registerCommands(ctx: PluginContext, specs: CommandSpec[]): string[] {
   const registered: string[] = [];
   if (typeof ctx.commands?.register !== 'function') {
@@ -224,7 +236,8 @@ export class LayaRuntime {
     this.#server = new LayaServer(config, createNodeLaunchDeps());
   }
 
-  /** `discover` only probes interpreters; `start` also spawns the server. */
+  /** `discover` only probes interpreters; `start` also spawns the server.
+ */
   async discover(): Promise<{ pythonPath?: string; hasLaya: boolean; hint?: string; error?: string }> {
     const report = await discoverLayaPython(this.#config, createNodeDiscoveryDeps());
     const chosen = report.chosen;
@@ -274,7 +287,7 @@ export class LayaRuntime {
    * Compact status for the command surface (docs/CONTROL_PLANE_LOGGING.md §5): the
    * backend's raw stdout/stderr stays a bounded diagnostic buffer and is never handed
    * to the agent as command output, so it cannot become a session segment.
-   */
+ */
   summary(): Omit<LayaRuntimeState, 'logs'> & { logLines: number } {
     const { logs, ...rest } = this.state();
     return { ...rest, logLines: logs.length };
@@ -299,7 +312,8 @@ export class LayaRuntime {
  * swallowed, (2) returns the decision untouched until M1 actually assembles context, and (3) isolates
  * its own bookkeeping: a failure in our code is logged and cannot affect the round.
  */
-/** one lazy priming thunk per session, run by the first pre-step call (see preStepMiddleware) */
+/** one lazy priming thunk per session, run by the first pre-step call (see preStepMiddleware)
+ */
 let primeOnce: (() => Promise<void>) | undefined;
 
 /**
@@ -310,10 +324,16 @@ let primeOnce: (() => Promise<void>) | undefined;
 const CREDENTIAL_REF = 's1cap/jev';
 let credentialKey: string | undefined;
 let credentialSource = 'config-or-env';
-/** recall tuning the panel stored, applied to the live policy at session start */
+/** recall tuning the panel stored, applied to the live policy at session start
+ */
 let appliedTuning: Tuning = {};
-/** the plugin's own store for the two recall knobs; relative paths resolve against DSH_HOME */
+/** the plugin's own store for the two recall knobs; relative paths resolve against DSH_HOME
+ */
 const TUNING_FILE = './.s1cap/tuning.json';
+
+/** the panel's Save route: a prefix on the same server that serves the UI, following dsh-pet's /dsh-pet-7340
+ */
+const TUNING_ROUTE = '/s1cap-7340';
 
 function readTuningFile(): Tuning {
   try {
@@ -343,6 +363,29 @@ function writeTuningFile(values: Tuning): boolean {
   }
 }
 
+/** Read a small request body as text. Bounded, so a stray large PUT cannot exhaust memory.
+ */
+function readRequestBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let text = '';
+    req.setEncoding?.('utf8');
+    req.on('data', (chunk: string) => {
+      text += chunk;
+      if (text.length > 4096) reject(new Error('request body too large'));
+    });
+    req.on('end', () => resolve(text));
+    req.on('error', reject);
+  });
+}
+function sendJson(res: ServerResponse, status: number, obj: unknown): void {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
 /**
  * The session-event lane is wired at the very top of `applyInner`, before anything that can throw, so an
  * activation failure later in the function cannot silently cost us the lane. These three live at module level
@@ -350,7 +393,8 @@ function writeTuningFile(values: Tuning): boolean {
  */
 let activeObserver: StepObserver | undefined;
 let probeOut: ((line: string) => void) | undefined;
-/** events that arrive before observation is wired (bounded; drained once the observer exists) */
+/** events that arrive before observation is wired (bounded; drained once the observer exists)
+ */
 const earlySessionEvents: unknown[] = [];
 const EARLY_EVENT_LIMIT = 16;
 
@@ -368,7 +412,8 @@ export function preStepMiddleware(
       try {
         await prime();
       } catch {
-        /* reported by the primer */
+        /* reported by the primer
+ */
       }
     }
     const decision = await next();
@@ -472,7 +517,8 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // round. `off` skips it entirely. The context window comes from constants for now: `ctx.tokenMeter`'s
   // semantics are not verified yet, and a wrong window would silently distort every budget number.
   let observer: StepObserver | undefined;
-  /** one assemble() per session; awaited by the first pre-step call (a short round can exit before a fire-and-forget promise settles) */
+  /** one assemble() per session; awaited by the first pre-step call (a short round can exit before a fire-and-forget promise settles)
+ */
   let priming: Promise<void> | undefined;
   if (resolved.observation !== 'off') {
     const probeSink =
@@ -675,26 +721,35 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // The `/s1` surface. Registration follows the verified Cordis shape:
   // is ctx.effect(() => ctx.commands.register({ name, description, input, handler })) - all verified
   // `/s1 status` never prints the API key: the resolved backend goes through redactKey().
+  /**
+   * One place that turns parsed knobs into effect: merge into what is stored, apply to the live policy, persist, and
+   * answer with the effective triple. The `/s1-tune` command and the panel's Save button share it, so the command
+   * line and the button cannot drift apart in what they accept or what they report.
+ */
+  const applyTuning = (parsed: Tuning): { ok: boolean; reason?: string; effective?: Tuning; persisted?: boolean } => {
+    if (parsed.depth === undefined && parsed.relevanceThreshold === undefined) {
+      return { ok: false, reason: 'nothing to set: depth d must be an integer > 0 and threshold r between 0 and 1' };
+    }
+    appliedTuning = { ...appliedTuning, ...parsed };
+    if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
+    if (parsed.relevanceThreshold !== undefined) config.recall.relevanceThreshold = parsed.relevanceThreshold;
+    if (parsed.window !== undefined) config.recall.window = parsed.window;
+    const persisted = writeTuningFile(appliedTuning);
+    ctx.logger?.info?.(
+      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.relevanceThreshold} window=${config.recall.window}${persisted ? '' : ' (not persisted: file write failed)'}`,
+    );
+    return {
+      ok: true,
+      effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window },
+      persisted,
+    };
+  };
   registerCommands(ctx, [
     {
       name: 's1-tune',
       description: 'S1CAP: set the three recall knobs — BFS depth d (integer > 0) and relevance threshold r (0..1)',
       input: { hint: 'd r w   (e.g. "3 0.7 512", or "d=3", "r=0.7", "w=512")' },
-      handler: ({ rawInput }) => {
-        const parsed = parseTuningArgs(rawInput);
-        if (parsed.depth === undefined && parsed.relevanceThreshold === undefined) {
-          return { ok: false, reason: 'nothing to set: depth d must be an integer > 0 and threshold r between 0 and 1' };
-        }
-        appliedTuning = { ...appliedTuning, ...parsed };
-        if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
-        if (parsed.relevanceThreshold !== undefined) config.recall.relevanceThreshold = parsed.relevanceThreshold;
-        if (parsed.window !== undefined) config.recall.window = parsed.window;
-        const persisted = writeTuningFile(appliedTuning);
-        ctx.logger?.info?.(
-          `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.relevanceThreshold}${persisted ? '' : ' (not persisted: file write failed)'}`,
-        );
-        return { ok: true, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window }, persisted };
-      },
+      handler: ({ rawInput }) => applyTuning(parseTuningArgs(rawInput)),
     },
     {
       name: 's1',
@@ -783,4 +838,48 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       },
     },
   ]);
+  /**
+   * The panel's Save button, the way `dsh-pet` does it: the host half registers a prefixed HTTP route on the same
+   * web server that serves the UI, and the client half is a plain relative `fetch`. That is deliberately chosen over
+   * writing through a settings namespace or a credential ref - both need declarations this out-of-tree plugin cannot
+   * make (docs/STATUS.md rounds 33-41) - while the route needs nothing beyond the service the UI already runs on.
+   *
+   * GET returns the stored and effective triples, so the panel can fill itself from the host instead of guessing.
+   * PUT takes the same text the command line takes ("3 0.7 512", or d=/r=/w=) and answers with the effective
+   * triple, so a successful Save is proven by the response body rather than by the absence of an error.
+ */
+  if (typeof ctx.webServer?.register === 'function') {
+    const registerRoute = (): void => {
+      ctx.webServer?.register?.({
+        kind: 'prefix',
+        path: TUNING_ROUTE,
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          try {
+            const method = (req.method ?? 'GET').toUpperCase();
+            if (method === 'GET') {
+              sendJson(res, 200, {
+                ok: true,
+                stored: appliedTuning,
+                effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window },
+              });
+              return;
+            }
+            if (method !== 'PUT' && method !== 'POST') {
+              sendJson(res, 405, { ok: false, reason: 'use GET to read, PUT to write' });
+              return;
+            }
+            const parsed = parseTuningArgs(await readRequestBody(req));
+            const result = applyTuning(parsed);
+            sendJson(res, result.ok ? 200 : 400, result);
+          } catch (e) {
+            sendJson(res, 500, { ok: false, reason: e instanceof Error ? e.message : String(e) });
+          }
+        },
+      });
+    };
+    if (typeof ctx.effect === 'function') ctx.effect(registerRoute);
+    else registerRoute();
+  } else {
+    ctx.logger?.warn?.('[s1cap] no web server service in this profile - the panel Save button stays disabled; /s1-tune still works');
+  }
 }
