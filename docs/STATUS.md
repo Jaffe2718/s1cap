@@ -441,6 +441,27 @@ refused with *"depth d must be an integer greater than 0"*), and the host alread
 
 Until that lands, the two knobs are visible and validated but a session still runs at the policy defaults — stated
 plainly here so nobody reads the panel as proof that a run used a non-default depth.
+### Decisive finding on the credential transport (round 23)
+
+Probing the RPC at runtime settled it, and the answer is "wrong store", not "wrong shape":
+
+```
+tuning save refused: Error: client api: credentials/set expected 2 argument(s), got 1
+```
+
+So the call is positional `set(ref, value)` — one argument is rejected outright — and a string value passed that
+way still draws *"invalid payload for credentials.set"*. The boundary declared in `dsh-api-settings-controller`
+carries two type symbols, `credentials/set:ref` and `credentials/set:value`: the `value` half is satisfied by a
+string, which leaves the **`ref` half** as the refuser, i.e. the boundary admits credentials a provider registered
+rather than arbitrary plugin-owned keys. The store underneath is looser (`dsh-credentials-local`'s
+`set(ref, value)` takes any string), which is exactly why the plugin's host-side `readCredential` probing worked
+for reads while writes are refused.
+
+**Consequence:** `s1cap/tuning` will never be writable through that RPC, so the recall knobs need their own home —
+a settings namespace registered on the host through `dsh-settings`, written by the panel via
+`remote.settings.mutate(ns, ops, expectedRevision)` (wire shape confirmed: `:ns`, `:ops`, `:expectedRevision`, view
+type `@deepseek-ai/dsh-settings/types#SettingsNamespaceView`). The panel's `write()` is left as the verified
+two-argument call plus the truthful `{ ok, error }` handling, so nothing fake ships in the meantime.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)

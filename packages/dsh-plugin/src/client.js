@@ -131,8 +131,14 @@ window.__ModuleLoader__.load({
          */
         const write = React.useCallback(async (ref, value) => {
           const store = ctx.remote.credentials;
-          if (typeof store.set === 'function') return await store.set(ref, value);
-          return await store.write(ref, value);
+          if (typeof store.set !== 'function') {
+            return { ok: false, error: { message: 'the store exposes no set()' } };
+          }
+          // Two positional arguments, verified by probing: one argument answers "credentials/set expected 2
+          // argument(s), got 1". The refusal a string value draws ("invalid payload") comes from the `:ref` half of
+          // the boundary - it admits credentials a provider registered, not arbitrary plugin values - which is why
+          // the tuning knobs need a settings namespace rather than this store. Recorded in docs/STATUS.md.
+          return await store.set(ref, value);
         }, []);
 
         /** Turn a store response into an error message, or undefined when the write was accepted. */
@@ -149,7 +155,7 @@ window.__ModuleLoader__.load({
           const value = draft.trim();
           if (value === '') return;
           try {
-            const response = await write(REF, { apiKey: value });
+            const response = await write(REF, value);
             const refused = refusal(response);
             if (refused !== undefined) {
               setState((s) => ({ ...s, message: 'key save refused: ' + refused }));
@@ -183,7 +189,7 @@ window.__ModuleLoader__.load({
             return;
           }
           try {
-            const response = await write(TUNING_REF, { value: String(d) + ' ' + String(r) });
+            const response = await write(TUNING_REF, String(d) + ' ' + String(r));
             const refused = refusal(response);
             if (refused !== undefined) {
               setState((s) => ({ ...s, message: 'tuning save refused: ' + refused }));
