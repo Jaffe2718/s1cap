@@ -507,6 +507,28 @@ sends that shape and the knobs persist.
 State of the feature, plainly: the two knobs are **on the panel, validated, and the host reads/applies them at
 session start** — but nothing writes them yet, so a session still runs at the policy defaults until the `ops` shape
 lands. The panel says so in its own message rather than claiming success.
+### Round 26: the `ops` shape is path-addressed, and the namespace must be declared
+
+Two more facts, both read from the packaged source:
+
+- the settings controller's own documentation says it takes **path-addressed operations** and that it "classifies
+  every provider refusal" — so an op carries a *path* plus a value, and the `{ op: 'set', path, value }` list is
+  the right family; the shape my three probes used was rejected on `field: "ops"`, so a detail of that family
+  (array-valued `path`, or a different op name such as `set`/`remove` with a boolean flag — the schema code nearby
+  builds `{ path: [...], set: … }`) is what differs;
+- `dsh-storage-domain` is in the shipped inventory and is the layer that declares storage/settings domains, i.e.
+  **a plugin gets a writable namespace by declaring one**, which is the missing prerequisite for
+  `settings/mutate('s1cap', …)` to be anything other than an unknown namespace.
+
+**Next step, in order:** (1) `--members` then `--grep` on `dsh-storage-domain` for the domain-declaration API
+(`declare*`/`domain`/`schema`), (2) declare an `s1cap` domain whose schema carries `recall.depth` (integer, > 0) and
+`recall.tau` (0..1) — the same two rules the panel enforces, so the boundary validates them for free, (3) send the
+path-addressed op list from the panel, (4) confirm with a real session that `/s1` reports the chosen values under
+`tuning.effective`.
+
+**Where the feature stands:** the panel carries both knobs with the requested rules, the host reads and applies
+whatever is stored, and the write path is the only thing missing — so a session still runs at the policy defaults.
+The panel states this itself instead of implying success.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
