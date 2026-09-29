@@ -387,6 +387,33 @@ with no failure screen and no error from the half (`window.__S1CAP_CLIENT_ERROR_
    `['slots', 'remote', 'remote.credentials']` — the same namespaces the shipped key UI declares.
 Also: a **linked** plugin must be reinstalled after any change to its client declaration, because the boot table is
 built from install metadata rather than from the package.json on disk.
+### Recall tuning in the settings panel (round 21)
+
+**Done and verified in a real browser:** the S1CAP section now carries the two recall knobs next to the key —
+
+- **BFS depth d** — number input, `min=1`, `step=1`, placeholder 2; the panel refuses `0`, negatives, and
+  non-integers with the message *"depth d must be an integer greater than 0"* (verified by driving the UI);
+- **relevance threshold r** — number input, `min=0`, `max=1`, `step=0.05`, placeholder 0.55, validated locally
+  as 0 <= r <= 1;
+- a **Save tuning** button, and the host half gained `parseTuning()` (`packages/dsh-plugin/src/credentials.ts`,
+  four new unit tests, 106/106 green) plus the code that applies both values to the live policy at session
+  start and reports `tuning: { stored, effective }` through `/s1`.
+
+**Not finished — persistence.** The panel reports the truth instead of claiming success: writes to the
+credential store come back refused,
+
+```
+tuning save refused: typert gateway: credentials/set: wire field "value" failed boundary validation
+```
+
+which is a *payload-shape* rejection from the typert boundary, not a permission problem. An earlier revision
+silently discarded `set`'s `{ ok, error }` response and printed "saved" — that is fixed: every write now goes
+through a `refusal()` check, and the shipped key UI's own pattern (`response.ok ? void 0 : response.error.message`)
+is what it follows.
+**Next step, precisely:** read the `credentials/set` boundary schema out of the typert registry
+(`--members`/`--grep` on `dsh-typert-registry` and `dsh-credentials-local` for the wire shape) and send exactly
+those field names for both the key (`{ apiKey }` is the shape the shipped LLM credential uses) and the tuning
+value. Until that lands, the values are validated in the UI but a session still runs at the policy defaults.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)

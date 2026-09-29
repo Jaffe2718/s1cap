@@ -6,28 +6,23 @@
  * does exactly `const react = require('react')`).
  *
  * The contract, every part of it read from shipped code rather than guessed:
- *   - the file is picked up through `window.__ModuleLoader__.load({ id, factory })`, the factory returns
- *     `{ apply, inject, name }`;
+ *   - the file is picked up through `window.__ModuleLoader__.load({ id, factory })`, the factory **is** the module
+ *     body: it receives `require`, declares its own `module`, and returns `module.exports` (`{ apply, inject, name }`);
  *   - the half injects the `slots` service and registers into the named slot `settings.section` with
  *     `ctx.slots.register(meta, Component)` inside `ctx.slots.inject(name, generator)`;
  *   - `meta` carries `name`, a unique `id`, an `order` and a locale-aware `label` thunk;
- *   - the host is reached through the client RPC namespace `remote.credentials` (declared in `inject`), whose
- *     `describe([ref])` reports whether a credential exists — the same call the shipped API-key screen makes.
+ *   - the host is reached through the client RPC namespaces `remote` / `remote.credentials` (declared in `inject`;
+ *     Cordis throws on access to a namespace that was not injected).
  *
- * The key itself never passes through a command's raw input: that would put it in the session transcript. It goes
- * to the credential store, and the panel only ever shows whether a key exists, never its value.
+ * Two things live here:
+ *   1. the Jev key. It never passes through a command's raw input — that would put it in the session transcript —
+ *      and the panel only ever shows whether a key exists, never its value;
+ *   2. the recall tuning: **BFS depth d** (integer, d > 0) and **relevance threshold r** (0 <= r <= 1), stored as
+ *      the plain string `"<d> <r>"` under `s1cap/tuning` and applied by the host at session start.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-s1cap',
   factory: (require) => {
-    // The loader's own client module states the contract verbatim:
-    //
-    //   window.__ModuleLoader__.load({ id, factory: (require) => {
-    //     var module = { exports: {} }; var exports = module.exports; … return module.exports; } });
-    //
-    // The factory **is** the module body: it runs immediately, receives `require` as its argument, declares its own
-    // `module` object, and returns the exports. An earlier revision returned a nested function instead, so the body
-    // never ran and DSH reported the entry as failed without any error surfacing from this file.
     var module = { exports: {} };
     var exports = module.exports;
     const fail = (err) => {
@@ -41,19 +36,19 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const e = React.createElement;
 
-    /** `<scope>/<id>` — the same ref the host half reads (packages/dsh-plugin/src/credentials.ts). */
+    /** `<scope>/<id>` refs; the host half reads the same two (packages/dsh-plugin/src/credentials.ts). */
     const REF = 's1cap/jev';
+    const TUNING_REF = 's1cap/tuning';
+    const DEFAULT_DEPTH = 2;
+    const DEFAULT_TAU = 0.55;
+
     const name = 'dsh-s1cap';
-    /**
-     * All three namespaces are injected. Cordis throws on access to a service that was not injected — the panel
-     * reported exactly that in a real browser ("cannot get property \"remote\" without inject") — and the shipped
-     * key UI declares these same client RPC namespaces in its own inject list.
-     */
     const inject = ['slots', 'remote', 'remote.credentials'];
 
     const S = {
       wrap: { display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '640px' },
       title: { margin: 0, fontSize: '16px', fontWeight: 500 },
+      subtitle: { margin: '6px 0 0', fontSize: '14px', fontWeight: 500 },
       intro: { margin: 0, fontSize: '13px', opacity: 0.75, lineHeight: 1.5 },
       row: { display: 'flex', gap: '8px', alignItems: 'center' },
       dot: (ok) => ({
@@ -63,59 +58,160 @@ window.__ModuleLoader__.load({
         background: ok ? 'var(--dsw-alias-state-success-primary, #2f9e6b)' : 'var(--dsw-alias-state-error-primary, #d05a4a)',
       }),
       input: { flex: 1, height: '32px', padding: '0 10px', font: 'inherit', borderRadius: '6px', border: '0.5px solid var(--dsw-alias-border-l4, #c8d1dd)' },
+      number: { width: '96px', height: '32px', padding: '0 8px', font: 'inherit', borderRadius: '6px', border: '0.5px solid var(--dsw-alias-border-l4, #c8d1dd)' },
+      label: { fontSize: '12px', opacity: 0.75, minWidth: '14px' },
       button: { height: '32px', padding: '0 14px', font: 'inherit', borderRadius: '6px', border: 'none', cursor: 'pointer' },
       note: { margin: 0, fontSize: '12px', opacity: 0.75 },
     };
 
-    /** The panel: it reports whether a Jev key is stored and lets the user set or clear it. */
+    /** The panel: the Jev key plus the two recall knobs the ablation actually varies. */
     function makeSection(ctx) {
       return function S1CapSection() {
         const [state, setState] = React.useState({ phase: 'loading', configured: false, message: '' });
         const [draft, setDraft] = React.useState('');
+        const [depth, setDepth] = React.useState('');
+        const [tau, setTau] = React.useState('');
 
-        const describe = React.useCallback(async () => {
+        /**
+         * Read one stored string. The store declares several read entry points and the host probes them the same
+         * way (packages/dsh-plugin/src/credentials.ts), so an unknown surface degrades to "not stored" instead of
+         * throwing into the panel.
+         */
+        const readValue = React.useCallback(async (ref) => {
+          const store = ctx.remote.credentials;
+          for (const method of ['resolve', 'readRecord', 'read', 'get']) {
+            if (typeof store[method] !== 'function') continue;
+            try {
+              const raw = await store[method](ref);
+              const value =
+                typeof raw === 'string'
+                  ? raw
+                  : raw !== null && typeof raw === 'object' && typeof raw.value === 'string'
+                    ? raw.value
+                    : raw !== null && typeof raw === 'object' && typeof raw.apiKey === 'string'
+                      ? raw.apiKey
+                      : undefined;
+              if (value !== undefined && value !== '') return value;
+            } catch {
+              /* try the next entry point */
+            }
+          }
+          return undefined;
+        }, []);
+
+        /** Load both refs and mirror the stored tuning into the inputs. */
+        const load = React.useCallback(async () => {
           try {
-            const response = await ctx.remote.credentials.describe([REF]);
-            const entry = Array.isArray(response) ? response[0] : response;
-            const configured =
-              entry !== undefined && entry !== null &&
-              (entry.configured === true || entry.present === true || entry.exists === true || typeof entry.value === 'string');
-            setState({ phase: 'ready', configured, message: '' });
+            const key = await readValue(REF);
+            const tuning = await readValue(TUNING_REF);
+            let nextDepth = '';
+            let nextTau = '';
+            if (typeof tuning === 'string') {
+              const parts = tuning.trim().split(/\s+/);
+              const d = Number(parts[0]);
+              const r = Number(parts[1]);
+              if (Number.isInteger(d) && d > 0) nextDepth = String(d);
+              if (Number.isFinite(r) && r >= 0 && r <= 1) nextTau = String(r);
+            }
+            setDepth(nextDepth);
+            setTau(nextTau);
+            setState({ phase: 'ready', configured: key !== undefined, message: '' });
           } catch (err) {
             setState({ phase: 'ready', configured: false, message: 'could not read the credential store: ' + String(err) });
           }
-        }, []);
+        }, [readValue]);
 
         React.useEffect(() => {
-          void describe();
-        }, [describe]);
+          void load();
+        }, [load]);
+
+        /**
+         * Write one value. The host's `set` does **not** throw on refusal — it returns `{ ok, error }` (the shipped
+         * key UI checks exactly that) — so the response is returned and every caller must honour it.
+         */
+        const write = React.useCallback(async (ref, value) => {
+          const store = ctx.remote.credentials;
+          if (typeof store.set === 'function') return await store.set(ref, value);
+          return await store.write(ref, value);
+        }, []);
+
+        /** Turn a store response into an error message, or undefined when the write was accepted. */
+        const refusal = (response) => {
+          if (response === undefined || response === null) return undefined;
+          if (response.ok === false) {
+            const message = response.error && response.error.message ? response.error.message : 'refused';
+            return String(message);
+          }
+          return undefined;
+        };
 
         const save = React.useCallback(async () => {
           const value = draft.trim();
           if (value === '') return;
           try {
-            // The write path the host store declares (set/write); the value is never echoed back.
-            const store = ctx.remote.credentials;
-            if (typeof store.set === 'function') await store.set(REF, value);
-            else await store.write(REF, value);
+            const response = await write(REF, { apiKey: value });
+            const refused = refusal(response);
+            if (refused !== undefined) {
+              setState((s) => ({ ...s, message: 'key save refused: ' + refused }));
+              return;
+            }
             setDraft('');
-            await describe();
-            setState((s) => ({ ...s, message: 'saved' }));
+            await load();
+            const stored = await readValue(REF);
+            setState((s) => ({
+              ...s,
+              message: stored === undefined ? 'key save was accepted but the store reports no value yet' : 'key saved',
+            }));
           } catch (err) {
-            setState((s) => ({ ...s, message: 'save failed: ' + String(err) }));
+            setState((s) => ({ ...s, message: 'key save failed: ' + String(err) }));
           }
-        }, [draft, describe]);
+        }, [draft, load, write]);
+
+        /**
+         * Validate against the two rules the panel states — d an integer greater than 0, r between 0 and 1 — and
+         * refuse anything else instead of sending a value the host would silently drop.
+         */
+        const saveTuning = React.useCallback(async () => {
+          const d = Number(depth);
+          const r = Number(tau);
+          if (depth.trim() === '' || !Number.isInteger(d) || d <= 0) {
+            setState((s) => ({ ...s, message: 'depth d must be an integer greater than 0' }));
+            return;
+          }
+          if (tau.trim() === '' || !Number.isFinite(r) || r < 0 || r > 1) {
+            setState((s) => ({ ...s, message: 'threshold r must be a number between 0 and 1' }));
+            return;
+          }
+          try {
+            const response = await write(TUNING_REF, { value: String(d) + ' ' + String(r) });
+            const refused = refusal(response);
+            if (refused !== undefined) {
+              setState((s) => ({ ...s, message: 'tuning save refused: ' + refused }));
+              return;
+            }
+            const stored = await readValue(TUNING_REF);
+            setState((s) => ({
+              ...s,
+              message:
+                stored === undefined
+                  ? 'tuning save was accepted but the store reports no value yet'
+                  : 'recall tuning saved (' + stored + ') — it takes effect at the next session start',
+            }));
+          } catch (err) {
+            setState((s) => ({ ...s, message: 'tuning save failed: ' + String(err) }));
+          }
+        }, [depth, tau, write]);
 
         const clear = React.useCallback(async () => {
           try {
             const store = ctx.remote.credentials;
             if (typeof store.unset === 'function') await store.unset(REF);
-            await describe();
+            await load();
             setState((s) => ({ ...s, message: 'cleared' }));
           } catch (err) {
             setState((s) => ({ ...s, message: 'clear failed: ' + String(err) }));
           }
-        }, [describe]);
+        }, [load]);
 
         return e(
           'div',
@@ -125,9 +221,8 @@ window.__ModuleLoader__.load({
             'p',
             { style: S.intro },
             'S1CAP puts a cheap System-1 decision model in charge of which context the agent sees and in which ' +
-              'order its own plans run. This panel holds the credential for the cloud System-1 backend (Jev). The ' +
-              'key is stored by the harness credential store and is never written to a log, a control-plane record ' +
-              'or the conversation.',
+              'order its own plans run. This panel holds the credential for the cloud System-1 backend (Jev) and the ' +
+              'two recall knobs the ablation varies.',
           ),
           e(
             'div',
@@ -147,16 +242,57 @@ window.__ModuleLoader__.load({
               spellCheck: false,
               onChange: (event) => setDraft(event.target.value),
             }),
-            e('button', { style: S.button, type: 'button', onClick: () => void save(), disabled: draft.trim() === '' }, 'Save'),
-            e('button', { style: S.button, type: 'button', onClick: () => void clear(), disabled: !state.configured }, 'Clear'),
+            e('button', { style: S.button, type: 'button', onClick: () => void save(), disabled: draft.trim() === '' }, 'Save key'),
+            e('button', { style: S.button, type: 'button', onClick: () => void clear(), disabled: !state.configured }, 'Clear key'),
+          ),
+          e(
+            'p',
+            { style: S.note },
+            'The key is stored by the harness credential store and never written to a log, a control-plane record or ' +
+              'the conversation.',
+          ),
+          e('h3', { style: S.subtitle }, 'Recall tuning'),
+          e(
+            'p',
+            { style: S.note },
+            'BFS depth d bounds how many hops recall may walk the association graph (integer, d > 0). The relevance ' +
+              'threshold r is the edge weight a segment must reach to be recalled (0 ≤ r ≤ 1). The host reads both at ' +
+              'session start and /s1 reports the effective values.',
+          ),
+          e(
+            'div',
+            { style: S.row },
+            e('label', { style: S.label, htmlFor: 's1cap-depth' }, 'd'),
+            e('input', {
+              id: 's1cap-depth',
+              style: S.number,
+              type: 'number',
+              min: '1',
+              step: '1',
+              value: depth,
+              placeholder: String(DEFAULT_DEPTH),
+              onChange: (event) => setDepth(event.target.value),
+            }),
+            e('label', { style: S.label, htmlFor: 's1cap-tau' }, 'r'),
+            e('input', {
+              id: 's1cap-tau',
+              style: S.number,
+              type: 'number',
+              min: '0',
+              max: '1',
+              step: '0.05',
+              value: tau,
+              placeholder: String(DEFAULT_TAU),
+              onChange: (event) => setTau(event.target.value),
+            }),
+            e('button', { style: S.button, type: 'button', onClick: () => void saveTuning() }, 'Save tuning'),
           ),
           e('p', { style: S.note }, state.message),
           e(
             'p',
             { style: S.note },
-            'Credential reference: ' + REF + '. The local Laya backend needs no key; select it in the profile patch ' +
-              'or leave the provider at its default. Status, counters and the control-plane log are visible through ' +
-              'the /s1 command.',
+            'Refs: ' + REF + ' · ' + TUNING_REF + '. The local Laya backend needs no key; status, counters and the ' +
+              'control-plane log are visible through the /s1 command.',
           ),
         );
       };
@@ -173,8 +309,6 @@ window.__ModuleLoader__.load({
     }
 
     const api = { apply, inject, name };
-    // `module` is not guaranteed in the scope the loader evaluates this file in, so it is optional here; the
-    // return value carries the same object for loaders that use it. A failure to publish must never throw.
     module.exports = api;
     return module.exports;
     } catch (err) {

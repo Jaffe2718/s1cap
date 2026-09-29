@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readCredential } from '../src/credentials.ts';
+import { TUNING_REF, parseTuning, readCredential } from '../src/credentials.ts';
 
 test('the first entry point that answers wins, and it is reported by name', async () => {
   const reports: Record<string, unknown>[] = [];
@@ -63,4 +63,22 @@ test('no service, an empty answer, or a service without entry points stay silent
   // every path reported something, and nothing was thrown
   assert.ok(reports.length >= 3);
   assert.ok(reports.some((r) => r['result'] === 'not found' && Array.isArray(r['available'])));
+});
+test('parseTuning accepts d>0 int and 0<=r<=1 float, and drops anything else', () => {
+  assert.deepEqual(parseTuning('2 0.55'), { depth: 2, tau: 0.55 });
+  assert.deepEqual(parseTuning('1 0'), { depth: 1, tau: 0 });
+  assert.deepEqual(parseTuning('3 1'), { depth: 3, tau: 1 });
+  assert.deepEqual(parseTuning('   4   0.25  '), { depth: 4, tau: 0.25 });
+
+  // out-of-range fields are dropped, never clamped: the policy default must stand
+  assert.deepEqual(parseTuning('0 0.5'), { tau: 0.5 }, 'd must be greater than 0');
+  assert.deepEqual(parseTuning('-2 0.5'), { tau: 0.5 });
+  assert.deepEqual(parseTuning('2.5 0.5'), { tau: 0.5 }, 'd must be an integer');
+  assert.deepEqual(parseTuning('2 1.5'), { depth: 2 }, 'r must be at most 1');
+  assert.deepEqual(parseTuning('2 -0.1'), { depth: 2 }, 'r must be at least 0');
+
+  assert.deepEqual(parseTuning(undefined), {});
+  assert.deepEqual(parseTuning('nonsense'), {});
+  assert.deepEqual(parseTuning('2'), { depth: 2 }, 'a missing r leaves the policy default in place');
+  assert.equal(TUNING_REF, 's1cap/tuning');
 });

@@ -35,7 +35,8 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.js';
 import { primeSystemPrompt } from './system-prompt.js';
-import { readCredential } from './credentials.js';
+import { TUNING_REF, parseTuning, readCredential } from './credentials.js';
+                                               
 import { createStepObserver } from './step-observer.js';
                                                        
 
@@ -308,6 +309,8 @@ let primeOnce                                   ;
 const CREDENTIAL_REF = 's1cap/jev';
 let credentialKey                    ;
 let credentialSource = 'config-or-env';
+/** recall tuning the panel stored, applied to the live policy at session start */
+let appliedTuning         = {};
 
 /**
  * The session-event lane is wired at the very top of `applyInner`, before anything that can throw, so an
@@ -583,6 +586,16 @@ function applyInner(ctx               , raw                             )       
         credentialKey = credential.key;
         credentialSource = `credentials:${credential.method ?? 'unknown'}`;
       }
+      // The two recall knobs the panel owns: BFS depth d (int > 0) and relevance threshold r (0..1). Applied to
+      // the live policy object before the first observation, so the whole session runs at the stored values.
+      const tuningRead = await readCredential({
+        ref: TUNING_REF,
+        service: (ctx                                       ).get?.('credentials'),
+        report: (line) => probeSink?.write(JSON.stringify({ ...line, kind: 'credential-tuning' }) + '\n'),
+      });
+      appliedTuning = parseTuning(tuningRead.key);
+      if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
+      if (appliedTuning.tau !== undefined) config.recall.tau = appliedTuning.tau;
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
         observer,
@@ -623,6 +636,11 @@ function applyInner(ctx               , raw                             )       
           cache: config.cache,
           tas: config.tas,
           recall: config.recall,
+          tuning: {
+            stored: appliedTuning,
+            effective: { depth: config.recall.depth, tau: config.recall.tau },
+            keySource: credentialSource,
+          },
           tail: config.tail,
           planGate: config.planGate,
           s1: {

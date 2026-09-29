@@ -35,7 +35,8 @@ import type { ResolvedS1Backend } from '@s1cap/s1-client';
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.ts';
 import { primeSystemPrompt } from './system-prompt.ts';
-import { readCredential } from './credentials.ts';
+import { TUNING_REF, parseTuning, readCredential } from './credentials.ts';
+import type { Tuning } from './credentials.ts';
 import { createStepObserver } from './step-observer.ts';
 import type { StepObserver } from './step-observer.ts';
 
@@ -308,6 +309,8 @@ let primeOnce: (() => Promise<void>) | undefined;
 const CREDENTIAL_REF = 's1cap/jev';
 let credentialKey: string | undefined;
 let credentialSource = 'config-or-env';
+/** recall tuning the panel stored, applied to the live policy at session start */
+let appliedTuning: Tuning = {};
 
 /**
  * The session-event lane is wired at the very top of `applyInner`, before anything that can throw, so an
@@ -583,6 +586,16 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         credentialKey = credential.key;
         credentialSource = `credentials:${credential.method ?? 'unknown'}`;
       }
+      // The two recall knobs the panel owns: BFS depth d (int > 0) and relevance threshold r (0..1). Applied to
+      // the live policy object before the first observation, so the whole session runs at the stored values.
+      const tuningRead = await readCredential({
+        ref: TUNING_REF,
+        service: (ctx as { get?: (name: string) => unknown }).get?.('credentials'),
+        report: (line) => probeSink?.write(JSON.stringify({ ...line, kind: 'credential-tuning' }) + '\n'),
+      });
+      appliedTuning = parseTuning(tuningRead.key);
+      if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
+      if (appliedTuning.tau !== undefined) config.recall.tau = appliedTuning.tau;
       await primeSystemPrompt({
         service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
         observer,
@@ -623,6 +636,11 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           cache: config.cache,
           tas: config.tas,
           recall: config.recall,
+          tuning: {
+            stored: appliedTuning,
+            effective: { depth: config.recall.depth, tau: config.recall.tau },
+            keySource: credentialSource,
+          },
           tail: config.tail,
           planGate: config.planGate,
           s1: {

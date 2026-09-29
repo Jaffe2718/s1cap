@@ -95,3 +95,32 @@ export async function readCredential(opts: CredentialReadOptions): Promise<Crede
   });
   return { tried };
 }
+/**
+ * Where the settings panel keeps the two recall knobs. Not a secret, but the same store is the only host-side
+ * key/value surface this plugin has verified, so the tuning rides along with the key rather than inventing an
+ * unverified transport. Value format: `"<depth> <tau>"`, e.g. `"2 0.55"`.
+ */
+export const TUNING_REF = 's1cap/tuning';
+
+export interface Tuning {
+  depth?: number;
+  tau?: number;
+}
+
+/**
+ * Parse the tuning string the panel writes.
+ *
+ * **Fail-safe, and deliberately not clamping:** a field outside its stated range (`d` an integer > 0, `0 <= r <= 1`)
+ * is *dropped* so the policy default stands. Clamping would silently run a cell at a value the researcher never
+ * chose, which is the one thing an ablation must never do.
+ */
+export function parseTuning(value: string | undefined): Tuning {
+  const out: Tuning = {};
+  if (typeof value !== 'string') return out;
+  const parts = value.trim().split(/\s+/);
+  const depth = Number(parts[0]);
+  if (Number.isInteger(depth) && depth > 0) out.depth = depth;
+  const tau = Number(parts[1]);
+  if (Number.isFinite(tau) && tau >= 0 && tau <= 1) out.tau = tau;
+  return out;
+}
