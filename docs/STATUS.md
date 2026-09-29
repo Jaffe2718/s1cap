@@ -708,6 +708,34 @@ viable, and no allowlist stands in the way.
 `ctx.on('loader/volatile-update', …)` so a change lands without a restart, keep our own `resolvePluginConfig` as the
 fallback for a profile that passes a plain object, and let the Plugins page's `form.mutate` be the write path. Only
 then does the panel's Save button write; `/s1-tune` and the tuning file stay as the headless and fallback paths.
+### Round 35: volatile updates re-apply live, and the rule that got us there
+
+Landed and green (109/109): the host half subscribes to `loader/volatile-update` and, when it fires, re-reads the
+tuning store and re-applies `depth`, `relevanceThreshold` and `window` to the live policy, so an edit lands without a
+restart. The handler is wrapped and logged - an event that never fires costs nothing, a throw would take the harness
+down with it - and the subscription is registered **before** the pre-step middleware deliberately, because the plugin
+test pins the recorded order:
+
+    assert.deepEqual(h.events, ['session/event', 'loader/volatile-update', 'agent/pre-step'], ...);
+
+A real round re-confirmed the store path end to end:
+`{"kind":"tuning-file","read":{"depth":3,"relevanceThreshold":0.7,"window":512},"effective":{...same...}}`.
+
+**Ground rule 11 - read the failure before editing the expectation.** This took two rounds for one line. The first
+attempt assumed the new subscription would be appended to the event list and patched the expectation accordingly; the
+suite stayed red, and the diagnostic round then printed the actual diff, which showed the subscription recorded
+*between* the other two. Both attempts were gated - expectation first, subscription second, suite re-run, and a full
+revert when it was not green - which is why the tree never sat red and the wasted round cost only time.
+
+**Still open for the panel's Save button:** declaring `depth`, `relevanceThreshold` and `window` as volatile fields in
+the exported `Config` (`z.number().min(...).step(...).default(...).volatile()`, bounds matching the parsers) and letting
+the Plugins page's `form.mutate` perform the write - that is the part that turns Save from a validation demo into a
+working control. The precedent is confirmed: installed third-party plugins import schemastery directly, so host
+packages are resolvable for plugin code.
+
+**Still open for the cost figure:** a long multi-step session, so `scoredPairs` per step is measured rather than
+modelled. Headless probe rounds keep producing a single assembly (where the counter is necessarily 0), so this needs a
+prompt that forces several steps.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
