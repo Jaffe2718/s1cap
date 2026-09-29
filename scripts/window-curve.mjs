@@ -34,20 +34,22 @@ let full = 0;
 for (const w of WINDOWS) {
   const graph = new AssociationGraph();
   const cumulative = [];
+  const perStep = [];
   let perStepMax = 0;
   for (let i = 0; i < T; i += 1) {
     graph.addSegments([segments[i]]);
     const step = graph.scoreNew({ windowN: w, threshold: 0 });
     perStepMax = Math.max(perStepMax, step.scoredPairs);
     cumulative.push(graph.stats().scoredPairs);
+    perStep.push(step.scoredPairs);
   }
   const scored = graph.stats().scoredPairs;
   if (full === 0) full = (T * (T - 1)) / 2;
-  rows.push({ w, scored, perStepMax, saved: full - scored, ratio: scored / full, cumulative });
+  rows.push({ w, scored, perStepMax, lastStep: perStep[perStep.length - 1], saved: full - scored, ratio: scored / full, cumulative, perStep });
 }
 
 const markdown = [
-  '| w | pairs scored | max pairs in one step | pairs saved vs full history | share of full |',
+  '| w | pairs scored | max pairs in one step | pairs in the LAST step | pairs saved vs full history | share of full |',
   '| --- | --- | --- | --- | --- |',
   ...rows.map(
     (r) =>
@@ -57,6 +59,8 @@ const markdown = [
       r.scored.toLocaleString('en-US') +
       ' | ' +
       String(r.perStepMax) +
+      ' | ' +
+      String(r.lastStep) +
       ' | ' +
       r.saved.toLocaleString('en-US') +
       ' | ' +
@@ -116,4 +120,10 @@ const svg = [
   '</svg>',
 ].join('\n');
 writeFileSync('docs/figures/window-cost.svg', svg + '\n', 'utf8');
+console.log(
+'what a long session costs PER STEP at the tail (T = ' + String(T) + '):');
+for (const r of rows) {
+  console.log('  w=' + String(r.w) + ': ' + String(r.lastStep) + ' pairs in the final step');
+}
+console.log('  full history would score ' + String(T - 1) + ' pairs in the final step - the window stays at w.');
 console.log('figure written: docs/figures/window-cost.svg');
