@@ -76,6 +76,12 @@ export function observeStep(input: ObserveStepInput): StepObservation {
   // segmentEvent applies the I2 gate (provenance.ts): a control-plane record can never become a segment.
   const segments: Segment[] = events.flatMap((ev) => segmentEvent(ev));
   input.graph.addSegments(segments);
+  // recall.window = w: only segments that arrived since the previous step are scored, each against
+  // the most recent w segments. Segments outside the window keep their edges and stay reachable.
+  const windowScore = input.graph.scoreNew({
+    windowN: input.policy.recall.window,
+    threshold: input.policy.recall.releTao,
+  });
 
   const pinned = segments.filter((s) => s.kind === 'systemPinned');
   // The rendered system prompt is pinned, never a recall candidate: it has to stay byte-stable at the front
@@ -120,6 +126,8 @@ export function observeStep(input: ObserveStepInput): StepObservation {
   const fullTokens = totalTokens(segments);
   const selectedTokens = result.budget.used;
   const event: AssemblyEvent = {
+    windowN: input.policy.recall.window,
+    scoredPairs: windowScore.scoredPairs,
     type: 'assembly',
     schema: TELEMETRY_SCHEMA_VERSION,
     ts: input.now,

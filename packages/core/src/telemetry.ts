@@ -85,6 +85,10 @@ export interface AssemblyEvent {
   ts: number;
   /** the harness session this observation belongs to (added 2026-09-28: without it, records from several sessions are indistinguishable) */
   sessionId?: string;
+  /** recall.window = w in force for this assembly (the S1 scoring window) */
+  windowN?: number;
+  /** pair comparisons spent scoring the segments that arrived since the previous step: the S1 cost w bounds */
+  scoredPairs?: number;
   seq: number;
   candidates: number;
   selected: number;
