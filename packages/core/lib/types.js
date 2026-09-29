@@ -86,8 +86,8 @@ export const CORE_SCHEMA_VERSION = 1         ;
     
            
                                 
-                                                       
-                      
+                                                                  
+                                 
          
                                                                                                     
                                                                                                  
@@ -181,7 +181,7 @@ export function defaultPolicy()                 {
     cache: { reselectPolicy: 'perTask', blockTokens: 64 },
     tas: { on: true, tMaxChars: 8000, updatePolicy: 'perTask' },
     recall: {
-      releTao: 0.55,
+      relevanceThreshold: 0.55,
     window: 1024,
       depth: 2,
       fanout: 8,

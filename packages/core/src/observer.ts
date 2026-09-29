@@ -80,7 +80,7 @@ export function observeStep(input: ObserveStepInput): StepObservation {
   // the most recent w segments. Segments outside the window keep their edges and stay reachable.
   const windowScore = input.graph.scoreNew({
     windowN: input.policy.recall.window,
-    threshold: input.policy.recall.releTao,
+    threshold: input.policy.recall.relevanceThreshold,
   });
 
   const pinned = segments.filter((s) => s.kind === 'systemPinned');

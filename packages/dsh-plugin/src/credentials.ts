@@ -98,13 +98,13 @@ export async function readCredential(opts: CredentialReadOptions): Promise<Crede
 /**
  * Where the settings panel keeps the two recall knobs. Not a secret, but the same store is the only host-side
  * key/value surface this plugin has verified, so the tuning rides along with the key rather than inventing an
- * unverified transport. Value format: `"<depth> <releTao>"`, e.g. `"2 0.55"`.
+ * unverified transport. Value format: `"<depth> <relevanceThreshold>"`, e.g. `"2 0.55"`.
  */
 export const TUNING_REF = 's1cap/tuning';
 
 export interface Tuning {
   depth?: number;
-  releTao?: number;
+  relevanceThreshold?: number;
   /** S1 scoring window w (recall.window): integer >= 1 */
   window?: number;
 }
@@ -122,14 +122,14 @@ export function parseTuning(value: string | undefined): Tuning {
   const parts = value.trim().split(/\s+/);
   const depth = Number(parts[0]);
   if (Number.isInteger(depth) && depth > 0) out.depth = depth;
-  const releTao = Number(parts[1]);
-  if (Number.isFinite(releTao) && releTao >= 0 && releTao <= 1) out.releTao = releTao;
+  const relevanceThreshold = Number(parts[1]);
+  if (Number.isFinite(relevanceThreshold) && relevanceThreshold >= 0 && relevanceThreshold <= 1) out.relevanceThreshold = relevanceThreshold;
   const window = Number(parts[2]);
   if (Number.isInteger(window) && window >= 1) out.window = window;
   return out;
 }
 /**
- * Parse a tuning command line. Accepts `3 0.7`, `d=3 r=0.7`, `depth=3 releTao=0.7`, or either field alone; the same
+ * Parse a tuning command line. Accepts `3 0.7`, `d=3 r=0.7`, `depth=3 relevanceThreshold=0.7`, or either field alone; the same
  * two rules apply (d an integer > 0, 0 <= r <= 1) and anything else is dropped rather than clamped.
  */
 export function parseTuningArgs(input: string | undefined): Tuning {
@@ -145,19 +145,19 @@ export function parseTuningArgs(input: string | undefined): Tuning {
       if (Number.isInteger(value) && value >= 1) out.window = value;
       return;
     }
-    if (key === 'releTao' || key === 'r') {
-      if (Number.isFinite(value) && value >= 0 && value <= 1) out.releTao = value;
+    if (key === 'relevanceThreshold' || key === 'r') {
+      if (Number.isFinite(value) && value >= 0 && value <= 1) out.relevanceThreshold = value;
     }
   };
   const positional: string[] = [];
   for (const token of input.trim().split(/\s+/)) {
     if (token === '') continue;
-    const match = /^(depth|d|releTao|r|window|w)\s*=\s*(\S+)$/.exec(token);
+    const match = /^(depth|d|relevanceThreshold|r|window|w)\s*=\s*(\S+)$/.exec(token);
     if (match && match[1] !== undefined && match[2] !== undefined) assign(match[1], match[2]);
     else positional.push(token);
   }
   if (positional[0] !== undefined) assign('depth', positional[0]);
-  if (positional[1] !== undefined) assign('releTao', positional[1]);
+  if (positional[1] !== undefined) assign('relevanceThreshold', positional[1]);
   if (positional[2] !== undefined) assign('window', positional[2]);
   return out;
 }

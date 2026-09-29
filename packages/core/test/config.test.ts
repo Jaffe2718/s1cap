@@ -27,7 +27,7 @@ test('valid overrides are applied, nested sections included', () => {
     rgMaintenance: { mode: 'async', maxLagTurns: 5 },
     cache: { reselectPolicy: 'threshold', blockTokens: 128 },
     tas: { on: false, tMaxChars: 4000, updatePolicy: 'perTurn' },
-    recall: { releTao: 0.7, depth: 3, fanout: 16, tier1: 's1', budgetRatio: 0.5, minRecalledShare: 0.1 },
+    recall: { relevanceThreshold: 0.7, depth: 3, fanout: 16, tier1: 's1', budgetRatio: 0.5, minRecalledShare: 0.1 },
     tail: { k: 6 },
     planGate: { on: false, maxPlans: 4, attemptCap: 3, abstainConfidence: 0.6 },
     s1: { provider: 'laya-serve', timeoutMs: 5000, questionsPerCall: 10, model: 'english' },
@@ -41,7 +41,7 @@ test('valid overrides are applied, nested sections included', () => {
   assert.equal(result.policy.cache.blockTokens, 128);
   assert.equal(result.policy.tas.on, false);
   assert.equal(result.policy.tas.updatePolicy, 'perTurn');
-  assert.equal(result.policy.recall.releTao, 0.7);
+  assert.equal(result.policy.recall.relevanceThreshold, 0.7);
   assert.equal(result.policy.recall.tier1, 's1');
   assert.equal(result.policy.tail.k, 6);
   assert.equal(result.policy.planGate.attemptCap, 3);
@@ -67,8 +67,8 @@ test('the two design invariants cannot be configured away', () => {
 
 test('a bad value is reported and the default is kept (fail-safe)', () => {
   const cases: Array<[string, unknown]> = [
-    ['recall.releTao', 1.5],
-    ['recall.releTao', 'high'],
+    ['recall.relevanceThreshold', 1.5],
+    ['recall.relevanceThreshold', 'high'],
     ['recall.depth', 0],
     ['recall.depth', 2.5],
     ['recall.budgetRatio', 1],
@@ -105,7 +105,7 @@ test('enums, booleans and strings are checked', () => {
 });
 
 test('unknown keys warn instead of failing, and plugin keys can be declared', () => {
-  const warned = validatePolicy({ recoll: { releTao: 0.5 } });
+  const warned = validatePolicy({ recoll: { relevanceThreshold: 0.5 } });
   assert.equal(warned.ok, true);
   assert.equal(warned.warnings.length, 1);
   assert.match(warned.warnings[0]?.message ?? '', /unknown config key/);

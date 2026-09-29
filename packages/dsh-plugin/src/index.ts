@@ -318,10 +318,13 @@ const TUNING_FILE = './.s1cap/tuning.json';
 function readTuningFile(): Tuning {
   try {
     const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
-    const parsed = JSON.parse(raw) as { depth?: unknown; releTao?: unknown; window?: unknown };
+    const parsed = JSON.parse(raw) as { depth?: unknown; relevanceThreshold?: unknown; window?: unknown };
     const out: Tuning = {};
     if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth > 0) out.depth = parsed.depth;
-    if (typeof parsed.releTao === 'number' && parsed.releTao >= 0 && parsed.releTao <= 1) out.releTao = parsed.releTao;
+    // A file written before the rename still carries the old key: read either, so an upgrade does not silently
+    // drop a researcher's stored threshold.
+    const threshold = typeof parsed.relevanceThreshold === 'number' ? parsed.relevanceThreshold : (parsed as { releTao?: unknown }).releTao;
+    if (typeof threshold === 'number' && threshold >= 0 && threshold <= 1) out.relevanceThreshold = threshold;
     if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 1) out.window = parsed.window;
     return out;
   } catch {
@@ -624,12 +627,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       appliedTuning = parseTuning(tuningRead.key);
       const fromFile = readTuningFile();
       if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
-      if (fromFile.releTao !== undefined) appliedTuning.releTao = fromFile.releTao;
+      if (fromFile.relevanceThreshold !== undefined) appliedTuning.relevanceThreshold = fromFile.relevanceThreshold;
       if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
-      if (appliedTuning.releTao !== undefined) config.recall.releTao = appliedTuning.releTao;
+      if (appliedTuning.relevanceThreshold !== undefined) config.recall.relevanceThreshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, releTao: config.recall.releTao, window: config.recall.window } }) + '\n');
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window } }) + '\n');
       await primeSystemPrompt({
         service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
         observer,
@@ -664,18 +667,18 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       input: { hint: 'd r w   (e.g. "3 0.7 512", or "d=3", "r=0.7", "w=512")' },
       handler: ({ rawInput }) => {
         const parsed = parseTuningArgs(rawInput);
-        if (parsed.depth === undefined && parsed.releTao === undefined) {
+        if (parsed.depth === undefined && parsed.relevanceThreshold === undefined) {
           return { ok: false, reason: 'nothing to set: depth d must be an integer > 0 and threshold r between 0 and 1' };
         }
         appliedTuning = { ...appliedTuning, ...parsed };
         if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
-        if (parsed.releTao !== undefined) config.recall.releTao = parsed.releTao;
+        if (parsed.relevanceThreshold !== undefined) config.recall.relevanceThreshold = parsed.relevanceThreshold;
         if (parsed.window !== undefined) config.recall.window = parsed.window;
         const persisted = writeTuningFile(appliedTuning);
         ctx.logger?.info?.(
-          `[s1cap] recall tuning: depth=${config.recall.depth} releTao=${config.recall.releTao}${persisted ? '' : ' (not persisted: file write failed)'}`,
+          `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.relevanceThreshold}${persisted ? '' : ' (not persisted: file write failed)'}`,
         );
-        return { ok: true, effective: { depth: config.recall.depth, releTao: config.recall.releTao, window: config.recall.window }, persisted };
+        return { ok: true, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window }, persisted };
       },
     },
     {
@@ -692,7 +695,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           recall: config.recall,
           tuning: {
             stored: appliedTuning,
-            effective: { depth: config.recall.depth, releTao: config.recall.releTao },
+            effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold },
             keySource: credentialSource,
           },
           tail: config.tail,

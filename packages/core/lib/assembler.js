@@ -61,7 +61,7 @@ export function assemble(input               )                 {
 
   if (policy.recall.tier1 !== 'off' && recalledBudget > 0) {
     const hits = graph.recall([current.id], {
-      releTao: policy.recall.releTao,
+      relevanceThreshold: policy.recall.relevanceThreshold,
       depth: policy.recall.depth,
       fanout: policy.recall.fanout,
       lambdaMs: input.lambdaMs,

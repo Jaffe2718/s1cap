@@ -471,7 +471,7 @@ Paper T: arxiv.org/abs/2609.02702 · Jev: docs.typesafe.ai/{api,models,model-jag
 
 **Algorithm (upkeep).** After the segments of a step are added to the association graph, score **only the
 segments that arrived since the previous step**, each against the most recent `w = recall.window` segments, with
-edges below `r = recall.releTao` dropped. Emit `windowN` and `scoredPairs` on the assembly event so the System-1
+edges below `r = recall.relevanceThreshold` dropped. Emit `windowN` and `scoredPairs` on the assembly event so the System-1
 saving is a number in the telemetry rather than a claim in prose.
 
 **Ground rule 9 — a new value must land in every sibling parse path.** Adding `w` took two rounds to become real,

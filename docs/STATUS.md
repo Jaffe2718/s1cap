@@ -580,7 +580,7 @@ What is in and green (107/107):
 - **Segments outside the window are untouched**: they keep every edge they already have and stay reachable by
   `recall()`. `w` decides *whether a pair is scored*, never what exists in the graph — exactly the semantics
   settled in `prompt.txt` (no revival scoring).
-- **`recall.tau` is renamed to `recall.releTao`** (validation rule moved with it) and **`recall.window`** is added
+- **`recall.tau` is renamed to `recall.relevanceThreshold`** (validation rule moved with it) and **`recall.window`** is added
   as an integer >= 1 with default 1024; `lexicalScore` is the offline stand-in for the System-1 scorer so the
   window is testable without the model.
 
@@ -602,12 +602,12 @@ Green and committed (107/107):
   dropped like every other out-of-range field), and `parseTuningArgs` accepts `w=512` / `window=512` / a third
   positional value;
 - `/s1-tune d r w` applies it to `config.recall.window`, persists it, and reports
-  `effective: { depth, releTao, window }` — so the host half of the parameter is complete;
+  `effective: { depth, relevanceThreshold, window }` — so the host half of the parameter is complete;
 - the panel half is **not**: its state and read-back learned about the window, but the input row, the local
   validation and the third value in the saved string are missing, because the patch anchor for the save path did
   not match and I did not re-check the post-condition for the UI row. The panel therefore still shows two fields.
 
-Also missed (cosmetic): one log line in `index.ts` still prints only depth and releTao.
+Also missed (cosmetic): one log line in `index.ts` still prints only depth and relevanceThreshold.
 
 **Next:** add the third input row to the panel (label `w`, `min=1`, `step=1`, placeholder 1024), its local
 validation, and `String(w)` in the persisted payload; then the real-session evidence
@@ -617,16 +617,16 @@ validation, and `String(w)` in the persisted payload; then the real-session evid
 caught instead of shipping a half-wired parameter. The remaining gap is exactly what those assertions said.
 ### Round 31: `w` is applied from the tuning file, and the window has a regression test
 
-Evidence from a real headless session (`~/.dsh/.s1cap/tuning.json` = depth 3, releTao 0.7, window 512):
+Evidence from a real headless session (`~/.dsh/.s1cap/tuning.json` = depth 3, relevanceThreshold 0.7, window 512):
 
 ```json
-{"kind":"tuning-file","read":{"depth":3,"releTao":0.7,"window":512},"effective":{"depth":3,"releTao":0.7,"window":512}}
+{"kind":"tuning-file","read":{"depth":3,"relevanceThreshold":0.7,"window":512},"effective":{"depth":3,"relevanceThreshold":0.7,"window":512}}
 ```
 
 `read` equals `effective`, window included, and the control-plane record for that session reports `windowN: 512`.
 Two gaps surfaced while getting there, both the same shape - a value added to one parse path and forgotten in the
 sibling: `readTuningFile()` did not carry `window` at all, and the merge from the file into `appliedTuning`
-copied depth and releTao but not window. The probe is what caught both, which is why it prints `read` and
+copied depth and relevanceThreshold but not window. The probe is what caught both, which is why it prints `read` and
 `effective` side by side.
 
 `packages/core/test/window.test.ts` now pins the parameter's contract offline: with w = 64 over 400 segments,
