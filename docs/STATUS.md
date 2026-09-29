@@ -803,6 +803,22 @@ a malformed payload but as `settings/rejected` with `details.ns` - a decision ta
 The probe stays in the panel (it is additive and reports the gateway verbatim rather than claiming a save), and the
 refusal messages it prints are now self-explanatory: credentials for a ref no provider declared, then settings for a
 namespace no plugin declared.
+### Round 39: no naming shortcut - the namespace has to be declared
+
+Twelve combinations were probed from the panel (four ops shapes against `s1cap` and `dsh-s1cap`); none succeeded.
+The two that used the now-known ops shape refused one layer in:
+
+    s1cap/arr-op-set     -> settings/rejected, details.ns "s1cap"
+    dsh-s1cap/arr-op-set -> settings/rejected, details.ns "dsh-s1cap"
+
+Both candidate namespace names reach the namespace registry and are turned away there, so the panel cannot write by
+naming an existing namespace differently: the namespace must be **declared**, which is the exported-`Config` piece.
+That closes the search space - the ops format is known, the namespace name does not matter until a declaration exists,
+and the declaration is the only remaining action.
+
+The panel keeps reporting this verbatim in its own message (credentials first, because a ref no provider declared is
+refused, then settings, because the namespace is undeclared), so a click on Save still tells the operator exactly
+which layer is missing rather than implying the values were stored.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
