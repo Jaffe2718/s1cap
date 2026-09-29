@@ -318,10 +318,11 @@ const TUNING_FILE = './.s1cap/tuning.json';
 function readTuningFile()         {
   try {
     const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
-    const parsed = JSON.parse(raw)                                          ;
+    const parsed = JSON.parse(raw)                                                            ;
     const out         = {};
     if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth > 0) out.depth = parsed.depth;
     if (typeof parsed.releTao === 'number' && parsed.releTao >= 0 && parsed.releTao <= 1) out.releTao = parsed.releTao;
+    if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 1) out.window = parsed.window;
     return out;
   } catch {
     return {};
@@ -624,10 +625,11 @@ function applyInner(ctx               , raw                             )       
       const fromFile = readTuningFile();
       if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
       if (fromFile.releTao !== undefined) appliedTuning.releTao = fromFile.releTao;
+      if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.releTao !== undefined) config.recall.releTao = appliedTuning.releTao;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, releTao: config.recall.releTao } }) + '\n');
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, releTao: config.recall.releTao, window: config.recall.window } }) + '\n');
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
         observer,

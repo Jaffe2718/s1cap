@@ -615,6 +615,27 @@ validation, and `String(w)` in the persisted payload; then the real-session evid
 
 **Note on method:** this round I asserted post-conditions for the files I patched, which is how the two misses were
 caught instead of shipping a half-wired parameter. The remaining gap is exactly what those assertions said.
+### Round 31: `w` is applied from the tuning file, and the window has a regression test
+
+Evidence from a real headless session (`~/.dsh/.s1cap/tuning.json` = depth 3, releTao 0.7, window 512):
+
+```json
+{"kind":"tuning-file","read":{"depth":3,"releTao":0.7,"window":512},"effective":{"depth":3,"releTao":0.7,"window":512}}
+```
+
+`read` equals `effective`, window included, and the control-plane record for that session reports `windowN: 512`.
+Two gaps surfaced while getting there, both the same shape - a value added to one parse path and forgotten in the
+sibling: `readTuningFile()` did not carry `window` at all, and the merge from the file into `appliedTuning`
+copied depth and releTao but not window. The probe is what caught both, which is why it prints `read` and
+`effective` side by side.
+
+`packages/core/test/window.test.ts` now pins the parameter's contract offline: with w = 64 over 400 segments,
+`scoredPairs` stays within `total * w` and below full pairwise scoring; the first segment is still a node with
+its edges intact after falling out of the window; and doubling w roughly doubles the cost, so the cost tracks w
+rather than the history length. 108/108 green.
+
+Still open: a multi-step session to show `scoredPairs` per step in a longer run (the headless probe recorded a
+single assembly step, where the counter is necessarily 0), the four documents, and the panel's direct write.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
