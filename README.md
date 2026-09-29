@@ -33,10 +33,10 @@ Everything is **measured, not assumed**: solve rate, token cost split by prompt-
 
 ## Architecture
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./docs/figures/s1cap-technical-route.dark.svg">
-  <img alt="S1CAP technical route - five lanes: harness session (Run + Verify with an inner-loop self-edge, Stop - the model's own call), System-2 LLM step, S1CAP control (ASSEMBLER and PLAN GATE), asynchronous RG upkeep (Association Graph, RG Upkeep), System-1 backends" src="./docs/figures/s1cap-technical-route.light.svg">
-</picture>
+![Conceptual S1CAP architecture: selected context enters the System-2 LLM; System-1 relevance scoring maintains an association graph, while choice scoring orders candidate plans before execution.](./docs/figures/s1cap-architecture-overview.png)
+
+For exact control flow and asynchronous boundaries, see the [detailed technical route](docs/figures/s1cap-technical-route.light.svg) ([dark version](docs/figures/s1cap-technical-route.dark.svg)).
+
 The user-facing transcript stays **strictly chronological**; only the model view is reassembled (native in DSH's session/surface split, replicated by the portable proxy elsewhere).
 
 ## Evaluation design (pre-registered)
