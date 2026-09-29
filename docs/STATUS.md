@@ -663,6 +663,27 @@ the write. `/s1-tune` stays as the headless path, and the tuning file as the fal
 **Also confirmed:** the browser half attaches to the Loader row whose specifier is the bare package name (ours is),
 `dsh.client.inject` is the declared dependency list we already use, and the built `./client` must be the lazy-CJS
 factory this repository already emits.
+### Round 33: the config-form surface is shipped here; plugin-side resolvability is the open question
+
+Two checks, one answer each:
+
+- **The documented mechanism exists in this DSH build.** `configForms` appears in the shipped client packages
+  (`dsh-client-ui-chat`, `dsh-client-ui-agent-preset`, `dsh-client-locale`) and `loader/volatile-update` in
+  `cordis-plugin-loader` plus several plugins (`dsh-llm-deepseek`, `dsh-experimental-speech-to-text`). So the Plugins
+  page form and volatile HMR are real surfaces in 0.1.7-rc.2, not documentation for a newer release.
+- **Internal packages are not resolvable from the profile directory.** `require.resolve('@deepseek-ai/schemastery')`
+  and `require.resolve('@deepseek-ai/dsh-credentials')` both answer `MODULE_NOT_FOUND` when run with the profile as
+  the working directory. They live inside the application archive, so a plugin installed under the profile cannot
+  reach them by plain Node resolution — and declaring volatile config fields needs `z.object(...)` from
+  schemastery.
+
+**Therefore the next experiment is one line, not an implementation:** add the schemastery import to the host half and
+see whether the bundle still activates in a real profile. If the loader maps `@deepseek-ai/*` for plugin code (as it
+already does for `react` in the browser half, which third-party client modules require successfully), the volatile
+Config path is open and the panel can write; if it does not, the config-form route is closed to an out-of-tree
+plugin and the honest answer is that Save stays on `/s1-tune` plus read-back, with this evidence as the reason.
+
+Either way this replaces the earlier guess (a `WEB_SETTINGS_NAMESPACES` allowlist) with a measured question.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
