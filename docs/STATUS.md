@@ -819,6 +819,33 @@ and the declaration is the only remaining action.
 The panel keeps reporting this verbatim in its own message (credentials first, because a ref no provider declared is
 refused, then settings, because the namespace is undeclared), so a click on Save still tells the operator exactly
 which layer is missing rather than implying the values were stored.
+### Round 40: the authoritative config field inventory, dumped from the build
+
+Dumping `resolvePluginConfig({ enabled: true })` from `packages/dsh-plugin/lib/index.js` gives the schema's required
+coverage directly, instead of guessing it from source. Forty-two leaf fields, in twelve groups - the exported
+`Config` must describe every one of them, or the loader will reject the profile's configuration and the plugin will
+not activate at all:
+
+    cell(string) termination(string) assemblyDeadlineMs(number) observation(string)
+    rgMaintenance: mode(string) maxLagTurns(number)
+    cache: reselectPolicy(string) blockTokens(number)
+    tas: on(bool) tMaxChars(number) updatePolicy(string)
+    recall: relevanceThreshold(window|depth|fanout)(number) tier1(string) embedModel(string)
+            budgetRatio(number) minRecalledShare(number)
+    tail: k(number)
+    planGate: on(bool) maxPlans(number) attemptCap(number) abstainConfidence(number)
+    s1: provider(string) baseUrl(string) model(string) apiKey(string) timeoutMs(number) questionsPerCall(number)
+    telemetry: sessionJsonl(string) controlJsonl(string) tapeJsonl(string)
+    laya: enabled(bool) preferConsoleScript(bool) host(string) port(number) healthPath(string)
+          autoStart(bool) startupTimeoutMs(number) pollIntervalMs(number)
+
+**Caveat that the dump makes visible and that would otherwise break activation:** the dump shows *defaults*, while the
+profile patch sets keys the defaults do not carry - `laya.condaEnv`, `laya.condaPath`, `laya.env` (a record of
+environment variables) and `s1.provider` values such as `laya-serve`. The schema has to admit those too, so it should
+be written against the union of the dump and the test profile's patch, not the dump alone.
+
+The plugin's public surface, for reference: `apply`, `inject`, `name`, `preStepMiddleware`, `resolveConfig`,
+`resolvePluginConfig`, `LayaRuntime`, `DEFAULT_TELEMETRY`.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
