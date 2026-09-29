@@ -101,27 +101,52 @@ window.__ModuleLoader__.load({
           return undefined;
         }, []);
 
-        /** Load both refs and mirror the stored tuning into the inputs. */
+        /**
+         * Fill the three inputs from the host, not from a hard-coded default.
+         *
+         * The route is the authoritative source because it is where Save actually writes: reading the credential
+         * store instead left the panel showing d=2/r=0.55/w=1024 right next to values that were already in effect.
+         * The credential string is still consulted as a fallback for a profile whose web server never answered, and
+         * when both are silent the panel says so rather than looking merely unconfigured.
+         */
         const load = React.useCallback(async () => {
           try {
             const key = await readValue(REF);
-            const tuning = await readValue(TUNING_REF);
             let nextDepth = String(DEFAULT_DEPTH);
             let nextTau = String(DEFAULT_TAU);
             let nextWin = String(DEFAULT_WINDOW);
-            if (typeof tuning === 'string') {
-              const parts = tuning.trim().split(/\s+/);
-              const d = Number(parts[0]);
-              const r = Number(parts[1]);
-              const w = Number(parts[2]);
-              if (Number.isInteger(d) && d > 0) nextDepth = String(d);
-              if (Number.isFinite(r) && r >= 0 && r <= 1) nextTau = String(r);
-              if (Number.isInteger(w) && w >= 1) nextWin = String(w);
+            let note = '';
+            let answered = false;
+            try {
+              const response = await fetch('/s1cap-7340/tuning');
+              const answer = await response.json();
+              const eff = answer?.effective ?? {};
+              if (Number.isInteger(eff.depth) && eff.depth > 0) nextDepth = String(eff.depth);
+              if (Number.isFinite(eff.relevanceThreshold) && eff.relevanceThreshold >= 0 && eff.relevanceThreshold <= 1) {
+                nextTau = String(eff.relevanceThreshold);
+              }
+              if (Number.isInteger(eff.window) && eff.window >= 64) nextWin = String(eff.window);
+              answered = true;
+            } catch {
+              note = 'the tuning route did not answer; showing the built-in defaults';
+            }
+            if (!answered) {
+              const legacy = await readValue(TUNING_REF);
+              if (typeof legacy === 'string') {
+                const parts = legacy.trim().split(/\s+/);
+                const d = Number(parts[0]);
+                const r = Number(parts[1]);
+                const w = Number(parts[2]);
+                if (Number.isInteger(d) && d > 0) nextDepth = String(d);
+                if (Number.isFinite(r) && r >= 0 && r <= 1) nextTau = String(r);
+                if (Number.isInteger(w) && w >= 64) nextWin = String(w);
+                note = 'read from the legacy credential entry; the tuning route is unreachable';
+              }
             }
             setDepth(nextDepth);
             setTau(nextTau);
             setWin(nextWin);
-            setState({ phase: 'ready', configured: key !== undefined, message: '' });
+            setState({ phase: 'ready', configured: key !== undefined, message: note });
           } catch (err) {
             setState({ phase: 'ready', configured: false, message: 'could not read the credential store: ' + String(err) });
           }
@@ -222,6 +247,10 @@ window.__ModuleLoader__.load({
               return;
             }
             const eff = answer.effective ?? {};
+            // Trust the host, not the form: whatever it stored becomes what the panel shows.
+            if (Number.isInteger(eff.depth) && eff.depth > 0) setDepth(String(eff.depth));
+            if (Number.isFinite(eff.relevanceThreshold)) setTau(String(eff.relevanceThreshold));
+            if (Number.isInteger(eff.window) && eff.window >= 64) setWin(String(eff.window));
             setState((s) => ({
               ...s,
               message:

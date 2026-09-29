@@ -891,6 +891,17 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
    * PUT takes the same text the command line takes ("3 0.7 512", or d=/r=/w=) and answers with the effective
    * triple, so a successful Save is proven by the response body rather than by the absence of an error.
  */
+  // Apply the stored knobs at activation, not only at the first step of a session. Waiting for that first step
+  // meant a freshly loaded profile answered /s1 and the panel with the built-in defaults while the file on disk
+  // already held other values - the panel looked unconfigured next to a configuration about to be used.
+  {
+    const storedNow = readTuningFile();
+    appliedTuning = { ...appliedTuning, ...storedNow };
+    if (storedNow.depth !== undefined) config.recall.depth = storedNow.depth;
+    if (storedNow.relevanceThreshold !== undefined) config.recall.relevanceThreshold = storedNow.relevanceThreshold;
+    if (storedNow.window !== undefined) config.recall.window = storedNow.window;
+  }
+
   const webServer = findService<{ register: (spec: unknown) => void }>(ctx, 'webServer');
   if (webServer !== undefined) {
     const registerRoute = (): void => {
@@ -903,7 +914,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
             if (method === 'GET') {
               sendJson(res, 200, {
                 ok: true,
-                stored: appliedTuning,
+                stored: { ...readTuningFile(), ...appliedTuning },
                 effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window },
               });
               return;

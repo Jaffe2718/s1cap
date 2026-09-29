@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { DEFAULT_TELEMETRY, apply, resolvePluginConfig } from '../src/index.ts';
 import type { PluginContext } from '../src/index.ts';
@@ -11,6 +14,25 @@ interface Harness {
   commands: Map<string, (arg: { rawInput?: string }) => unknown>;
   events: string[];
   handlers: Map<string, (...args: unknown[]) => unknown>;
+}
+
+/**
+ * Run `body` with DSH_HOME pointing at an empty temporary directory.
+ *
+ * Activation reads the stored tuning file, so without this a test's expectations depend on whatever the machine
+ * running it happens to have in ~/.dsh - a failure that looks like a code bug and is not one.
+ */
+function withEmptyHome<T>(body: () => T): T {
+  const previous = process.env['DSH_HOME'];
+  const dir = mkdtempSync(join(tmpdir(), 's1cap-test-home-'));
+  process.env['DSH_HOME'] = dir;
+  try {
+    return body();
+  } finally {
+    if (previous === undefined) delete process.env['DSH_HOME'];
+    else process.env['DSH_HOME'] = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function harness(): Harness {
@@ -135,6 +157,11 @@ test('apply() reports the resolved backend without leaking the key, and ping is 
 
 test('every config problem is reported as a warning and the session keeps its defaults', () => {
   const h = harness();
+  // Point the home directory at an empty one first. Activation now folds the stored tuning file into the live
+  // policy - that is the point, so a profile reports the researcher's values without waiting for a session - and
+  // this test is about *profile* validation falling back to defaults, not about what a developer's own
+  // ~/.dsh/.s1cap/tuning.json happens to hold. Reading the real home made this assertion depend on the machine.
+  withEmptyHome(() => {
   apply(h.ctx, {
     enabled: true,
     cell: 'C9' as unknown as 'C4',
@@ -150,6 +177,7 @@ test('every config problem is reported as a warning and the session keeps its de
   const status = h.commands.get('s1')?.({}) as { recall: { relevanceThreshold: number }; cell: string };
   assert.equal(status.recall.relevanceThreshold, 0.55, 'invalid value falls back to the default');
   assert.equal(status.cell, 'C4');
+  });
 });
 
 test('the plugin is inert unless explicitly enabled', () => {
