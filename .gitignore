@@ -28,6 +28,8 @@ bench/results/
 *.sqlite
 *.sqlite3
 *.jsonl
+# Deterministic, synthetic replay inputs are source-controlled test data.
+!/packages/core/test/fixtures/*.jsonl
 *.log
 
 # Environment & secrets
