@@ -173,6 +173,14 @@ export interface AssemblyResult {
      * narrower and redefining it would silently break the recorded acceptance test.
      */
     layoutStableTokens: number;
+    /** the first block after the stable head: where a re-selection would cut the prefix */
+    cutAfterBlock: string;
+    /**
+     * Tokens behind that cut, i.e. what one re-prefill costs. The input `decideReselect` prices, and the reason
+     * the layout is a cache decision at all: with x first the tail is only the moving part, with x last it is
+     * everything behind the task.
+     */
+    tokensAfterCut: number;
   };
   /** recall diagnostics for telemetry */
   recall: {

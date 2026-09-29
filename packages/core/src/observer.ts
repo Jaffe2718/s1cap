@@ -161,12 +161,19 @@ export async function observeStep(
       report,
     };
   }
-  const before = (windowAnchor >= 0 ? window.slice(0, windowAnchor) : window.slice(0, -1)).filter(
-    (s) => s.kind !== 'systemPinned',
-  );
-  const tailCount = Math.max(0, Math.min(input.policy.tail.k, before.length));
-  const tail = tailCount > 0 ? before.slice(before.length - tailCount) : [];
-  const history = before.slice(0, before.length - tailCount);
+  // Everything in the window except the anchor and the pinned prefix, in append order.
+  //
+  // This used to be "the segments before the anchor", which looked equivalent and was not: the anchor is the
+  // last user segment, and the model's output for the current task - its messages, tool calls and tool results -
+  // arrives *after* it in the append-only log. Slicing before the anchor therefore discarded exactly the newest
+  // turns, and `tail` came out empty in every live record (blocks.tail = 0 across a whole run) while the k most
+  // relevant verbatim turns were quietly not in the prompt at all.
+  const pool = window.filter((s) => s.id !== current.id && s.kind !== 'systemPinned');
+  // `tail` is the k most recent turns, verbatim. Which side of x they end up on is the layout's business and not
+  // the selector's: with x last they sit immediately before it, with x first immediately after it.
+  const tailCount = Math.max(0, Math.min(input.policy.tail.k, pool.length));
+  const tail = tailCount > 0 ? pool.slice(pool.length - tailCount) : [];
+  const history = pool.slice(0, pool.length - tailCount);
 
   const result = assemble({
     graph: input.graph,
@@ -210,6 +217,8 @@ export async function observeStep(
     layoutOrder: result.layout.order,
     xFirst: input.policy.xFirst,
     layoutStableTokens: result.cacheStability.layoutStableTokens,
+    cutAfterBlock: result.cacheStability.cutAfterBlock,
+    tokensAfterCut: result.cacheStability.tokensAfterCut,
     ...(result.fallback !== undefined ? { fallback: result.fallback } : {}),
   };
 

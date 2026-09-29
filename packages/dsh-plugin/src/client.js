@@ -396,6 +396,14 @@ window.__ModuleLoader__.load({
               : 'Off — [pinned | T | recalled | tail | x]. History sits immediately before the task and x stays last, ' +
                   'so everything above x is history and only the pinned prefix is stable.',
           ),
+          e(
+            'p',
+            { style: S.note },
+            'Cache: the stable head is the pinned prefix plus T' +
+              (xFirst ? ' plus the task; ' : '; ') +
+              'and a re-selection re-prefills everything after it. The per-assembly numbers are in each ' +
+              'control-plane record as layoutStableTokens and tokensAfterCut.',
+          ),
           e('p', { style: S.note }, state.message),
           e(
             'p',

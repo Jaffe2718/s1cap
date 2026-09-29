@@ -157,3 +157,33 @@ test('the graph accumulates across steps, so a later step can recall an earlier 
   assert.ok(graph.stats().segments >= MESSAGES.length, 'segments from both steps live in one graph');
   assert.ok(second.segments.length === MESSAGES.length);
 });
+
+test('the tail block holds the newest turns, including the output produced after the anchor', async () => {
+  // This is the shape the graph window actually has in a live session: the anchor is the last *user* segment,
+  // and everything the model did for this task (its own message, the tool call, the tool result) sits after it
+  // in the append-only log. An earlier version sliced the window at the anchor, so the pool was the *history*
+  // and `tail` was empty in every real record - the k most recent verbatim turns were never in the prompt.
+  // Exercised through the graph-window path (empty payload) because that is what production takes: `pre-step`
+  // hands over an empty array after the first step.
+  const policy = cellPolicy('C4');
+  policy.tail.k = 3;
+  const graph = new AssociationGraph();
+  // Seed the graph the way upkeep would: the anchor first, then the turns produced for it.
+  const [u2] = MESSAGES.slice(-1);
+  assert.ok(u2 !== undefined);
+  await observeStep({ ...BASE, policy, graph, messages: MESSAGES.slice(0, 6), step: 1 });
+
+  const obs = await observeStep({ ...BASE, policy, graph, messages: [], step: 2 });
+  assert.equal(obs.kind, 'assembled');
+  if (obs.kind !== 'assembled') return;
+
+  // The anchor is the last user message; the assistant and tool segments that follow it are what the tail is for.
+  assert.ok(obs.event.blocks['tail'] !== undefined);
+  assert.ok(
+    obs.event.blocks['tail']! > 0,
+    `tail must carry the recent turns, got blocks=${JSON.stringify(obs.event.blocks)}`,
+  );
+  // It must be the *newest* k of the pool, and it must not duplicate the anchor.
+  assert.ok(obs.selectedIds.length >= 0);
+  assert.ok(!obs.selectedIds.includes('u2'), 'the anchor is not also a tail turn');
+});

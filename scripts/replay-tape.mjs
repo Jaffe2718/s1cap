@@ -28,8 +28,10 @@ const options = {
   lambdaMs: 36 * 60 * 60 * 1000,
 };
 
-const first = replayTape(tape, options);
-const second = replayTape(tape, options);
+// `replayTape` awaits the scorer, so it is async now; without the await these are promises and every line below
+// reads `undefined` off a promise rather than off a replay result.
+const first = await replayTape(tape, options);
+const second = await replayTape(tape, options);
 console.log(`tape: ${file} (${tape.steps.length} steps, session ${tape.sessionId})`);
 console.log(`cell: ${cell}   digest: ${first.digest}   replay-identical: ${first.digest === second.digest}`);
 for (const [index, record] of first.records.entries()) {

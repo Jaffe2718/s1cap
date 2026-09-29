@@ -38,7 +38,10 @@ for (const w of WINDOWS) {
   let perStepMax = 0;
   for (let i = 0; i < T; i += 1) {
     graph.addSegments([segments[i]]);
-    const step = graph.scoreNew({ windowN: w, threshold: 0 });
+    // `scoreNew` is async because a batch scorer may be a System-1 call. Awaiting it is not optional here: an
+    // un-awaited call returns a promise, so `step.scoredPairs` was undefined and the table silently printed
+    // NaN instead of the numbers the window bound is supposed to demonstrate.
+    const step = await graph.scoreNew({ windowN: w, threshold: 0 });
     perStepMax = Math.max(perStepMax, step.scoredPairs);
     cumulative.push(graph.stats().scoredPairs);
     perStep.push(step.scoredPairs);

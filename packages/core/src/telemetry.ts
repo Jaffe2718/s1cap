@@ -109,6 +109,10 @@ export interface AssemblyEvent {
   xFirst?: boolean;
   /** tokens at the front that stay byte-identical across steps of one task under this layout */
   layoutStableTokens?: number;
+  /** the first block after the stable head: where a re-selection would cut the prefix */
+  cutAfterBlock?: string;
+  /** tokens behind that cut, i.e. the cost of one re-prefill */
+  tokensAfterCut?: number;
   fallback?: string;
 }
 

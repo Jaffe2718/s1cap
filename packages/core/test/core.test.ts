@@ -314,6 +314,18 @@ test('the task joins the stable head only when it is placed first, and prefixTok
     first.budget.byBlock.anchor,
     'and the difference is the anchor, not an approximation of it',
   );
+
+  // The cut point is what makes the layout a cache decision rather than an ordering preference, so it is
+  // checked as a pair: the head is longer with x first, and what sits behind the cut is correspondingly
+  // shorter by exactly the task. A longer head that does not shorten the tail would be free money, which is
+  // the shape of a bug here.
+  assert.equal(first.cacheStability.cutAfterBlock, 'anchor');
+  assert.equal(last.cacheStability.cutAfterBlock, 'stateProxy');
+  assert.equal(
+    last.cacheStability.tokensAfterCut - first.cacheStability.tokensAfterCut,
+    first.budget.byBlock.anchor,
+    'with x first the task is in the head instead of behind the cut',
+  );
 });
 
 test('assemble: TAS off drops the state proxy and orders recall chronologically', () => {

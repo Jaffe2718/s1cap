@@ -174,6 +174,17 @@ export function assemble(input               )                 {
     cacheStability: {
       prefixTokensStable: pinnedTokens,
       layoutStableTokens: pinnedTokens + proxyTokens + (policy.xFirst ? current.tokens : 0),
+      // The cut point is where a re-selection would break the prefix, so it is the first thing after the
+      // stable head that can change. With x first that is the recalled block; with x last it is x itself, and
+      // the whole history behind it re-prefills. `decideReselect` prices that, and it cannot do so without
+      // being told where the cut is - which is the number this field exists to carry.
+      cutAfterBlock: policy.xFirst ? 'anchor' : 'stateProxy',
+      // Tokens that would re-prefill after a cut at that point. With x first, recalled+tail are the moving
+      // part; with x last, everything from the recalled block on is behind the task.
+      tokensAfterCut:
+        policy.xFirst
+          ? recalledTokens + tailTokens
+          : recalledTokens + tailTokens + current.tokens,
     },
     recall: { candidates, selected: recalled.length, bfsDepth, ...(droppedSiblings > 0 ? { droppedSiblings } : {}) },
   };
