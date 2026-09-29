@@ -175,7 +175,17 @@ export interface AssemblyResult {
     layoutStableTokens: number;
   };
   /** recall diagnostics for telemetry */
-  recall: { candidates: number; selected: number; bfsDepth: number };
+  recall: {
+    candidates: number;
+    selected: number;
+    bfsDepth: number;
+    /**
+     * Recall hits dropped because another chunk of the same passage (`chunkOf` parent) was already selected.
+     * Non-zero means the segment pool holds overlapping chunks of long events, which is normal, and the budget
+     * was spent on distinct passages instead of on the overlap between two halves of one.
+     */
+    droppedSiblings?: number;
+  };
 }
 
 export interface PlanCandidate {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { AssociationEdge, Segment, SegmentKind } from '../src/types.ts';
 import { defaultPolicy, cellPolicy } from '../src/types.ts';
-import { estimateTokens, segmentEvent } from '../src/segmenter.ts';
+import { estimateTokens, segmentEvent, splitBlocks } from '../src/segmenter.ts';
 import { AssociationGraph, decayedWeight } from '../src/assoc-graph.ts';
 import { assemble } from '../src/assembler.ts';
 import { AttemptController, normalizeProbs, orderPlans } from '../src/plan-gate.ts';
@@ -55,6 +55,92 @@ test('segmentEvent: long tool result is chunked with parent id and overlap', () 
     assert.ok(s.tokens <= 700, `chunk ${i} too large: ${s.tokens}`);
   }
   assert.ok(out.at(-1)?.text.includes('line 299'), 'last line must appear in the tail chunk');
+});
+
+test('splitBlocks: a code fence survives as one block, a list survives as one block', () => {
+  // The two cases where a line-based split destroys meaning: a diff is not two facts, and a numbered list is
+  // not meaningful from its third item.
+  const diff = ['--- a/x.ts', '+++ b/x.ts', '@@ -1,3 +1,3 @@', '-old', '+new', ' context'].join('\n');
+  const fenced = ['before', '```diff', 'line one', 'line two', '```', 'after'].join('\n');
+  const blocks = splitBlocks(fenced).map((b) => b.text);
+  assert.ok(blocks.some((b) => b.includes('```diff') && b.includes('line two')), `fence must stay whole: ${JSON.stringify(blocks)}`);
+  assert.ok(blocks.at(-1) === 'after', 'text after a fence is its own block');
+  assert.ok(diff.includes('-old'), 'sanity: the fixture is a diff');
+
+  const list = ['- alpha is the first', '- beta is the second', '- gamma is the third', '', 'after the list'].join('\n');
+  const listBlocks = splitBlocks(list).map((b) => b.text);
+  assert.ok(
+    listBlocks.some((b) => b.includes('alpha') && b.includes('beta') && b.includes('gamma')),
+    `a list must stay whole across its blank lines: ${JSON.stringify(listBlocks)}`,
+  );
+  assert.ok(listBlocks.at(-1) === 'after the list');
+});
+
+test('segmentEvent: a long prose paragraph is split on sentence boundaries, never mid-sentence', () => {
+  // The cost of a mid-sentence cut is that the two halves score differently against a query and recall can keep
+  // both, so the model pays for the overlap twice.
+  const sentence = `The build failed because the test harness timed out while waiting for the child process ${'detail '.repeat(6)}.`;
+  const text = Array.from({ length: 40 }, (_, i) => `${sentence} (${i})`).join(' ');
+  const out = segmentEvent({ id: 'pr1', sessionId: SESSION, seq: 5, kind: 'assistant', text, ts: 5 });
+  assert.ok(out.length > 1, 'expected multiple chunks');
+  for (const [i, s] of out.entries()) {
+    assert.equal(s.chunkOf, 'pr1');
+    assert.equal(s.id, `pr1#${i}`);
+    // Every chunk must end at a sentence boundary (possibly with a trailing label), never inside one.
+    const trimmed = s.text.trim();
+    assert.ok(
+      /[.!?。！?"')\]]\s*$/.test(trimmed),
+      `chunk ${i} must end on a sentence boundary, got: ...${trimmed.slice(-40)}`,
+    );
+  }
+  assert.ok(out.at(-1)?.text.includes('(39)'), 'the last sentence must be in the tail chunk');
+});
+
+test('assemble: two chunks of one passage cannot both be selected', () => {
+  // A long event is chunked with an overlap, so its chunks share a `chunkOf` parent. Recall scores them
+  // independently; without the parent check both can be selected and the overlap is paid for twice.
+  const graph = new AssociationGraph();
+  const policy = defaultPolicy();
+  policy.recall.relevanceThreshold = 0.1;
+  policy.recall.budgetRatio = 0.9;
+  policy.recall.tier1 = 'embed';
+
+  const parent = { ...seg('long1', 0, 100), kind: 'toolResult' as SegmentKind };
+  const chunks: Segment[] = [
+    { ...parent, id: 'long1#0', chunkOf: 'long1', seq: 0, text: 'first half of the passage' },
+    { ...parent, id: 'long1#1', chunkOf: 'long1', seq: 1, text: 'second half of the same passage' },
+    { ...seg('other', 2, 100), id: 'other', chunkOf: undefined, seq: 2, text: 'a different event entirely' },
+  ];
+  const current = seg('x', 9, 20, 'user');
+  graph.addSegments([...chunks, current]);
+  // recall walks outward from the seed, so the edges run x -> chunk. Direction is not cosmetic: with the edges
+  // the other way round recall finds nothing, which is exactly what a mistyped direction looks like.
+  graph.upsertEdge({ from: 'x', to: 'long1#0', w: 0.9, wTier1: 0.9, source: 's1', verifiedAt: 0, provenance: 'test' });
+  graph.upsertEdge({ from: 'x', to: 'long1#1', w: 0.8, wTier1: 0.8, source: 's1', verifiedAt: 0, provenance: 'test' });
+  graph.upsertEdge({ from: 'x', to: 'other', w: 0.7, wTier1: 0.7, source: 's1', verifiedAt: 0, provenance: 'test' });
+
+  const res = assemble({
+    graph,
+    policy,
+    pinned: [seg('p', 10, 10, 'systemPinned')],
+    tail: [],
+    current,
+    contextWindow: 2000,
+    reserveOutputTokens: 100,
+    fixedOverheadTokens: 100,
+    now: 1000,
+    lambdaMs: 1e9,
+    // Without history the min-fill fallback (mu = 0.25 of a 1620-token budget) fires on this small fixture and
+    // empties the block, which would test the fallback rather than the de-duplication.
+    history: chunks,
+  });
+
+  const selectedIds = res.layout.recalled.map((s) => s.id);
+  const fromPassage = selectedIds.filter((id) => id.startsWith('long1#'));
+  assert.equal(fromPassage.length, 1, `one passage is one selection, got ${JSON.stringify(selectedIds)}`);
+  assert.equal(res.recall.droppedSiblings, 1, 'and the dropped sibling is counted, not hidden');
+  // The distinct event is untouched: de-duplication must not look like recall losing candidates.
+  assert.ok(selectedIds.includes('other'), 'a different event is still selected');
 });
 
 // ------------------------------------------------------------- association

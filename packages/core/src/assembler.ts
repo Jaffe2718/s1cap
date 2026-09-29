@@ -59,6 +59,13 @@ export function assemble(input: AssembleInput): AssemblyResult {
   const recalledBudget = Math.min(Math.floor(total * policy.recall.budgetRatio), remaining);
 
   let excluded = new Set<string>([...pinned, ...tail, current].map((s) => s.id));
+  // A long event is split into overlapping chunks that share a `chunkOf` parent. Recall scores each chunk
+  // independently, so two halves of one paragraph can both clear the threshold and both be selected - the model
+  // would then pay twice for the same passage, with the overlap repeated verbatim. Tracking the parents keeps
+  // the first-selected chunk of a passage and drops its siblings, which is the one place where a duplicate can
+  // be removed without losing a distinct fact.
+  const selectedParents = new Set<string>();
+  let droppedSiblings = 0;
   let recalled: Segment[] = [];
   let fallback: 'recency-window' | undefined;
   let candidates = 0;
@@ -78,9 +85,15 @@ export function assemble(input: AssembleInput): AssemblyResult {
       if (excluded.has(hit.id)) continue;
       const seg = graph.getSegment(hit.id);
       if (!seg) continue;
+      const parent = seg.chunkOf ?? seg.id;
+      if (selectedParents.has(parent)) {
+        droppedSiblings += 1;
+        continue;
+      }
       if (used + seg.tokens > recalledBudget) continue;
       recalled.push(seg);
       excluded.add(seg.id);
+      selectedParents.add(parent);
       used += seg.tokens;
       bfsDepth = Math.max(bfsDepth, hit.depth);
     }
@@ -92,11 +105,22 @@ export function assemble(input: AssembleInput): AssemblyResult {
       // The fallback is a fresh recency window: only pinned/tail/anchor stay excluded.
       excluded = new Set<string>([...pinned, ...tail, current].map((s) => s.id));
       const history = [...(input.history ?? [])].sort((a, b) => a.seq - b.seq);
+      // The fallback discards the recalled block entirely, so the drops counted against that discarded attempt
+      // are not drops in the result. Resetting here keeps the number an account of the layout that was actually
+      // emitted, rather than of every layout that was tried and thrown away.
+      droppedSiblings = 0;
+      selectedParents.clear();
       for (const seg of history) {
         if (excluded.has(seg.id)) continue;
+        const parent = seg.chunkOf ?? seg.id;
+        if (selectedParents.has(parent)) {
+          droppedSiblings += 1;
+          continue;
+        }
         if (used + seg.tokens > recalledBudget) continue;
         recalled.push(seg);
         excluded.add(seg.id);
+        selectedParents.add(parent);
         used += seg.tokens;
       }
     }
@@ -151,7 +175,7 @@ export function assemble(input: AssembleInput): AssemblyResult {
       prefixTokensStable: pinnedTokens,
       layoutStableTokens: pinnedTokens + proxyTokens + (policy.xFirst ? current.tokens : 0),
     },
-    recall: { candidates, selected: recalled.length, bfsDepth },
+    recall: { candidates, selected: recalled.length, bfsDepth, ...(droppedSiblings > 0 ? { droppedSiblings } : {}) },
   };
   return result;
 }
