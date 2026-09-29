@@ -550,6 +550,24 @@ today and a store the plugin owns; the panel keeps its fields and validation, an
 namespace declared (via `dsh-storage-domain`) and the path-addressed `ops` shape. Until that lands, the panel shows
 the two fields and their validation while `/s1-tune` is the working path; the panel says so in its message instead
 of implying a save. Panel-side tests and the host-side parser: 107/107 green.
+### Round 28: both write channels share one missing prerequisite
+
+`CredentialProvider` turned out to be the credentials **Service itself** (`super(ctx, "credentials")`), not a base
+class for plugins — so the earlier "register a provider for the s1cap scope" plan is wrong. What actually admits a
+ref is a **schema declaration**: the shipped LLM key plugin declares `apiKeyEnv: z.string().role("credential-ref")`
+and registers that schema with its provider registration, which is why its key is writable and `s1cap/tuning` is
+not.
+
+That single prerequisite — a declared domain carrying the field roles — is what both remaining channels need:
+`credentials.set` (admits refs some schema declared) and `settings.mutate` (admits declared namespaces). **Next
+step:** read `dsh-storage-domain`'s declaration API (`--members`, then `--grep` for `domain`/`declare`/`schema`),
+declare an `s1cap` domain whose schema carries `recall.depth` (integer > 0) and `recall.tau` (0..1) — the same two
+rules the panel and `parseTuning` already enforce, so the boundary validates them for free — and then either write
+path becomes available to the panel button.
+
+**What works today, without that domain:** the panel's two fields with their validation, and `/s1-tune d r` which
+applies the values immediately and persists them (proven: `read == effective` in a real round). The panel button is
+the only thing still blocked, and it says so in its own message.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
