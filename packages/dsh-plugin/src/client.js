@@ -216,20 +216,26 @@ window.__ModuleLoader__.load({
               const settings = ctx.remote.settings;
               let probe = 'no remote.settings';
               if (settings && typeof settings.mutate === 'function') {
+                // Probed at runtime: a refused shape has no side effect, so this is safe to run from a panel. The
+                // gateway's own hint was "path-addressed operations", and the schema code nearby builds
+                // { path: [...], set: ... } - so array paths and a `set` flag are candidates, not just dotted keys.
                 const shapes = [
-                  ['set-path', [{ op: 'set', path: 'recall.depth', value: d }, { op: 'set', path: 'recall.tau', value: r }]],
-                  ['set-op', [{ set: { 'recall.depth': d, 'recall.tau': r } }]],
-                  ['merge', [{ merge: { recall: { depth: d, tau: r } } }]],
+                  ['arr-set-flag', [{ path: ['recall', 'depth'], set: d }, { path: ['recall', 'releTao'], set: r }, { path: ['recall', 'window'], set: w }]],
+                  ['arr-op-set', [{ op: 'set', path: ['recall', 'depth'], value: d }]],
+                  ['dot-op-set', [{ op: 'set', path: 'recall.depth', value: d }]],
+                  ['patch', [{ op: 'replace', path: '/recall/depth', value: d }]],
                 ];
                 const results = [];
+                for (const nsCandidate of ['s1cap', 'dsh-s1cap']) {
                 for (const [label, ops] of shapes) {
                   try {
-                    const answer = await settings.mutate('s1cap', ops, undefined);
-                    results.push(label + ':' + JSON.stringify(answer));
+                    const answer = await settings.mutate(nsCandidate, ops, undefined);
+                    results.push(nsCandidate + '/' + label + ':' + JSON.stringify(answer));
                     if (answer && answer.ok !== false) break;
                   } catch (err) {
-                    results.push(label + ':threw ' + String(err));
+                    results.push(nsCandidate + '/' + label + ':threw ' + String(err));
                   }
+                }
                 }
                 probe = results.join(' | ');
               }

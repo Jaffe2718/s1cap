@@ -779,6 +779,30 @@ the desktop profile), or the web sandbox driven through a browser where tool cal
 `scripts/window-curve.mjs` remains the reproducible evidence for the parameter's bound - it shows the tail step
 costing exactly w (64/256/1024) against 4095 for full-history scoring at T = 4096 - and it is labelled as the model
 it is, not as a live measurement.
+### Round 38: the `settings/mutate` ops shape is found - `[{ op: 'set', path: [...], value }]`
+
+Probing the gateway from the panel with four candidate shapes and two namespace candidates produced one hit, and the
+distinction it draws is the whole answer:
+
+    s1cap/arr-op-set   -> {"ok":false,"error":{"code":"settings/rejected","details":{"ns":"s1cap"}}}
+    s1cap/arr-set-flag -> {"ok":false,"error":{"code":"gateway/input-invalid","details":{"field":"ops"}}}
+    s1cap/dot-op-set   -> gateway/input-invalid, field "ops"
+    s1cap/patch        -> gateway/input-invalid, field "ops"
+
+Only `[{ op: 'set', path: ['recall', 'depth'], value: d }]` got **past** ops validation: it is no longer rejected as
+a malformed payload but as `settings/rejected` with `details.ns` - a decision taken one layer further in, about the
+**namespace**, not the shape. So:
+
+- **the ops format is `[{ op: 'set', path: [<path segments>], value }]`** - an array of ops, each carrying an `op`
+  name, an **array** path and a value. Dotted paths, `{ path, set }` flags and JSON-pointer `replace` are all wrong;
+- **`s1cap` is the right namespace name**, and the only thing missing is that it is not a *declared* settings
+  namespace - which is the Config/schema declaration already identified as the last piece;
+- once that namespace exists, the panel can write through `remote.settings.mutate` with exactly this shape, so the
+  Save button no longer depends on the shipped form's internals.
+
+The probe stays in the panel (it is additive and reports the gateway verbatim rather than claiming a save), and the
+refusal messages it prints are now self-explanatory: credentials for a ref no provider declared, then settings for a
+namespace no plugin declared.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
