@@ -42,6 +42,8 @@ window.__ModuleLoader__.load({
     const DEFAULT_DEPTH = 2;
     const DEFAULT_TAU = 0.55;
     const DEFAULT_WINDOW = 1024;
+    /** matches `defaultPolicy().xFirst`, so an unreachable host shows the layout that is actually in effect */
+    const DEFAULT_XFIRST = true;
 
     const name = 'dsh-s1cap';
     const inject = ['slots', 'remote', 'remote.credentials', 'remote.settings'];
@@ -73,6 +75,7 @@ window.__ModuleLoader__.load({
         const [depth, setDepth] = React.useState('');
         const [tau, setTau] = React.useState('');
         const [win, setWin] = React.useState('');
+        const [xFirst, setXFirst] = React.useState(DEFAULT_XFIRST);
 
         /**
          * Read one stored string. The store declares several read entry points and the host probes them the same
@@ -115,6 +118,7 @@ window.__ModuleLoader__.load({
             let nextDepth = String(DEFAULT_DEPTH);
             let nextTau = String(DEFAULT_TAU);
             let nextWin = String(DEFAULT_WINDOW);
+            let nextXFirst = DEFAULT_XFIRST;
             let note = '';
             let answered = false;
             try {
@@ -126,6 +130,7 @@ window.__ModuleLoader__.load({
                 nextTau = String(eff.relevanceThreshold);
               }
               if (Number.isInteger(eff.window) && eff.window >= 64) nextWin = String(eff.window);
+              if (typeof eff.xFirst === 'boolean') nextXFirst = eff.xFirst;
               answered = true;
             } catch {
               note = 'the tuning route did not answer; showing the built-in defaults';
@@ -140,12 +145,16 @@ window.__ModuleLoader__.load({
                 if (Number.isInteger(d) && d > 0) nextDepth = String(d);
                 if (Number.isFinite(r) && r >= 0 && r <= 1) nextTau = String(r);
                 if (Number.isInteger(w) && w >= 64) nextWin = String(w);
+                const legacySwitch = String(parts[3] ?? '').toLowerCase();
+                if (['1', 'on', 'true', 'yes'].includes(legacySwitch)) nextXFirst = true;
+                else if (['0', 'off', 'false', 'no'].includes(legacySwitch)) nextXFirst = false;
                 note = 'read from the legacy credential entry; the tuning route is unreachable';
               }
             }
             setDepth(nextDepth);
             setTau(nextTau);
             setWin(nextWin);
+            setXFirst(nextXFirst);
             setState({ phase: 'ready', configured: key !== undefined, message: note });
           } catch (err) {
             setState({ phase: 'ready', configured: false, message: 'could not read the credential store: ' + String(err) });
@@ -239,7 +248,7 @@ window.__ModuleLoader__.load({
             const response = await fetch('/s1cap-7340/tuning', {
               method: 'PUT',
               headers: { 'content-type': 'text/plain' },
-              body: d + ' ' + r + ' ' + w,
+              body: d + ' ' + r + ' ' + w + ' xFirst=' + (xFirst ? 'on' : 'off'),
             });
             const answer = await response.json();
             if (!response.ok || answer.ok !== true) {
@@ -251,16 +260,18 @@ window.__ModuleLoader__.load({
             if (Number.isInteger(eff.depth) && eff.depth > 0) setDepth(String(eff.depth));
             if (Number.isFinite(eff.relevanceThreshold)) setTau(String(eff.relevanceThreshold));
             if (Number.isInteger(eff.window) && eff.window >= 64) setWin(String(eff.window));
+            if (typeof eff.xFirst === 'boolean') setXFirst(eff.xFirst);
             setState((s) => ({
               ...s,
               message:
                 'saved: d=' + eff.depth + ' r=' + eff.relevanceThreshold + ' w=' + eff.window +
+                  ' xFirst=' + (eff.xFirst ? 'on' : 'off') +
                   (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')'),
             }));
           } catch (err) {
             setState((s) => ({ ...s, message: 'tuning save failed: ' + String(err) }));
           }
-        }, [depth, tau, win]);
+        }, [depth, tau, win, xFirst]);
 
         const clear = React.useCallback(async () => {
           try {
@@ -281,8 +292,8 @@ window.__ModuleLoader__.load({
             'p',
             { style: S.intro },
             'S1CAP puts a cheap System-1 decision model in charge of which context the agent sees and in which ' +
-              'order its own plans run. This panel holds the credential for the cloud System-1 backend (Jev) and the ' +
-              'two recall knobs the ablation varies.',
+              'order its own plans run. This panel holds the credential for the cloud System-1 backend (Jev), the ' +
+              'recall knobs the ablation varies, and the layout switch.',
           ),
           e(
             'div',
@@ -316,8 +327,9 @@ window.__ModuleLoader__.load({
             'p',
             { style: S.note },
             'BFS depth d bounds how many hops recall may walk the association graph (integer, d > 0). The relevance ' +
-              'threshold r is the edge weight a segment must reach to be recalled (0 ≤ r ≤ 1). The host reads both at ' +
-              'session start and /s1 reports the effective values.',
+              'threshold r is the edge weight a segment must reach to be recalled (0 ≤ r ≤ 1). The window w is how many ' +
+              'recent segments each new segment is scored against, and it is what bounds the System-1 cost of scoring. ' +
+              'The host reads all of them at session start and /s1 reports the effective values.',
           ),
           e(
             'div',
@@ -357,6 +369,32 @@ window.__ModuleLoader__.load({
               onChange: (event) => setWin(event.target.value),
             }),
             e('button', { style: S.button, type: 'button', onClick: () => void saveTuning() }, 'Save tuning'),
+          ),
+          e('h3', { style: S.subtitle }, 'Layout'),
+          e(
+            'div',
+            { style: S.row },
+            e('input', {
+              id: 's1cap-xfirst',
+              type: 'checkbox',
+              checked: xFirst,
+              onChange: (event) => setXFirst(event.target.checked),
+            }),
+            e(
+              'label',
+              { style: S.label, htmlFor: 's1cap-xfirst' },
+              'x-first: put the current task before recalled history',
+            ),
+          ),
+          e(
+            'p',
+            { style: S.note },
+            xFirst
+              ? 'On — [pinned | T | x | recalled | tail]. The task is read first and the evidence follows it, the ' +
+                  '"state then information" order; x also joins the byte-stable head, which holds while the task does ' +
+                  'not change.'
+              : 'Off — [pinned | T | recalled | tail | x]. History sits immediately before the task and x stays last, ' +
+                  'so everything above x is history and only the pinned prefix is stable.',
           ),
           e('p', { style: S.note }, state.message),
           e(

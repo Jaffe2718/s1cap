@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { DEFAULT_TELEMETRY, apply, resolvePluginConfig } from '../src/index.ts';
 import type { PluginContext } from '../src/index.ts';
+import { parseTuning, parseTuningArgs } from '../src/credentials.ts';
 
 interface Harness {
   ctx: PluginContext;
@@ -34,6 +35,27 @@ function withEmptyHome<T>(body: () => T): T {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test('the layout switch survives both wire formats, and a typo never flips a layout', () => {
+  // The credential string is the four-field form the host writes; the command line is what a human types.
+  assert.equal(parseTuning('2 0.55 1024 on').xFirst, true);
+  assert.equal(parseTuning('2 0.55 1024 off').xFirst, false);
+  assert.equal(parseTuning('2 0.55 1024 1').xFirst, true);
+  assert.equal(parseTuning('2 0.55 1024 0').xFirst, false);
+  assert.equal(parseTuning('2 0.55 1024').xFirst, undefined, 'absent means: leave the policy default alone');
+
+  // A misspelling must be dropped rather than guessed at. `off` and `on` are one character apart, so a guess
+  // here would silently reorder the prompt, which is the one thing an ablation must never do by accident.
+  assert.equal(parseTuning('2 0.55 1024 of').xFirst, undefined);
+  assert.equal(parseTuning('2 0.55 1024 maybe').xFirst, undefined);
+
+  assert.equal(parseTuningArgs('xFirst=on').xFirst, true);
+  assert.equal(parseTuningArgs('xf=off').xFirst, false);
+  assert.equal(parseTuningArgs('3 0.7 512 off').xFirst, false, 'fourth positional is the switch');
+  assert.equal(parseTuningArgs('xFirst=perhaps').xFirst, undefined);
+  // A dropped switch must not take the other three fields down with it.
+  assert.deepEqual(parseTuningArgs('3 0.7 512 of'), { depth: 3, relevanceThreshold: 0.7, window: 512 });
+});
 
 function harness(): Harness {
   const logs: string[] = [];
@@ -248,4 +270,32 @@ test('activation can never throw: a hostile context leaves the plugin inert and 
     },
   } as unknown as PluginContext;
   assert.doesNotThrow(() => apply(brokenLogger, { enabled: true }));
+});
+
+test('a stored xFirst=false reaches the config: the write, the read and the apply agree', () => {
+  // This is the test whose absence cost a live debugging round. `parseTuning` handling `off` was verified, the
+  // route echoed `xFirst: false` back, the file on disk held `false` - and the layout still ran on its default,
+  // because the reader between the file and the config never looked at the field at all. Asserting the parser
+  // alone could not see that, so this drives the real path: write the file, activate, read the config.
+  withEmptyHome(() => {
+    const home = process.env['DSH_HOME'];
+    assert.ok(home !== undefined);
+    const file = join(home, '.s1cap', 'tuning.json');
+    mkdirSync(join(home, '.s1cap'), { recursive: true });
+    writeFileSync(file, JSON.stringify({ depth: 5, relevanceThreshold: 0.7, window: 1600, xFirst: false }), 'utf8');
+
+    const h = harness();
+    apply(h.ctx, { enabled: true, s1: { provider: 'none' } });
+
+    const status = JSON.parse(JSON.stringify(h.commands.get('s1')?.({}) ?? {})) as {
+      xFirst?: boolean;
+      recall?: { depth?: number; window?: number };
+      tuning?: { effective?: { xFirst?: boolean } };
+    };
+    // The status command reports the live config object the observer holds, so this is the value assembly sees.
+    assert.equal(status.xFirst, false, 'a stored false must override the default true');
+    assert.equal(status.recall?.depth, 5, 'and the numeric knobs still arrive alongside it');
+    assert.equal(status.recall?.window, 1600);
+    assert.equal(status.tuning?.effective?.xFirst, false, 'and the route reports the same value it applied');
+  });
 });

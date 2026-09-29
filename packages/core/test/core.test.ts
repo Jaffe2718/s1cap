@@ -152,6 +152,84 @@ test('assemble (C4/TAS on): recalled block ordered by weight, x last, budget acc
   assert.equal(res.recall.selected, 2);
 });
 
+test('xFirst places the task before history; the default places it last', () => {
+  const build = (xFirst: boolean) => {
+    const fx = buildAssemblerFixture();
+    const policy = defaultPolicy();
+    policy.recall.relevanceThreshold = 0.5;
+    policy.recall.budgetRatio = 0.5;
+    policy.xFirst = xFirst;
+    return assemble({
+      graph: fx.graph,
+      policy,
+      pinned: fx.pinned,
+      tail: fx.tail,
+      current: fx.current,
+      stateProxy: 'task: fix the failing test',
+      contextWindow: 1000,
+      reserveOutputTokens: 100,
+      fixedOverheadTokens: 100,
+      now: 1000,
+      lambdaMs: 1e9,
+      history: fx.history,
+    });
+  };
+
+  // The order is the deliverable, so it is asserted as a sequence rather than inferred from field order.
+  assert.deepEqual(build(false).layout.order, ['pinned', 'stateProxy', 'recalled', 'tail', 'anchor']);
+  assert.deepEqual(build(true).layout.order, ['pinned', 'stateProxy', 'anchor', 'recalled', 'tail']);
+
+  // Both orders carry the same blocks and the same budget: only the position of x moves, so a difference in
+  // cost between the two would mean the branch had changed something it should not have.
+  const last = build(false);
+  const first = build(true);
+  assert.equal(first.budget.used, last.budget.used, 'the layout is free');
+  assert.deepEqual(
+    { ...first.budget.byBlock },
+    { ...last.budget.byBlock },
+    'the same blocks are accounted either way',
+  );
+  assert.deepEqual(first.layout.recalled.map((s) => s.id), last.layout.recalled.map((s) => s.id));
+});
+
+test('the task joins the stable head only when it is placed first, and prefixTokensStable never moves', () => {
+  const build = (xFirst: boolean) => {
+    const fx = buildAssemblerFixture();
+    const policy = defaultPolicy();
+    policy.recall.relevanceThreshold = 0.5;
+    policy.recall.budgetRatio = 0.5;
+    policy.xFirst = xFirst;
+    return assemble({
+      graph: fx.graph,
+      policy,
+      pinned: fx.pinned,
+      tail: fx.tail,
+      current: fx.current,
+      stateProxy: 'task: fix the failing test',
+      contextWindow: 1000,
+      reserveOutputTokens: 100,
+      fixedOverheadTokens: 100,
+      now: 1000,
+      lambdaMs: 1e9,
+      history: fx.history,
+    });
+  };
+
+  const last = build(false);
+  const first = build(true);
+  // The N1 acceptance criterion is recorded in STATUS.md as `prefixTokensStable === blocks.pinned`, so it must
+  // keep meaning exactly that no matter where x goes.
+  assert.equal(last.cacheStability.prefixTokensStable, last.budget.byBlock.pinned);
+  assert.equal(first.cacheStability.prefixTokensStable, first.budget.byBlock.pinned);
+  assert.equal(first.cacheStability.layoutStableTokens > last.cacheStability.layoutStableTokens, true,
+    'x first makes the stable head longer by exactly the task');
+  assert.equal(
+    first.cacheStability.layoutStableTokens - last.cacheStability.layoutStableTokens,
+    first.budget.byBlock.anchor,
+    'and the difference is the anchor, not an approximation of it',
+  );
+});
+
 test('assemble: TAS off drops the state proxy and orders recall chronologically', () => {
   const fx = buildAssemblerFixture();
   const policy = cellPolicy('C3'); // selection on, TAS off

@@ -341,7 +341,7 @@ const TUNING_ROUTE = '/s1cap-7340';
 function readTuningFile(): Tuning {
   try {
     const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
-    const parsed = JSON.parse(raw) as { depth?: unknown; relevanceThreshold?: unknown; window?: unknown };
+    const parsed = JSON.parse(raw) as { depth?: unknown; relevanceThreshold?: unknown; window?: unknown; xFirst?: unknown };
     const out: Tuning = {};
     if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth > 0) out.depth = parsed.depth;
     // A file written before the rename still carries the old key: read either, so an upgrade does not silently
@@ -349,6 +349,11 @@ function readTuningFile(): Tuning {
     const threshold = typeof parsed.relevanceThreshold === 'number' ? parsed.relevanceThreshold : (parsed as { releTao?: unknown }).releTao;
     if (typeof threshold === 'number' && threshold >= 0 && threshold <= 1) out.relevanceThreshold = threshold;
     if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 64) out.window = parsed.window;
+    // `false` is a real value here, not an absence, so this tests the type rather than truthiness. The first
+    // version omitted the field from this reader entirely, so the panel wrote it, the route echoed it back from
+    // the in-memory copy, and the layout stayed on its default - a stored setting that looked saved everywhere
+    // except in the prompt it was supposed to change.
+    if (typeof parsed.xFirst === 'boolean') out.xFirst = parsed.xFirst;
     return out;
   } catch {
     return {};
@@ -745,10 +750,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
       if (fromFile.relevanceThreshold !== undefined) appliedTuning.relevanceThreshold = fromFile.relevanceThreshold;
       if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
+      if (fromFile.xFirst !== undefined) appliedTuning.xFirst = fromFile.xFirst;
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.relevanceThreshold !== undefined) config.recall.relevanceThreshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window } }) + '\n');
+      if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window, xFirst: config.xFirst } }) + '\n');
       await primeSystemPrompt({
         service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
         observer,
@@ -797,21 +804,36 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
    * line and the button cannot drift apart in what they accept or what they report.
  */
   const applyTuning = (parsed: Tuning): { ok: boolean; reason?: string; effective?: Tuning; persisted?: boolean; persistError?: string } => {
-    if (parsed.depth === undefined && parsed.relevanceThreshold === undefined) {
-      return { ok: false, reason: 'nothing to set: depth d must be an integer > 0 and threshold r between 0 and 1' };
+    if (
+      parsed.depth === undefined &&
+      parsed.relevanceThreshold === undefined &&
+      parsed.window === undefined &&
+      parsed.xFirst === undefined
+    ) {
+      return {
+        ok: false,
+        reason:
+          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, xFirst on/off',
+      };
     }
     appliedTuning = { ...appliedTuning, ...parsed };
     if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
     if (parsed.relevanceThreshold !== undefined) config.recall.relevanceThreshold = parsed.relevanceThreshold;
     if (parsed.window !== undefined) config.recall.window = parsed.window;
+    if (parsed.xFirst !== undefined) config.xFirst = parsed.xFirst;
     const persist = writeTuningFile(appliedTuning);
     const persisted = persist.ok;
     ctx.logger?.info?.(
-      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.relevanceThreshold} window=${config.recall.window}${persisted ? '' : ' (not persisted: file write failed)'}`,
+      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.relevanceThreshold} window=${config.recall.window} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
     );
     return {
       ok: true,
-      effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window },
+      effective: {
+        depth: config.recall.depth,
+        relevanceThreshold: config.recall.relevanceThreshold,
+        window: config.recall.window,
+        xFirst: config.xFirst,
+      },
       persisted,
       ...(persist.ok ? {} : { persistError: persist.error }),
     };
@@ -819,8 +841,8 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   registerCommands(ctx, [
     {
       name: 's1-tune',
-      description: 'S1CAP: set the three recall knobs — BFS depth d (integer > 0) and relevance threshold r (0..1)',
-      input: { hint: 'd r w   (e.g. "3 0.7 512", or "d=3", "r=0.7", "w=512")' },
+      description: 'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), xFirst on/off',
+      input: { hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "xFirst=off")' },
       handler: ({ rawInput }) => applyTuning(parseTuningArgs(rawInput)),
     },
     {
@@ -837,10 +859,16 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           recall: config.recall,
           tuning: {
             stored: appliedTuning,
-            effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold },
+            effective: {
+              depth: config.recall.depth,
+              relevanceThreshold: config.recall.relevanceThreshold,
+              window: config.recall.window,
+              xFirst: config.xFirst,
+            },
             keySource: credentialSource,
           },
           tail: config.tail,
+          xFirst: config.xFirst,
           planGate: config.planGate,
           s1: {
             provider: backend.provider,
@@ -929,6 +957,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     if (storedNow.depth !== undefined) config.recall.depth = storedNow.depth;
     if (storedNow.relevanceThreshold !== undefined) config.recall.relevanceThreshold = storedNow.relevanceThreshold;
     if (storedNow.window !== undefined) config.recall.window = storedNow.window;
+    if (storedNow.xFirst !== undefined) config.xFirst = storedNow.xFirst;
   }
 
   const webServer = findService<{ register: (spec: unknown) => void }>(ctx, 'webServer');
@@ -944,7 +973,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
               sendJson(res, 200, {
                 ok: true,
                 stored: { ...readTuningFile(), ...appliedTuning },
-                effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window },
+                effective: {
+                  depth: config.recall.depth,
+                  relevanceThreshold: config.recall.relevanceThreshold,
+                  window: config.recall.window,
+                  xFirst: config.xFirst,
+                },
               });
               return;
             }

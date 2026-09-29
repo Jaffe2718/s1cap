@@ -97,6 +97,18 @@ export interface AssemblyEvent {
   budgetTotal: number;
   blocks: Record<string, number>;
   prefixTokensStable: number;
+  /**
+   * The block order this assembly was built in, e.g. `['pinned','stateProxy','anchor','recalled','tail']`.
+   *
+   * Recorded because the layout is an experimental condition: two cells can differ only in where x sits, and a
+   * reader of the control plane has to be able to tell which one produced a record without inferring it from
+   * configuration that may have changed since.
+   */
+  layoutOrder?: string[];
+  /** `policy.xFirst` as applied to this assembly */
+  xFirst?: boolean;
+  /** tokens at the front that stay byte-identical across steps of one task under this layout */
+  layoutStableTokens?: number;
   fallback?: string;
 }
 

@@ -106,6 +106,19 @@ export const CORE_SCHEMA_VERSION = 1         ;
                              
     
                       
+     
+                                                                
+    
+                                                                                                               
+                                                                                                     
+                                                                                                            
+                                                                                                         
+    
+                                                                                                                
+                                                                                                              
+                                                                                       
+     
+                  
              
                 
                                    
@@ -135,7 +148,13 @@ export const CORE_SCHEMA_VERSION = 1         ;
                         
                         
                     
-                                             
+                                                                     
+                    
+       
+                                                                                                              
+                                                                                                           
+                                                                           
+       
                     
     
            
@@ -145,7 +164,16 @@ export const CORE_SCHEMA_VERSION = 1         ;
     
                               
                                                                             
-                                                 
+                   
+                                                                                       
+                               
+       
+                                                                                                             
+                                                                                                             
+                                                                                    
+       
+                               
+    
                                          
                                                                      
  
@@ -191,6 +219,7 @@ export function defaultPolicy()                 {
       minRecalledShare: 0.25,
     },
     tail: { k: 3 },
+    xFirst: true,
     planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
     s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', timeoutMs: 2500, questionsPerCall: 20 },
   };

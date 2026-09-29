@@ -106,6 +106,19 @@ export interface AssemblyPolicy {
     minRecalledShare: number;
   };
   tail: { k: number };
+  /**
+   * Where the current task x sits relative to recalled history.
+   *
+   * `false` is the layout in docs/FORMULAS.md §3.4: `[P | T | recalled | tail | x]`, the task last and history
+   * immediately before it. `true` puts the task first, `[P | T | x | recalled | tail]`, which is the
+   * "trace as state" arrangement - give the model the state it is reasoning over, then the evidence for it.
+   * The distinction is the whole of §2 in the paper: state-then-information, not information-then-state.
+   *
+   * The cost is cache. With x last, everything above it is history and only changes when the history does; with
+   * x first, the prefix up to x stays stable and everything after it is the part that moves, so the saving is
+   * smaller but the model's first read is the task rather than whatever was said last.
+   */
+  xFirst: boolean;
   planGate: {
     on: boolean;
     /** candidate plans m (<= 3) */
@@ -135,8 +148,14 @@ export interface AssemblyResult {
     stateProxy?: string;
     recalled: Segment[];
     tail: Segment[];
-    /** current user input x — always last */
+    /** current user input x — placed by `xFirst`, not always last */
     anchor: Segment;
+    /**
+     * The actual block order this result was built in, so the layout is observable rather than implied by the
+     * order of the fields above. `['pinned', 'stateProxy', 'anchor', 'recalled', 'tail']` with xFirst, and
+     * `['pinned', 'stateProxy', 'recalled', 'tail', 'anchor']` without it.
+     */
+    order: string[];
   };
   budget: {
     total: number;
@@ -145,7 +164,16 @@ export interface AssemblyResult {
   };
   fallback?: 'recency-window';
   /** tokens of the cache-stable prefix (pinned block), for H3 accounting */
-  cacheStability: { prefixTokensStable: number };
+  cacheStability: {
+    /** equals `blocks.pinned`; the N1 acceptance criterion, so its meaning is fixed */
+    prefixTokensStable: number;
+    /**
+     * Tokens at the front of the prompt that stay byte-identical across steps of one task, given the layout:
+     * pinned + T, plus x when `xFirst` is on. Add-only, because `prefixTokensStable` already means something
+     * narrower and redefining it would silently break the recorded acceptance test.
+     */
+    layoutStableTokens: number;
+  };
   /** recall diagnostics for telemetry */
   recall: { candidates: number; selected: number; bfsDepth: number };
 }
@@ -191,6 +219,7 @@ export function defaultPolicy(): AssemblyPolicy {
       minRecalledShare: 0.25,
     },
     tail: { k: 3 },
+    xFirst: true,
     planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
     s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', timeoutMs: 2500, questionsPerCall: 20 },
   };

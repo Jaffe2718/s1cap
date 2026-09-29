@@ -207,6 +207,9 @@ export async function observeStep(
     budgetTotal: result.budget.total,
     blocks: result.budget.byBlock,
     prefixTokensStable: result.cacheStability.prefixTokensStable,
+    layoutOrder: result.layout.order,
+    xFirst: input.policy.xFirst,
+    layoutStableTokens: result.cacheStability.layoutStableTokens,
     ...(result.fallback !== undefined ? { fallback: result.fallback } : {}),
   };
 

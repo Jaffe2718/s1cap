@@ -64,7 +64,7 @@ export const ENUM_RULES                                                         
   { path: 's1.provider', values: ['jev', 'laya-serve', 'edgejev', 'kev', 'none'] },
 ];
 
-export const BOOLEAN_PATHS                    = ['tas.on', 'planGate.on'];
+export const BOOLEAN_PATHS                    = ['tas.on', 'planGate.on', 'xFirst'];
 
 /**
  * Fixed by design, not configuration: the harness owns termination, and association-graph

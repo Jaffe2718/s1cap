@@ -64,7 +64,7 @@ export const ENUM_RULES: readonly { path: string; values: readonly string[] }[] 
   { path: 's1.provider', values: ['jev', 'laya-serve', 'edgejev', 'kev', 'none'] },
 ];
 
-export const BOOLEAN_PATHS: readonly string[] = ['tas.on', 'planGate.on'];
+export const BOOLEAN_PATHS: readonly string[] = ['tas.on', 'planGate.on', 'xFirst'];
 
 /**
  * Fixed by design, not configuration: the harness owns termination, and association-graph

@@ -107,6 +107,22 @@ export interface Tuning {
   relevanceThreshold?: number;
   /** S1 scoring window w (recall.window): integer >= 64, default 1024, no upper bound */
   window?: number;
+  /**
+   * `xFirst` (policy.xFirst): place the current task before recalled history rather than after it.
+   *
+   * A layout switch, not a speed knob, but it lives here because this panel is the surface the researcher
+   * actually has; the value is a boolean so `true`/`false`, `on`/`off` and `1`/`0` are all accepted.
+   */
+  xFirst?: boolean;
+}
+
+/** Read a boolean tuning token. Returns undefined for anything unrecognized, so a typo never flips a layout. */
+function parseSwitch(token: string | undefined): boolean | undefined {
+  if (token === undefined) return undefined;
+  const t = token.trim().toLowerCase();
+  if (t === '1' || t === 'on' || t === 'true' || t === 'yes') return true;
+  if (t === '0' || t === 'off' || t === 'false' || t === 'no') return false;
+  return undefined;
 }
 
 /**
@@ -126,6 +142,8 @@ export function parseTuning(value: string | undefined): Tuning {
   if (Number.isFinite(relevanceThreshold) && relevanceThreshold >= 0 && relevanceThreshold <= 1) out.relevanceThreshold = relevanceThreshold;
   const window = Number(parts[2]);
   if (Number.isInteger(window) && window >= 64) out.window = window;
+  const xFirst = parseSwitch(parts[3]);
+  if (xFirst !== undefined) out.xFirst = xFirst;
   return out;
 }
 /**
@@ -147,17 +165,23 @@ export function parseTuningArgs(input: string | undefined): Tuning {
     }
     if (key === 'relevanceThreshold' || key === 'r') {
       if (Number.isFinite(value) && value >= 0 && value <= 1) out.relevanceThreshold = value;
+      return;
+    }
+    if (key === 'xFirst' || key === 'xf') {
+      const flag = parseSwitch(raw);
+      if (flag !== undefined) out.xFirst = flag;
     }
   };
   const positional: string[] = [];
   for (const token of input.trim().split(/\s+/)) {
     if (token === '') continue;
-    const match = /^(depth|d|relevanceThreshold|r|window|w)\s*=\s*(\S+)$/.exec(token);
+    const match = /^(depth|d|relevanceThreshold|r|window|w|xFirst|xf)\s*=\s*(\S+)$/.exec(token);
     if (match && match[1] !== undefined && match[2] !== undefined) assign(match[1], match[2]);
     else positional.push(token);
   }
   if (positional[0] !== undefined) assign('depth', positional[0]);
   if (positional[1] !== undefined) assign('relevanceThreshold', positional[1]);
   if (positional[2] !== undefined) assign('window', positional[2]);
+  if (positional[3] !== undefined) assign('xFirst', positional[3]);
   return out;
 }

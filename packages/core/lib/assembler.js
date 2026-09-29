@@ -1,6 +1,11 @@
 /**
  * ASSEMBLER — budgeted recall + Trace-as-State layout.
- * Layout: [pinned | T | recalled | tail | x]  (x always last; docs/FORMULAS.md §3.4)
+ * Two layouts, selected by `policy.xFirst`:
+ *   - false: `[pinned | T | recalled | tail | x]` — the task last, the arrangement in docs/FORMULAS.md §3.4.
+ *   - true:  `[pinned | T | x | recalled | tail]` — the task first, "state then information" (§2 of the paper).
+ * The two differ in more than order: with x last, the stable prefix ends at T and the whole tail of the prompt
+ * is history, so a change in x invalidates everything after it; with x first, the prefix still ends at T, and
+ * x itself becomes part of the byte-stable head as long as the task has not changed.
  */
                                                                           
 import { AssociationGraph } from './assoc-graph.js';
@@ -105,6 +110,17 @@ export function assemble(input               )                 {
   }
 
   const recalledTokens = totalTokens(recalled);
+  // The block order is a real branch, not a cosmetic one, so it is reported in the result. With TAS off there
+  // is no T block and the order has no state slot in it - the figure's T is simply absent, and saying
+  // otherwise would make the record disagree with the layout it describes.
+  const order = policy.tas.on
+    ? policy.xFirst
+      ? ['pinned', 'stateProxy', 'anchor', 'recalled', 'tail']
+      : ['pinned', 'stateProxy', 'recalled', 'tail', 'anchor']
+    : policy.xFirst
+      ? ['pinned', 'anchor', 'recalled', 'tail']
+      : ['pinned', 'recalled', 'tail', 'anchor'];
+
   const result                 = {
     layout: {
       pinned: [...pinned],
@@ -112,6 +128,7 @@ export function assemble(input               )                 {
       recalled,
       tail: [...tail],
       anchor: current,
+      order,
     },
     budget: {
       total,
@@ -125,7 +142,15 @@ export function assemble(input               )                 {
       },
     },
     ...(fallback !== undefined ? { fallback } : {}),
-    cacheStability: { prefixTokensStable: pinnedTokens },
+    // `prefixTokensStable` keeps its established meaning - it equals `blocks.pinned`, which is the N1
+    // acceptance criterion recorded in STATUS.md - so it is deliberately not reused for the layout question.
+    // What the layout changes is how much of the *front* of the prompt survives a step unchanged, and that is
+    // reported separately: both orders keep the pinned prefix and T stable, and only xFirst can add x to that
+    // head, which it may because the task changes per task (`cache.reselectPolicy: 'perTask'`), not per step.
+    cacheStability: {
+      prefixTokensStable: pinnedTokens,
+      layoutStableTokens: pinnedTokens + proxyTokens + (policy.xFirst ? current.tokens : 0),
+    },
     recall: { candidates, selected: recalled.length, bfsDepth },
   };
   return result;
