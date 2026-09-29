@@ -206,54 +206,32 @@ window.__ModuleLoader__.load({
               setState((s) => ({ ...s, message: problems.join('; ') }));
               return;
             }
+          // One fetch, the way dsh-pet's panel does it: PUT the same text the command line takes, and let the
+          // response body decide whether the save happened. There is no probe here any more - the host answers
+          // with the effective triple, so a save is proven by that answer rather than by the absence of an error.
+          setState((s) => ({ ...s, message: 'saving...' }));
           try {
-            const response = await write(TUNING_REF, { depth: d, tau: r });
-            const refused = refusal(response);
-            if (refused !== undefined) {
-              // Probe the settings channel as well: the plugin's own config may be exposed as a settings namespace
-              // (its patch row id is "s1cap"), which is the designed home for non-secret values. The response is
-              // reported verbatim so the accepted shape is learned rather than guessed at.
-              const settings = ctx.remote.settings;
-              let probe = 'no remote.settings';
-              if (settings && typeof settings.mutate === 'function') {
-                // Probed at runtime: a refused shape has no side effect, so this is safe to run from a panel. The
-                // gateway's own hint was "path-addressed operations", and the schema code nearby builds
-                // { path: [...], set: ... } - so array paths and a `set` flag are candidates, not just dotted keys.
-                const shapes = [
-                  ['arr-set-flag', [{ path: ['recall', 'depth'], set: d }, { path: ['recall', 'releTao'], set: r }, { path: ['recall', 'window'], set: w }]],
-                  ['arr-op-set', [{ op: 'set', path: ['recall', 'depth'], value: d }]],
-                  ['dot-op-set', [{ op: 'set', path: 'recall.depth', value: d }]],
-                  ['patch', [{ op: 'replace', path: '/recall/depth', value: d }]],
-                ];
-                const results = [];
-                for (const nsCandidate of ['s1cap', 'dsh-s1cap']) {
-                for (const [label, ops] of shapes) {
-                  try {
-                    const answer = await settings.mutate(nsCandidate, ops, undefined);
-                    results.push(nsCandidate + '/' + label + ':' + JSON.stringify(answer));
-                    if (answer && answer.ok !== false) break;
-                  } catch (err) {
-                    results.push(nsCandidate + '/' + label + ':threw ' + String(err));
-                  }
-                }
-                }
-                probe = results.join(' | ');
-              }
-              setState((s) => ({ ...s, message: 'credentials refused (' + refused + '); settings probe → ' + probe }));
+            const response = await fetch('/s1cap-7340/tuning', {
+              method: 'PUT',
+              headers: { 'content-type': 'text/plain' },
+              body: d + ' ' + r + ' ' + w,
+            });
+            const answer = await response.json();
+            if (!response.ok || answer.ok !== true) {
+              setState((s) => ({ ...s, message: 'tuning save refused: ' + (answer.reason ?? answer.persistError ?? 'HTTP ' + response.status) }));
               return;
             }
-            const stored = await readValue(TUNING_REF);
+            const eff = answer.effective ?? {};
             setState((s) => ({
               ...s,
               message:
-                stored === undefined
-                  ? 'tuning save was accepted but the store reports no value yet'
-                  : 'recall tuning saved (' + stored + ') — it takes effect at the next session start',
+                'saved: d=' + eff.depth + ' r=' + eff.relevanceThreshold + ' w=' + eff.window +
+                  (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')'),
             }));
           } catch (err) {
             setState((s) => ({ ...s, message: 'tuning save failed: ' + String(err) }));
           }
-        }, [depth, tau, write]);
+        }, [depth, tau, win]);
 
         const clear = React.useCallback(async () => {
           try {
