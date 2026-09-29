@@ -736,6 +736,32 @@ packages are resolvable for plugin code.
 **Still open for the cost figure:** a long multi-step session, so `scoredPairs` per step is measured rather than
 modelled. Headless probe rounds keep producing a single assembly (where the counter is necessarily 0), so this needs a
 prompt that forces several steps.
+### Round 36: our own bundle resolves host packages - the last unknown before the volatile Config
+
+The experiment was one import line in the host half, run against the throwaway CLI profile and then reverted:
+
+    import type z from '@deepseek-ai/schemastery';
+
+Result: the round still answered `ok`, no module error appeared, and the plugin demonstrably activated - one
+control-plane record and 32 tape lines were written. So host packages are resolvable **for our bundle**, not only for
+the third-party plugins whose imports were the precedent. Restored immediately afterwards; 109/109 green, tree clean.
+
+**Every prerequisite for the panel's Save button is therefore verified**: the mechanism ships in this build
+(`configForms`, `loader/volatile-update`), the volatile-update subscription already re-applies the three knobs
+without a restart, host packages resolve for our plugin, and no allowlist stands in the way. What remains is the
+schema itself.
+
+**The hard constraint to respect when writing it:** the exported `Config` must describe **every** field
+`resolvePluginConfig` accepts today (`enabled`, `observation`, `s1`, `laya`, `recall`, `tas`, `tail`, `planGate`,
+`telemetry`, `cache`, `rgMaintenance`, `cell`, ...). The loader validates the plugin's configuration against that
+schema, so a schema that omits a field the patch sets makes the plugin fail to activate - which is worse than the
+feature being unfinished. Read the current field set first, write the schema in one pass, then verify activation in a
+real profile before touching the panel.
+
+**Also learned about the live cost curve:** headless probe rounds cannot force multiple steps, because that
+profile's sandbox refuses writes to the repository, so the model declines to issue the shell commands and only one
+assembly is recorded (where `scoredPairs` is necessarily 0). The live per-step curve therefore has to come from the
+web sandbox driven through a browser, where the tool calls can actually run.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
