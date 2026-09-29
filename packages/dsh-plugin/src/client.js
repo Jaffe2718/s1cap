@@ -191,6 +191,10 @@ window.__ModuleLoader__.load({
             setState((s) => ({ ...s, message: 'depth d must be an integer greater than 0' }));
             return;
           }
+          if (win.trim() === '' || !Number.isInteger(w) || w < 1) {
+            setState((s) => ({ ...s, message: 'window w must be an integer of at least 1' }));
+            return;
+          }
           if (tau.trim() === '' || !Number.isFinite(r) || r < 0 || r > 1) {
             setState((s) => ({ ...s, message: 'threshold r must be a number between 0 and 1' }));
             return;
@@ -320,6 +324,17 @@ window.__ModuleLoader__.load({
               value: tau,
               placeholder: String(DEFAULT_TAU),
               onChange: (event) => setTau(event.target.value),
+            }),
+            e('label', { style: S.label, htmlFor: 's1cap-window' }, 'w'),
+            e('input', {
+              id: 's1cap-window',
+              style: S.number,
+              type: 'number',
+              min: '1',
+              step: '1',
+              value: win,
+              placeholder: String(DEFAULT_WINDOW),
+              onChange: (event) => setWin(event.target.value),
             }),
             e('button', { style: S.button, type: 'button', onClick: () => void saveTuning() }, 'Save tuning'),
           ),
