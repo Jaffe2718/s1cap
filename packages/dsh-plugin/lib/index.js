@@ -642,6 +642,21 @@ function applyInner(ctx               , raw                             )       
       });
     };
 
+    // A live-config edit should not need a restart: when the loader reports a volatile update, re-read the tuning
+    // store and re-apply it to the live policy. Registered before the pre-step middleware on purpose - the
+    // subscription order is part of what the plugin tests pin. The handler is wrapped: an event that never fires
+    // costs nothing, and a throw would take the harness down with it.
+    ctx.on('loader/volatile-update', () => {
+      try {
+        const reread = readTuningFile();
+        if (reread.depth !== undefined) config.recall.depth = reread.depth;
+        if (reread.relevanceThreshold !== undefined) config.recall.relevanceThreshold = reread.relevanceThreshold;
+        if (reread.window !== undefined) config.recall.window = reread.window;
+        appliedTuning = { ...appliedTuning, ...reread };
+      } catch (err) {
+        ctx.logger?.warn?.(`[s1cap] volatile update ignored: ${String(err)}`);
+      }
+    });
     // Wire the lane that was registered at the top of applyInner: hand it the observer, the tape sink, and the
     // events that arrived before either existed.
     activeObserver = observer;
