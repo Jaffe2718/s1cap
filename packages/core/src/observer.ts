@@ -18,6 +18,7 @@ import { assemble, totalTokens } from './assembler.ts';
 import { adaptMessages } from './harness-adapter.ts';
 import type { AdapterReport } from './harness-adapter.ts';
 import { TELEMETRY_SCHEMA_VERSION } from './telemetry.ts';
+import { buildStateProxy } from './state-proxy.ts';
 import type { AssemblyEvent } from './telemetry.ts';
 
 export interface ObserveStepInput {
@@ -44,6 +45,12 @@ export interface ObserveStepInput {
     current: Segment,
     candidates: readonly Segment[],
   ) => readonly number[] | Promise<readonly number[]>;
+  /**
+   * One-entry memo for T, held by the caller so it survives across steps. It is passed in rather than created
+   * here because `observeStep` is a pure function of its input: a per-call proxy cache would rebuild T on every
+   * step, which is exactly the instability the block is placed to avoid.
+   */
+  proxyCache?: { id: string; text: string };
   contextWindow: number;
   reserveOutputTokens: number;
   fixedOverheadTokens: number;
@@ -174,6 +181,27 @@ export async function observeStep(
   const tailCount = Math.max(0, Math.min(input.policy.tail.k, pool.length));
   const tail = tailCount > 0 ? pool.slice(pool.length - tailCount) : [];
   const history = pool.slice(0, pool.length - tailCount);
+  // One-entry memo of the last built T. `perTask` is the default policy precisely so this can be a single slot:
+  // within a task T does not change, and when the task changes the anchor id changes with it.
+  const proxyCache = input.proxyCache ?? { id: '', text: '' };
+  // `perTask` reuses the memo across the steps of one task; `perTurn` rebuilds every step, which is what that
+  // policy means and is not free.
+  const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === current.id;
+  const proxyText = reuseProxy
+    ? proxyCache.text
+    : buildStateProxy({
+        segments: window,
+        anchorId: current.id,
+        maxChars: input.policy.tas.tMaxChars,
+        updatePolicy: input.policy.tas.updatePolicy,
+        now: input.now,
+      });
+  // Write the memo back only for `perTask`. A `perTurn` policy would find a matching id and reuse a proxy it was
+  // supposed to rebuild, which is the one way a cache this cheap can be wrong rather than merely redundant.
+  if (input.proxyCache !== undefined && input.policy.tas.updatePolicy === 'perTask' && !reuseProxy) {
+    input.proxyCache.id = current.id;
+    input.proxyCache.text = proxyText;
+  }
 
   const result = assemble({
     graph: input.graph,
@@ -181,8 +209,9 @@ export async function observeStep(
     pinned,
     tail,
     current,
-    // The serialized state proxy T is not built yet (M1's remaining sub-step), so the TAS block is
-    // accounted as empty. Documented so the budget numbers are read correctly, not over-trusted.
+    // T, the serialized task state, replaces the raw trace in front of the moving blocks. Its stability is what
+    // lets it sit in the cache-stable head.
+    stateProxy: proxyText,
     contextWindow: input.contextWindow,
     reserveOutputTokens: input.reserveOutputTokens,
     fixedOverheadTokens: input.fixedOverheadTokens,

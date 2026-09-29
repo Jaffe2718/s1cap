@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { defaultPolicy } from '@s1cap/core';
 import { apply, preStepMiddleware } from '../src/index.ts';
 import type { CommandSpec, PluginContext } from '../src/index.ts';
+import { commandPayload } from './command-contract.ts';
 import { createStepObserver } from '../src/step-observer.ts';
 
 const MESSAGES = [
@@ -150,7 +151,7 @@ test('observation mode off registers the hook but writes nothing', async () => {
   await handler?.({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'accept', messages: [] }));
 
   assert.throws(() => readFileSync(join(dir, 'control.jsonl'), 'utf8'), 'no control-plane file is created');
-  const status = h.commands.get('s1')?.({}) as { observation: { mode: string; observed: number } };
+  const status = commandPayload(h.commands.get('s1')?.({})) as { observation: { mode: string; observed: number } };
   assert.equal(status.observation.mode, 'off');
   assert.equal(status.observation.observed, 0);
   rmSync(dir, { recursive: true, force: true });
@@ -182,7 +183,7 @@ test('enabled + observation log writes the record to the configured sink, isolat
   assert.equal('kind' in record, false, 'a control-plane record carries `type`, never a session `kind`');
   assert.throws(() => readFileSync(session, 'utf8'), 'the session sink is untouched by observation');
 
-  const status = h.commands.get('s1')?.({}) as {
+  const status = commandPayload(h.commands.get('s1')?.({})) as {
     observation: { mode: string; observed: number; lastSegments: number; sink: string };
   };
   assert.equal(status.observation.mode, 'log');
@@ -203,7 +204,7 @@ test('an unknown observation value falls back to the default and is reported', a
   });
 
   assert.ok(h.warns.some((w) => w.includes('observation must be')), 'the typo is reported');
-  const status = h.commands.get('s1')?.({}) as { observation: { mode: string } };
+  const status = commandPayload(h.commands.get('s1')?.({})) as { observation: { mode: string } };
   assert.equal(status.observation.mode, 'log', 'the default is kept, fail-safe');
 });
 

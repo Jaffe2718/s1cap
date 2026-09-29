@@ -171,6 +171,24 @@ export function resolveConfig(raw                             )                 
                                                    
  
 
+/**
+ * The host's `CommandResult`, read from `@deepseek-ai/dsh-commands` (`normalizeResult`).
+ *
+ * This is not optional and not a convention: the registry validates the handler's return value and throws
+ * `command "<name>" handler must return a CommandResult` if it is not one of these two shapes. Every `/s1*`
+ * command returned a plain object, so every one of them failed at the boundary — the status was computed, the
+ * log line was written, and the user saw an error instead of the answer. `text` is the only channel a result has,
+ * so anything worth reading goes there.
+ */
+export function commandSuccess(text        )                                    {
+  return { kind: 'success', text };
+}
+
+/** An error result must carry non-empty text; the registry rejects an empty one. */
+export function commandError(text        )                                  {
+  return { kind: 'error', text: text.trim() === '' ? 'no reason given' : text };
+}
+
                                 
                                                                                                      
                                                                                            
@@ -567,6 +585,14 @@ function applyInner(ctx               , raw                             )       
   // round. `off` skips it entirely. The context window comes from constants for now: `ctx.tokenMeter`'s
   // semantics are not verified yet, and a wrong window would silently distort every budget number.
   let observer                          ;
+  /**
+   * The two System-1 components, hoisted for the same reason `observer` is: they are constructed inside the
+   * enabled-branch and reported by `/s1` outside it. A `const` in the inner block is correct at the construction
+   * site and invisible to the status command, which is how a declared-and-constructed component can look present
+   * in the log while the counter that would prove it ran cannot be printed.
+   */
+  let relevance                                                  ;
+  let planGate                                               ;
   /** one assemble() per session; awaited by the first pre-step call (a short round can exit before a fire-and-forget promise settles)
  */
   let priming                           ;
@@ -668,7 +694,7 @@ function applyInner(ctx               , raw                             )       
     // One System-1 call per new segment, scoring the whole window. Absent when no backend is configured, and
     // that absence is the point: the graph then scores lexically, which is what keeps observation mode free,
     // offline and deterministic. A configured backend that fails answers `undefined` and degrades the same way.
-    const relevance =
+    relevance =
       client === undefined
         ? undefined
         : createS1Relevance({
@@ -684,7 +710,7 @@ function applyInner(ctx               , raw                             )       
     // The plan gate scores the model's own candidate plans with a choice question. It is advisory: the order is
     // computed and recorded, and nothing in this plugin feeds it back into a prompt or a stop decision. The gate
     // only runs when a System-1 backend exists, since without one it would just return the model's own order.
-    const planGate =
+    planGate =
       client === undefined
         ? undefined
         : createPlanGate(
@@ -733,6 +759,22 @@ function applyInner(ctx               , raw                             )       
         : {}),
     });
     ctx.logger?.info?.(`[s1cap] observation mode: ${resolved.observation} -> ${resolveTelemetryPath(resolved.telemetry.controlJsonl)}${resolved.observation === 'tape' ? ` + tape ${resolveTelemetryPath(resolved.telemetry.tapeJsonl)}` : ''} (prompt untouched)`);
+    // What this process actually wired, written where it can be read back. The class of bug this project keeps
+    // hitting is a component that is configured, constructed and never called, and from the control plane alone
+    // that is invisible: a pair scored by System-1 and a pair scored lexically produce the same record. So the
+    // wiring is stated once, at activation, on the same diagnostic tape as `service-probe` and `tuning-file`.
+    probeSink?.write(
+      JSON.stringify({
+        schema: 0,
+        kind: 'wiring',
+        s1: backend.mode === 'none' ? 'none' : { provider: backend.provider, mode: backend.mode, baseUrl: backend.baseUrl },
+        relevance: relevance !== undefined,
+        planGate: planGate !== undefined,
+        xFirst: config.xFirst,
+        recall: { d: config.recall.depth, r: config.recall.relevanceThreshold, w: config.recall.window },
+        tas: config.tas,
+      }) + '\n',
+    );
 
 
     // The service lookup happens inside the thunk, not here: at activation time the systemPrompt service may
@@ -855,7 +897,16 @@ function applyInner(ctx               , raw                             )       
       name: 's1-tune',
       description: 'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), xFirst on/off',
       input: { hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "xFirst=off")' },
-      handler: ({ rawInput }) => applyTuning(parseTuningArgs(rawInput)),
+      handler: ({ rawInput }) => {
+        const outcome = applyTuning(parseTuningArgs(rawInput));
+        if (!outcome.ok) return commandError(outcome.reason ?? 'the tuning was refused');
+        const eff = outcome.effective;
+        return commandSuccess(
+          `depth=${String(eff?.depth)} relevanceThreshold=${String(eff?.relevanceThreshold)} ` +
+            `window=${String(eff?.window)} xFirst=${eff?.xFirst === true ? 'on' : 'off'}` +
+            (outcome.persisted === true ? ' (persisted)' : ` (in effect, NOT persisted: ${outcome.persistError ?? 'unknown'})`),
+        );
+      },
     },
     {
       name: 's1',
@@ -892,6 +943,11 @@ function applyInner(ctx               , raw                             )       
             questionsPerCall: config.s1.questionsPerCall,
           },
           laya: runtime.summary(),
+          // Each component reports its own counters, because "constructed" and "called" are different states and
+          // only the counters can tell them apart. `relevance.calls` and `planGate.calls` are the two numbers
+          // that say whether the System-1 path ran at all in this process.
+          relevance: relevance?.stats() ?? null,
+          planGate: planGate?.stats() ?? null,
           observation: observer
             ? { mode: resolved.observation, sink: resolved.telemetry.controlJsonl, ...observer.stats() }
             : { mode: resolved.observation, steps: 0, observed: 0, skipped: 0, errors: 0 },
@@ -904,19 +960,21 @@ function applyInner(ctx               , raw                             )       
           },
         };
         ctx.logger?.info?.(`[s1cap] ${JSON.stringify(status, null, 2)}`);
-        return status;
+        return commandSuccess(JSON.stringify(status, null, 2));
       },
     },
     {
       name: 's1-ping',
       description: 'S1CAP: probe the resolved System-1 backend (GET /health)',
       handler: async () => {
-        if (!client) return { ok: false, reason: 'provider=none (no System-1 backend is active)' };
+        if (!client) return commandError('provider=none (no System-1 backend is active)');
         const started = Date.now();
         const ok = await client.health();
         const result = { ok, baseUrl: backend.baseUrl, model: backend.model, ms: Date.now() - started };
         ctx.logger?.info?.(`[s1cap] ping ${ok ? 'ok' : 'unreachable'} ${String(backend.baseUrl)} in ${result.ms}ms`);
-        return result;
+        return ok
+          ? commandSuccess(`reachable: ${String(result.baseUrl)} (model ${String(result.model)}) in ${result.ms}ms`)
+          : commandError(`unreachable: ${String(result.baseUrl)} did not answer /health in ${result.ms}ms`);
       },
     },
     {
@@ -928,25 +986,30 @@ function applyInner(ctx               , raw                             )       
         if (verb === 'discover') {
           const result = await runtime.discover();
           ctx.logger?.info?.(`[s1cap] laya discover: ${JSON.stringify(result, null, 2)}`);
-          return result;
+          return commandSuccess(JSON.stringify(result, null, 2));
         }
         if (verb === 'start') {
           await runtime.start();
           const state = runtime.summary();
           ctx.logger?.info?.(`[s1cap] laya start: ${JSON.stringify(state, null, 2)}`);
-          return state;
+          return state.status === 'failed'
+            ? commandError(`laya start failed: ${state.error ?? 'no reason reported'}`)
+            : commandSuccess(`laya ${state.status}: ${state.baseUrl}`);
         }
         if (verb === 'stop') {
           await runtime.stop();
           const state = runtime.summary();
           ctx.logger?.info?.(`[s1cap] laya stop: ${JSON.stringify(state, null, 2)}`);
-          return state;
+          return commandSuccess(`laya ${state.status}`);
         }
         const state = runtime.summary();
         ctx.logger?.info?.(
           `[s1cap] laya status: ${state.status}${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` - ${state.error}` : ''}${state.logLines ? ` [${state.logLines} diagnostic lines buffered]` : ''}`,
         );
-        return state;
+        return commandSuccess(
+          `laya ${state.status}${state.baseUrl ? ` at ${state.baseUrl}` : ''}` +
+            `${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` - ${state.error}` : ''}`,
+        );
       },
     },
   ]);

@@ -134,6 +134,10 @@ function readSessionId(payload: unknown, fallback: string): string {
 
 export function createStepObserver(opts: StepObserverOptions): StepObserver {
   const graph = new AssociationGraph();
+  // T's one-entry memo, alive for as long as the observer is. The observer is created once per activation and
+  // outlives a session, so the memo is also correct across sessions: the anchor id is a segment id, and a new
+  // session's task has a new one.
+  const proxyCache = { id: '', text: '' };
   let systemPrompt: string | undefined;
   let systemPromptTokens = 0;
   let scheduled = false;
@@ -281,6 +285,10 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           fixedOverheadTokens: opts.fixedOverheadTokens,
           lambdaMs: opts.lambdaMs,
           graph,
+          // One slot for the whole observer, so T survives between steps. It is created here rather than inside
+          // observeStep because that function is pure: a per-call cache would rebuild T every step, and T's
+          // stability across steps is the property the whole block placement rests on.
+          proxyCache,
         });
         seq += messages.length;
 

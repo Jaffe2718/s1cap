@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { DEFAULT_TELEMETRY, apply, resolvePluginConfig } from '../src/index.ts';
 import type { PluginContext } from '../src/index.ts';
 import { parseTuning, parseTuningArgs } from '../src/credentials.ts';
+import { commandPayload, commandKind, commandText } from './command-contract.ts';
 
 interface Harness {
   ctx: PluginContext;
@@ -138,7 +139,7 @@ test('apply() registers the hooks and commands, and a conflict degrades to obser
   assert.ok(h.warns.some((w) => w.includes('only one S1 backend')));
   assert.ok(h.warns.some((w) => w.includes('makes no System-1 calls')));
 
-  const status = h.commands.get('s1')?.({}) as {
+  const status = commandPayload(h.commands.get('s1')?.({})) as {
     s1: { provider: string; mode: string; key: string };
     telemetry: { sessionJsonl: string; controlJsonl: string };
     configIssues: { conflicts: string[] };
@@ -161,20 +162,23 @@ test('apply() reports the resolved backend without leaking the key, and ping is 
   assert.match(info, /provider=jev \(cloud\)/);
   assert.ok(!info.includes('SUPERSECRET'));
 
-  const status = h.commands.get('s1')?.({}) as { s1: { provider: string; key: string; baseUrl: string } };
+  const status = commandPayload(h.commands.get('s1')?.({})) as { s1: { provider: string; key: string; baseUrl: string } };
   assert.equal(status.s1.provider, 'jev');
   assert.equal(status.s1.baseUrl, 'https://api.typesafe.ai');
   assert.match(status.s1.key, /^sk-l…89/);
   assert.ok(!status.s1.key.includes('SUPERSECRET'));
 
-  const ping = (await h.commands.get('s1-ping')?.({})) as { ok: boolean };
-  assert.equal(typeof ping.ok, 'boolean', 'ping reports reachability as a boolean');
+  // `s1-ping` reaches the network, so its result is asserted through the contract rather than for a value: a
+  // reachable backend is `success`, an unreachable one is `error`, and both must be legal results.
+  const ping = await h.commands.get('s1-ping')?.({});
+  assert.ok(['success', 'error'].includes(commandKind(ping) ?? ''), `ping returned ${String(commandKind(ping))}`);
+  commandPayload(ping === undefined ? {} : { ...(ping as object), kind: 'success' });
 
   const none = harness();
   apply(none.ctx, { enabled: true, s1: { provider: 'none' } });
-  const idle = (await none.commands.get('s1-ping')?.({})) as { ok: boolean; reason: string };
-  assert.equal(idle.ok, false);
-  assert.match(idle.reason, /provider=none/);
+  const idle = await none.commands.get('s1-ping')?.({});
+  assert.equal(commandKind(idle), 'error', 'no backend is reported as an error, not as a silent success');
+  assert.match(commandText(idle), /provider=none/);
 });
 
 test('every config problem is reported as a warning and the session keeps its defaults', () => {
@@ -196,7 +200,7 @@ test('every config problem is reported as a warning and the session keeps its de
   assert.match(warns, /termination: must be "model-owned"/);
   assert.match(warns, /recall\.relevanceThreshold: must be within/);
   assert.match(warns, /laya\.port: must be within/);
-  const status = h.commands.get('s1')?.({}) as { recall: { relevanceThreshold: number }; cell: string };
+  const status = commandPayload(h.commands.get('s1')?.({})) as { recall: { relevanceThreshold: number }; cell: string };
   assert.equal(status.recall.relevanceThreshold, 0.55, 'invalid value falls back to the default');
   assert.equal(status.cell, 'C4');
   });
@@ -287,7 +291,7 @@ test('a stored xFirst=false reaches the config: the write, the read and the appl
     const h = harness();
     apply(h.ctx, { enabled: true, s1: { provider: 'none' } });
 
-    const status = JSON.parse(JSON.stringify(h.commands.get('s1')?.({}) ?? {})) as {
+    const status = JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
       xFirst?: boolean;
       recall?: { depth?: number; window?: number };
       tuning?: { effective?: { xFirst?: boolean } };

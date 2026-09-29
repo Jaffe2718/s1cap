@@ -1,6 +1,7 @@
 export * from './types.ts';
 export * from './config.ts';
 export * from './segmenter.ts';
+export * from './state-proxy.ts';
 export * from './harness-adapter.ts';
 export * from './observer.ts';
 export * from './upkeep-queue.ts';
