@@ -684,6 +684,30 @@ Config path is open and the panel can write; if it does not, the config-form rou
 plugin and the honest answer is that Save stays on `/s1-tune` plus read-back, with this evidence as the reason.
 
 Either way this replaces the earlier guess (a `WEB_SETTINGS_NAMESPACES` allowlist) with a measured question.
+### Round 34: the volatile Config path **is** open to an out-of-tree plugin
+
+The question left open last round is answered by precedent, not by a guess. Two third-party plugins installed in
+these very profiles import the host packages directly:
+
+```js
+// dsh-browser/lib/index.js
+import Schema from '@deepseek-ai/schemastery';
+import { defineTool } from '@deepseek-ai/dsh-tools';
+// another installed plugin
+import z from '@deepseek-ai/schemastery';
+```
+
+and one of them says so in a comment: *"Cordis (4.x) and schemastery (3.x) are host packages, but are not on
+[npm]"*. So `require.resolve` failing from the profile directory was a red herring: the Loader resolves host
+packages **for plugin code**, plain Node resolution from a working directory does not. The earlier plan is therefore
+viable, and no allowlist stands in the way.
+
+**Implementation, next:** declare the three knobs as volatile fields in the plugin's exported `Config`
+(`z.number().min(...).step(...).default(...).volatile()` with the same bounds the parsers enforce — d an integer > 0,
+0 <= r <= 1, w an integer >= 64), read them with `.get()` when a session starts and again on
+`ctx.on('loader/volatile-update', …)` so a change lands without a restart, keep our own `resolvePluginConfig` as the
+fallback for a profile that passes a plain object, and let the Plugins page's `form.mutate` be the write path. Only
+then does the panel's Save button write; `/s1-tune` and the tuning file stay as the headless and fallback paths.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
