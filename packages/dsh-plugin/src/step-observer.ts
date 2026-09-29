@@ -10,7 +10,7 @@
  * *after* the harness's own middleware chain produced its decision. Upkeep never runs inside it — new session
  * events go into a bounded queue and are folded into the graph on a later tick.
  */
-import { AssociationGraph, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep } from '@s1cap/core';
+import { AssociationGraph, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
 import type { AssemblyPolicy, TelemetryEvent, UpkeepQueueStats } from '@s1cap/core';
 
 export interface StepObserverOptions {
@@ -42,6 +42,16 @@ export interface StepObserverStats {
   observed: number;
   /** calls skipped because the payload carried no message list */
   skipped: number;
+  /** calls whose messages produced no segment, so there was nothing to assemble (see EmptyStepObservation) */
+  empty: number;
+  /** session events that carried conversation content and were folded into the graph */
+  upkeepEvents: number;
+  /** session events that carried no conversation (lifecycle notices) */
+  upkeepEmpty: number;
+  /** segments produced by upkeep, which is where the live history actually comes from */
+  upkeepSegments: number;
+  /** pairs scored by upkeep, across every new session segment */
+  upkeepScoredPairs: number;
   /** observation failures (reported, never thrown) */
   errors: number;
   /** tokens the full history would have sent that the selected view did not */
@@ -122,6 +132,11 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     probes: 0,
     unknownPartTypes: [],
     unknownRoles: [],
+    empty: 0,
+    upkeepEvents: 0,
+    upkeepEmpty: 0,
+    upkeepSegments: 0,
+    upkeepScoredPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
     upkeep: {
@@ -152,32 +167,40 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     maxLagTurns: opts.maxLagTurns ?? 2,
     onWarn: (message) => opts.onWarn?.(message),
     onEvent: (event) => {
-      // A session event may be a message, or wrap one; the adapter reports anything it cannot read.
-      const wrapped =
-        typeof event === 'object' && event !== null && (event as { message?: unknown }).message !== undefined
-          ? [(event as { message: unknown }).message]
-          : [event];
-      const observation = observeStep({
+      // Asynchronous upkeep, which is what the session-event stream is FOR: adapt, segment, fold into the
+      // graph, score the new segment against the last w. No assemble happens here - this is not a step, and
+      // assembling per event would be both wrong and expensive. The model view is assembled once, at pre-step.
+      //
+      // The previous version ran a full observeStep() per event on the raw event wrapper. That could only ever
+      // produce zero segments - a session event has no `role`, so the adapter reported the shape as unknown and
+      // dropped it - which is why the graph was empty in live sessions and every recall count read zero.
+      const now = opts.now();
+      const { events: raw, report } = adaptSessionEvent(event, {
         sessionId: stats.sessionId,
-        step: 0,
-        seq,
-        messages: wrapped,
-        systemPrompt,
-        policy: opts.policy,
-        now: opts.now(),
-        contextWindow: opts.contextWindow,
-        reserveOutputTokens: opts.reserveOutputTokens,
-        fixedOverheadTokens: opts.fixedOverheadTokens,
-        lambdaMs: opts.lambdaMs,
-        graph,
+        startSeq: seq,
+        now,
       });
-      seq += wrapped.length;
-      for (const type of observation.report.unknownPartTypes) {
+      for (const type of report.unknownPartTypes) {
         if (!stats.unknownPartTypes.includes(type)) stats.unknownPartTypes.push(type);
       }
-      for (const role of observation.report.unknownRoles) {
+      for (const role of report.unknownRoles) {
         if (!stats.unknownRoles.includes(role)) stats.unknownRoles.push(role);
       }
+      if (raw.length === 0) {
+        // Lifecycle events (step/start, turn/end, request/header, delivery notices) land here by design.
+        stats.upkeepEmpty += 1;
+        return;
+      }
+      const segments = raw.flatMap((ev) => segmentEvent(ev));
+      graph.addSegments(segments);
+      const scored = graph.scoreNew({
+        windowN: opts.policy.recall.window,
+        threshold: opts.policy.recall.relevanceThreshold,
+      });
+      stats.upkeepEvents += 1;
+      stats.upkeepSegments += segments.length;
+      stats.upkeepScoredPairs += scored.scoredPairs;
+      seq += raw.length;
     },
   });
 
@@ -214,8 +237,19 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         seq += messages.length;
 
         const elapsed = Math.max(0, opts.now() - started);
-        opts.emit(observation.event);
+        // The tape is written first, on purpose: it records what the harness actually sent, and that is worth
+        // most exactly when the adapter could make no sense of it. Skipping it for empty steps would delete the
+        // only evidence of the shape we do not understand yet.
         opts.onTape?.(readStep(payload), messages, systemPrompt);
+        // Nothing to assemble: no record is emitted, and the step is counted as empty rather than as an
+        // observation. It used to throw from the assembler and be swallowed, which is why a real session could
+        // log exactly one record (the primer's) while looking perfectly healthy.
+        if (observation.kind === 'empty') {
+          stats.empty += 1;
+          opts.onWarn?.(`[s1cap] step ${readStep(payload)} observed nothing: ${observation.reason}`);
+          return;
+        }
+        opts.emit(observation.event);
 
         stats.observed += 1;
         stats.sessionId = sessionId;

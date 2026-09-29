@@ -43,6 +43,8 @@ export interface ReplayResult {
   records: AssemblyEvent[];
   selectedIds: string[][];
   wouldSaveTokens: number[];
+  /** tape steps whose messages produced no segment, so there was nothing to assemble or record */
+  emptySteps: number;
   digest: string;
 }
 
@@ -123,12 +125,13 @@ export function replayTape(tape: Tape, opts: ReplayOptions): ReplayResult {
   const selectedIds: string[][] = [];
   const wouldSaveTokens: number[] = [];
   let seq = 0;
+  let emptySteps = 0;
   // the rendered prompt persists across calls, so a step that does not tape its own inherits the last one
   let carriedPrompt: string | undefined;
 
   for (const step of tape.steps) {
     if (step.systemPrompt !== undefined) carriedPrompt = step.systemPrompt;
-    const observation: StepObservation = observeStep({
+    const observation = observeStep({
       sessionId: tape.sessionId,
       step: step.step,
       seq,
@@ -143,10 +146,16 @@ export function replayTape(tape: Tape, opts: ReplayOptions): ReplayResult {
       graph,
     });
     seq += step.messages.length;
+    // A step that produced no segment has no record to replay. Counted rather than dropped silently, because a
+    // tape that assembled nothing is a finding about the tape, not a gap in the report.
+    if (observation.kind === 'empty') {
+      emptySteps += 1;
+      continue;
+    }
     records.push(observation.event);
     selectedIds.push(observation.selectedIds);
     wouldSaveTokens.push(observation.wouldSaveTokens);
   }
 
-  return { records, selectedIds, wouldSaveTokens, digest: digestRecords(records) };
+  return { records, selectedIds, wouldSaveTokens, emptySteps, digest: digestRecords(records) };
 }

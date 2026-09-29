@@ -298,8 +298,9 @@ export class LayaRuntime {
 /**
  * `agent/pre-step` is a **waterfall middleware**, verified against `dsh-agent`'s packaged source:
  *
- *   agentCtx.on('agent/pre-step', async ({ agent, messages, signal, step }, next) => {
- *     const decision = await next();
+    {
+    }
+    const decision = await next();
  *     if (decision.kind === 'reject' || signal.aborted) return decision;
  *     return { ...decision, messages: [...] };
  *   }, { prepend: true });
@@ -474,6 +475,7 @@ function findService<T>(ctx: PluginContext, name: string): T | undefined {
   }
   return undefined;
 }
+
 export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void {
   try {
     applyInner(ctx, raw);
@@ -674,6 +676,15 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       maxLagTurns: config.rgMaintenance.maxLagTurns,
       onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
       onObserved: (summary) => ctx.logger?.info?.(`[s1cap] observed ${summary}`),
+      // The upkeep queue is what folds the session-event stream into the association graph, and the queue
+      // only drains when something asks it to. Nothing did: `schedule` was left out, so the queue filled and
+      // was never flushed outside tests, and the graph stayed empty for the whole run. That is the second
+      // half of why every live recall count read zero. The tick is deferred (setTimeout, unref'd) so upkeep
+      // never runs on the critical path of a step, and the unref keeps it from holding the process open.
+      schedule: (tick) => {
+        const timer = setTimeout(tick, 0);
+        if (typeof (timer as { unref?: () => void }).unref === 'function') (timer as { unref: () => void }).unref();
+      },
       onProbe: (line) => probeSink?.write(`
 `),
       ...(resolved.observation === 'tape'

@@ -85,6 +85,119 @@ export function newAdapterReport(): AdapterReport {
   return { messages: 0, empty: 0, parts: 0, roles: {}, unknownRoles: [], unknownPartTypes: [], rawParts: 0 };
 }
 
+/** Fold one report into another, so a caller's report describes everything it was shown. */
+function mergeReport(into: AdapterReport, from: AdapterReport): void {
+  into.messages += from.messages;
+  into.empty += from.empty;
+  into.parts += from.parts;
+  into.rawParts += from.rawParts;
+  for (const role of from.unknownRoles) {
+    if (!into.unknownRoles.includes(role)) into.unknownRoles.push(role);
+  }
+  for (const part of from.unknownPartTypes) {
+    if (!into.unknownPartTypes.includes(part)) into.unknownPartTypes.push(part);
+  }
+  for (const [role, kind] of Object.entries(from.roles)) into.roles[role] = kind;
+}
+
+/** The session-event types that carry conversation content, read from the packaged agent loop. */
+export const CONTENT_EVENT_TYPES: readonly string[] = [
+  'user/message',
+  'assistant/message',
+  'tool/call',
+  'tool/result',
+];
+
+const TOOL_ARGS_MAX_CHARS = 2000;
+
+/**
+ * Map ONE harness session event onto raw session events.
+ *
+ * This is the input that actually carries the conversation, and the reason it exists: `agent/pre-step` hands a
+ * plugin only `inbox.claim(...)` - the messages that arrived for *this* step - which is one user message on the
+ * first step and an empty array on every step after. Measured on a 46-step session, the step payload carried
+ * 1 message and then nothing, while the session-event stream carried 28 content events (user, assistant, tool
+ * call, tool result). An observer fed from the step payload therefore builds a graph with no history in it and
+ * reports zero candidates, and it reports them honestly rather than crashing - which is exactly how this was
+ * found.
+ *
+ * The payload shapes are read from the packaged agent loop, not guessed:
+ *   user/message      -> { turn, step, message }          (dsh-agent-loop:1061)
+ *   assistant/message -> { turn, step, message }          (dsh-agent-loop:1086)
+ *   tool/call         -> { turn, step, callId, name, arguments }  (dsh-agent-loop:682)
+ *   tool/result       -> { turn, step, message, error?, meta? }  (dsh-agent-loop:697)
+ *
+ * Three of the four carry a harness message and reuse the message adapter unchanged. `tool/call` does not, so it
+ * is rendered into a text segment: the call's name and arguments are what a later step would need to judge
+ * whether this call is relevant, and dropping them would lose the tool's *intent* while keeping its result.
+ *
+ * Lifecycle events (`step/start`, `turn/end`, `request/header`, `agent/inbox/spliced`, delivery notices) carry
+ * no conversation and produce no event. They are counted in `report.empty` rather than being invented into
+ * segments, so the ratio between them and real content stays visible instead of becoming silent padding.
+ */
+export function adaptSessionEvent(event: unknown, opts: AdaptOptions): { events: RawEvent[]; report: AdapterReport } {
+  const report = newAdapterReport();
+  if (typeof event !== 'object' || event === null) {
+    report.empty += 1;
+    return { events: [], report };
+  }
+  const record = event as {
+    type?: unknown;
+    seq?: unknown;
+    message?: unknown;
+    callId?: unknown;
+    name?: unknown;
+    arguments?: unknown;
+  };
+  const type = typeof record.type === 'string' ? record.type : '';
+  if (type !== '' && !CONTENT_EVENT_TYPES.includes(type)) {
+    report.empty += 1;
+    return { events: [], report };
+  }
+
+  // The session log's own sequence number is the segment's seq: it is the position in the append-only log,
+  // which is what the replay digest and the graph's ordering both mean. `startSeq` is only the fallback.
+  const logSeq = typeof record.seq === 'number' && Number.isFinite(record.seq) ? record.seq : opts.startSeq;
+  const withSeq = { ...opts, startSeq: logSeq };
+
+  if (record.message !== undefined) {
+    const sub = adaptMessages([record.message], withSeq);
+    mergeReport(report, sub.report);
+    return { events: sub.events, report };
+  }
+
+  // tool/call has no message. Render it: the arguments are the model's stated intent, which is the part a
+  // later step can be related to, and the part that would otherwise be lost while the result is kept.
+  if (type === 'tool/call') {
+    const name = typeof record.name === 'string' && record.name !== '' ? record.name : '(unnamed)';
+    const rawArgs =
+      typeof record.arguments === 'string'
+        ? record.arguments
+        : JSON.stringify(record.arguments ?? null) ?? '';
+    const args = rawArgs.length > TOOL_ARGS_MAX_CHARS ? `${rawArgs.slice(0, TOOL_ARGS_MAX_CHARS)}…` : rawArgs;
+    const id = typeof record.callId === 'string' && record.callId !== '' ? record.callId : `toolcall-${logSeq}`;
+    report.messages += 1;
+    report.roles['tool-call'] = 'toolCall';
+    return {
+      events: [
+        {
+          id,
+          sessionId: opts.sessionId,
+          seq: logSeq,
+          kind: 'toolCall',
+          role: 'tool',
+          text: `tool call: ${name}\n${args}`,
+          ts: opts.now,
+        },
+      ],
+      report,
+    };
+  }
+
+  report.empty += 1;
+  return { events: [], report };
+}
+
 /**
  * Role -> segment kind. `developer` is a system-ish producer in DSH (developer instructions), so it pins;
  * `tool` carries a tool result. An unrecognised role pins as well — it is almost always a harness-injected

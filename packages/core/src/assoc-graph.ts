@@ -109,6 +109,25 @@ export class AssociationGraph {
     return this.#segments.get(id);
   }
 
+  /**
+   * Every segment in append order, optionally only the most recent `limit` of them.
+   *
+   * Read-only and additive, because the model view is now assembled from the graph: the harness's step payload
+   * carries only the messages claimed for that step (measured: one user message on the first step, an empty
+   * array on every step after), while the session-event stream this graph is fed from holds the whole
+   * conversation. The observer needs the ordered tail to place x and the history that recall did not keep, and
+   * that ordering is the graph's own - the append order of the session log.
+   */
+  orderedSegments(limit?: number): Segment[] {
+    const out: Segment[] = [];
+    const from = limit === undefined ? 0 : Math.max(0, this.#order.length - Math.max(0, Math.trunc(limit)));
+    for (let i = from; i < this.#order.length; i += 1) {
+      const segment = this.#segments.get(this.#order[i] as string);
+      if (segment !== undefined) out.push(segment);
+    }
+    return out;
+  }
+
   /** Insert or replace an edge (key = `${from}->${to}`), indexed in both directions. */
   upsertEdge(edge: AssociationEdge): void {
     const key = `${edge.from}->${edge.to}`;

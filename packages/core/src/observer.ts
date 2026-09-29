@@ -49,7 +49,9 @@ export interface ObserveStepInput {
   reasoningPartTypes?: readonly string[];
 }
 
+/** a step that produced an assembly and a control-plane record */
 export interface StepObservation {
+  kind: 'assembled';
   /** the control-plane record (frozen telemetry schema v1) */
   event: AssemblyEvent;
   /** what the segmenter produced, in order */
@@ -65,7 +67,31 @@ export interface StepObservation {
   observeMs: number;
 }
 
-export function observeStep(input: ObserveStepInput): StepObservation {
+/**
+ * A step that produced no assembly at all.
+ *
+ * This is a real shape, not a defensive fiction: a live `agent/pre-step` payload whose messages carry nothing the
+ * adapter turns into a segment leaves the segment list empty, and there is then no "current" segment to anchor an
+ * assembly on. The earlier code asserted non-null with `segments[segments.length - 1]!` and threw
+ * `Cannot read properties of undefined (reading 'tokens')` from the assembler - once per step, swallowed by the
+ * observer's own guard. It looked like a working install: the plugin stayed inert, the harness was fine, and the
+ * control-plane log kept exactly one record from the primer. Reporting the case is what makes it visible.
+ */
+export interface EmptyStepObservation {
+  kind: 'empty';
+  /** why there is nothing to assemble, in words fit for a log line */
+  reason: string;
+  /** the number of messages that produced no segment */
+  messages: number;
+  /**
+   * Still present, and the reason it matters: the report names the roles and part types the adapter could not
+   * read. An empty step is usually a *shape* we do not understand yet, so dropping the report would throw away
+   * the only clue about which shape it was.
+   */
+  report: AdapterReport;
+}
+
+export function observeStep(input: ObserveStepInput): StepObservation | EmptyStepObservation {
   const { events, report } = adaptMessages(input.messages, {
     sessionId: input.sessionId,
     startSeq: input.seq,
@@ -77,8 +103,10 @@ export function observeStep(input: ObserveStepInput): StepObservation {
   const segments: Segment[] = events.flatMap((ev) => segmentEvent(ev));
   input.graph.addSegments(segments);
   // recall.window = w: only segments that arrived since the previous step are scored, each against
-  // the most recent w segments. Segments outside the window keep their edges and stay reachable.
-  const windowScore = input.graph.scoreNew({
+  // the most recent w segments. Segments outside the window keep their edges and stay reachable. The result is
+  // not read here - the graph keeps the running total - but the scoring itself must still happen, or the
+  // segments this step added would stay unconnected to the window.
+  input.graph.scoreNew({
     windowN: input.policy.recall.window,
     threshold: input.policy.recall.relevanceThreshold,
   });
@@ -99,8 +127,30 @@ export function observeStep(input: ObserveStepInput): StepObservation {
     });
   }
   const anchor = lastIndexWhere(segments, (s) => s.kind === 'user');
-  const current = anchor >= 0 ? segments[anchor] : segments[segments.length - 1]!;
-  const before = (anchor >= 0 ? segments.slice(0, anchor) : segments.slice(0, -1)).filter(
+  // Where the model view is taken from. The step payload usually carries nothing (see adaptSessionEvent for the
+  // measurement), and the session-event stream that upkeep folds into the graph is what actually holds the
+  // conversation. So the window is this payload's segments when it has any, and the graph's own append order
+  // otherwise. Both are the same thing in the steady state: the payload's segments are added to this same graph
+  // immediately above, so the graph is a superset and using it never loses a segment the payload carried.
+  const window: Segment[] = segments.length > 0 ? segments : input.graph.orderedSegments();
+  const windowAnchor = anchor >= 0 ? anchor : lastIndexWhere(window, (s) => s.kind === 'user');
+  const current = windowAnchor >= 0 ? window[windowAnchor] : window[window.length - 1];
+  if (current === undefined) {
+    // The counts are in the message on purpose. "No segment" alone was not enough to tell which stage dropped
+    // the step, and guessing at it cost a whole session.
+    return {
+      kind: 'empty',
+      reason:
+        'no segment to assemble ' +
+        `(messages=${input.messages.length} events=${events.length} reported=${report.messages} ` +
+        `emptyMessages=${report.empty} parts=${report.parts} rawParts=${report.rawParts} ` +
+        `graphSegments=${input.graph.stats().segments} ` +
+        `unknownRoles=[${report.unknownRoles.join(',')}] unknownParts=[${report.unknownPartTypes.join(',')}])`,
+      messages: input.messages.length,
+      report,
+    };
+  }
+  const before = (windowAnchor >= 0 ? window.slice(0, windowAnchor) : window.slice(0, -1)).filter(
     (s) => s.kind !== 'systemPinned',
   );
   const tailCount = Math.max(0, Math.min(input.policy.tail.k, before.length));
@@ -123,11 +173,17 @@ export function observeStep(input: ObserveStepInput): StepObservation {
     history,
   });
 
-  const fullTokens = totalTokens(segments);
+  // Measured against the window the view was actually taken from, not the payload: with an empty payload the
+  // payload's tokens are zero, and "what the full history would have cost" would be reported as free.
+  const fullTokens = totalTokens(window);
   const selectedTokens = result.budget.used;
+  const graphStats = input.graph.stats();
   const event: AssemblyEvent = {
     windowN: input.policy.recall.window,
-    scoredPairs: windowScore.scoredPairs,
+    // Cumulative, because the pairs are no longer all scored here: upkeep scores each new session segment as
+    // it arrives, so a per-call number would report only this step's own segment and hide every pair the
+    // window actually cost. The graph is the single place that knows the running total.
+    scoredPairs: graphStats.scoredPairs,
     type: 'assembly',
     schema: TELEMETRY_SCHEMA_VERSION,
     ts: input.now,
@@ -144,6 +200,7 @@ export function observeStep(input: ObserveStepInput): StepObservation {
   };
 
   return {
+    kind: 'assembled',
     event,
     segments,
     selectedIds: result.layout.recalled.map((s) => s.id),
