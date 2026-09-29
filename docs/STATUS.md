@@ -636,6 +636,33 @@ rather than the history length. 108/108 green.
 
 Still open: a multi-step session to show `scoredPairs` per step in a longer run (the headless probe recorded a
 single assembly step, where the counter is necessarily 0), the four documents, and the panel's direct write.
+### Round 32: why the panel cannot write — the wrong slot, not a missing allowlist
+
+The official cookbook ([Adding a settings page](https://deepseek-harness.github.io/deepseek-harness/en/reference/cookbook/adding-a-settings-card))
+answers the open question, and the answer is architectural rather than a permission:
+
+1. **Live configuration fields are declared in the plugin's `Config` schema with `.volatile()`** —
+   `retries: z.number().step(1).min(0).default(3).volatile()` — read through `config.retries.get()`, with
+   `ctx.on('loader/volatile-update', …)` for HMR. A snapshot taken at the start of an operation stays consistent.
+2. **The write path belongs to the Plugins page**, whose owner hands a registered page `form.state` and
+   **`form.mutate(operations, expectedRevision)`**; the Host validates the full `Config` and applies edits through
+   ConfigEditor plus volatile HMR. Such a page registers under the Plugins surface (`plugins.item` /
+   `plugins.detail.*`, `configForms.whileServed` for a companion package).
+3. `role('secret')` keeps a value out of form responses, and credential-managed values use credential references —
+   so the Jev key stays in the credentials domain, which is where our host half already reads it.
+
+Our panel registers into `settings.section` (a general settings slot) with **no form binding and no volatile
+Config fields**, so there is nothing for `set`/`mutate` to write into: the earlier `settings/mutate` refusals were
+that slot mismatch showing through, not a `WEB_SETTINGS_NAMESPACES` allowlist problem.
+
+**Concrete next step:** declare `depth`, `relevanceThreshold` and `window` as `Volatile<number>` fields in the
+plugin `Config` schema (`.volatile()`, with the same bounds the parsers enforce), read them with `.get()` at session
+start and on `loader/volatile-update`, and expose the card through the Plugins page's form so `form.mutate` performs
+the write. `/s1-tune` stays as the headless path, and the tuning file as the fallback store.
+
+**Also confirmed:** the browser half attaches to the Loader row whose specifier is the bare package name (ours is),
+`dsh.client.inject` is the declared dependency list we already use, and the built `./client` must be the lazy-CJS
+factory this repository already emits.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
