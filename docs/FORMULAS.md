@@ -294,3 +294,27 @@ $$
 ---
 
 *Citations and fact verification in [RELATED_WORK.md](./RELATED_WORK.md); implementation spec in [AGENT_BRIEF.md](./AGENT_BRIEF.md). Changes to parameter default values must be synced with the AGENT_BRIEF §4 configuration table.*
+
+## Recall window w (`recall.window`)
+
+A newly arrived session-event segment `s` (a user input `x`, a model output, a tool result) is scored by the
+System-1 association backend against only the **most recent w segments** of history, not against all of it. The
+graph itself stays unbounded: segments that fall out of the window keep every edge they already have and remain
+reachable by the bounded BFS (`recall.depth = d`, `recall.releTao = r`). **w decides whether a pair is scored;
+it never decides what exists in the graph.**
+
+Cost per new segment, with `t` segments already in the graph:
+
+| strategy | pairs scored for segment `t+1` | total after `T` segments |
+| --- | --- | --- |
+| full history | `t` — grows without bound | `T(T-1)/2` = Theta(T^2) |
+| windowed (this design) | `min(t, w)` — bounded by `w` | `T*w - w(w-1)/2` = Theta(T*w) |
+
+At `T = 4096`, `w = 1024`: full history scores **8,386,560** pairs, the window scores **3,670,528**, and — the
+part that matters for a long session — the window's *per-segment* cost never exceeds 1024 no matter how long the
+conversation runs, while the full-history cost keeps climbing. This is the S1 call saving the window exists for;
+it is not a recall parameter.
+
+Measured offline in `packages/core/test/window.test.ts` (`w = 64`, 400 segments): `scoredPairs` stays within
+`total * w` and strictly below full pairwise scoring, the first segment still holds its edges after leaving the
+window, and **doubling w roughly doubles the cost** — the cost tracks `w`, not the session length.

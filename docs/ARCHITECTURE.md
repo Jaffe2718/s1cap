@@ -104,3 +104,26 @@ Degradation is therefore total: if Laya/Jev is slow, absent or wrong, the turn c
 (tier-0 metadata + recency window), which is exactly the C1 behaviour the ablation compares against.
 
 Cell presets: `bench/cells/C{1..4}.json`.
+
+## Parameter: `recall.window` = w
+
+| key | symbol | default | rule | what it does |
+| --- | --- | --- | --- | --- |
+| `recall.window` | w | 1024 | integer >= 1 | how many of the most recent segments a newly arrived segment is scored against |
+
+Editable through `/s1-tune d r w` (e.g. `/s1-tune 3 0.7 512`) and through the S1CAP settings panel, which carries
+the three knobs in one row: BFS depth d, relevance threshold r, scoring window w. Values persist in
+`~/.dsh/.s1cap/tuning.json` and are applied to the live policy at session start; `/s1` reports
+`tuning: { stored, effective }` with all three fields.
+
+**Rejected alternative — scoring against the full history.** It looks more thorough and is worse on every axis
+that matters: the per-segment System-1 cost grows without bound as a session ages, the marginal value collapses
+because a segment from hundreds of turns ago is rarely related to what just arrived, and it makes the cost of a
+long session unpredictable, which is exactly what the benchmark comparison (completion / cost / latency) must hold
+constant. Scoring the whole history is therefore not an option that was overlooked; it is the baseline the window
+is defined against.
+
+**Also rejected, deliberately: "revival" scoring.** A segment outside the window is never re-scored later, even
+when BFS happens to reach it. Reachability is unaffected (it keeps its edges and its place in the graph), and w
+exists solely to save System-1 calls — so re-scoring on a BFS hit would reintroduce exactly the unbounded cost the
+window removes.

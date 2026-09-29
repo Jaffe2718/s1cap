@@ -466,3 +466,24 @@ Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Ter
 ## 13. Source index (all fetched 2026-09-27/28)
 
 Paper T: arxiv.org/abs/2609.02702 · Jev: docs.typesafe.ai/{api,models,model-jaggedness/jev-1.13,cookbooks/parallel_questions} · Laya: github.com/NandhaKishorM/laya · EdgeJev: github.com/yzfly/edgejev · Kev: github.com/jaredpalmer/kev · JevBench: benchmarkheaven.com/jev-models · DeepSeek: api-docs.deepseek.com/quick_start/pricing · GLM: docs.z.ai/guides/overview/pricing · DSH plugin mechanics: registry.npmjs.org/dsh-command-context-trim (README) + local `~/.dsh/profiles/desktop/` inspection · opencode: opencode.ai/docs/providers · pi-system-one: registry.npmjs.org/pi-system-one · Benchmarks: swebench.com/verified.html, tbench.ai, github.com/sierra-research/tau2-bench · Related work: see `docs/RELATED_WORK.md`.
+
+## Recall window: the algorithm step, and the rule it taught
+
+**Algorithm (upkeep).** After the segments of a step are added to the association graph, score **only the
+segments that arrived since the previous step**, each against the most recent `w = recall.window` segments, with
+edges below `r = recall.releTao` dropped. Emit `windowN` and `scoredPairs` on the assembly event so the System-1
+saving is a number in the telemetry rather than a claim in prose.
+
+**Ground rule 9 — a new value must land in every sibling parse path.** Adding `w` took two rounds to become real,
+because the same value is parsed in four places: the credential-style payload (`parseTuning`), the command line
+(`parseTuningArgs`), the tuning file reader (`readTuningFile`), and the merge that applies the file over the
+payload. It was added to the first two and forgotten in the latter two, so the panel and `/s1-tune` accepted a
+window that a session silently ignored — and the *probe* caught it only because it prints `read` and `effective`
+side by side. When you add a parameter: grep for every sibling parser, patch all of them in one pass, and make the
+probe show both halves.
+
+**Ground rule 10 — edit these files line-based, never by eyeballed indentation.** Three separate exact-string
+anchors missed because the leading whitespace was copied by eye; one of those misses mattered because a second
+patch had already referenced the symbol, and the suite went red with `windowScore is not defined`. Derive
+indentation from the file (`$indent = ($line -replace '^(\s*).*$', '$1')`), assert post-conditions (declaration
+counts, method presence) in the same command that writes, and re-run the suite before committing.
