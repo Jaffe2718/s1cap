@@ -43,6 +43,7 @@ import type { Tuning } from './credentials.ts';
 import { createStepObserver } from './step-observer.ts';
 import type { StepObserver } from './step-observer.ts';
 import { createS1Relevance } from './s1-relevance.ts';
+import { createPlanGate } from './plan-gate-runtime.ts';
 
 export interface S1CapPluginConfig extends AssemblyPolicy {
   /** master switch: anything other than true keeps the plugin completely inert (default false)
@@ -680,9 +681,20 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         `[s1cap] relevance: S1 batch scoring active (${describeS1Backend(backend)}, up to ${config.s1.questionsPerCall} candidates per call)`,
       );
     }
+    // The plan gate scores the model's own candidate plans with a choice question. It is advisory: the order is
+    // computed and recorded, and nothing in this plugin feeds it back into a prompt or a stop decision. The gate
+    // only runs when a System-1 backend exists, since without one it would just return the model's own order.
+    const planGate =
+      client === undefined
+        ? undefined
+        : createPlanGate(
+            { policy: config, emit: (event) => controlLog.emit(event), onWarn: (m) => ctx.logger?.warn?.(m) },
+            (state, questions) => client.decide(state, questions),
+          );
     observer = createStepObserver({
       policy: config,
       ...(relevance !== undefined ? { scoreBatch: relevance } : {}),
+      ...(planGate !== undefined ? { planGate } : {}),
       emit: (event) => {
         try {
           controlLog.emit(event);

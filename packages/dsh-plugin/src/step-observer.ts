@@ -32,6 +32,13 @@ export interface StepObserverOptions {
     current: Segment,
     candidates: readonly Segment[],
   ) => readonly number[] | Promise<readonly number[]>;
+  /**
+   * The advisory plan gate. Optional, and its return value is only recorded: the observer has no way to feed an
+   * order back into the prompt, which is the property that makes "never vetoes stop" true by construction.
+   */
+  planGate?: {
+    consider(text: string, sessionId: string, step: number): Promise<unknown>;
+  };
   sessionId?: string;
   onWarn?(message: string): void;
   onObserved?(summary: string): void;
@@ -224,6 +231,22 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       stats.upkeepSegments += segments.length;
       stats.upkeepScoredPairs += scored.scoredPairs;
       seq += raw.length;
+
+      // The plan gate reads the model's own step list out of its assistant messages. It runs here, after the
+      // segments are in the graph, because an assistant message is where both arrive, and its failure is
+      // contained here for the same reason the scoring is: an advisory order that cannot be computed must not
+      // cost the session a segment.
+      if (opts.planGate !== undefined) {
+        for (const ev of raw) {
+          if (ev.kind !== 'assistant') continue;
+          try {
+            await opts.planGate.consider(ev.text, stats.sessionId, stats.upkeepEvents);
+          } catch (err) {
+            stats.errors += 1;
+            opts.onWarn?.(`[s1cap] plan gate failed (ignored): ${String(err)}`);
+          }
+        }
+      }
     },
   });
 
