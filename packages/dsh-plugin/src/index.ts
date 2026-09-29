@@ -35,6 +35,7 @@ import type { ResolvedS1Backend } from '@s1cap/s1-client';
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.ts';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { primeSystemPrompt } from './system-prompt.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from './credentials.ts';
@@ -352,14 +353,18 @@ function readTuningFile(): Tuning {
   }
 }
 
-function writeTuningFile(values: Tuning): boolean {
+/**
+ * Persist the knobs. The failure reason is returned rather than swallowed: a Save that reports "not persisted"
+ * without saying why is the same silent-failure shape this project keeps rejecting, and the panel prints it.
+ */
+function writeTuningFile(values: Tuning): { ok: boolean; error?: string } {
+  const path = resolveTelemetryPath(TUNING_FILE);
   try {
-    const path = resolveTelemetryPath(TUNING_FILE);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(values) + '\\n', 'utf8');
-    return true;
-  } catch {
-    return false;
+    writeFileSync(path, JSON.stringify(values) + '\n', 'utf8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: path + ": " + (e instanceof Error ? e.message : String(e)) };
   }
 }
 
@@ -433,6 +438,42 @@ export function preStepMiddleware(
  * the plugin stays inert. `enabled` defaults to false, so merely registering the bundle changes nothing
  * — no hooks, no commands, no System-1 calls.
  */
+/**
+ * Look a service up WITHOUT declaring it in `inject`.
+ *
+ * Declaring `webServer` is the obvious route, and it is what `dsh-pet` does - but a declared dependency is a hard
+ * gate: cordis applies a plugin only once every injected service exists, so a headless profile with no web server
+ * would stop applying this plugin at all and take the observation lane and /s1-tune down with it. That was measured,
+ * not assumed: with the declaration, a headless profile went from one control-plane record to zero.
+ *
+ * Reading the service out of the registry instead keeps this plugin applicable everywhere - the route exists in a
+ * web profile and is simply absent in a headless one, which is the degradation the panel already handles. Cordis
+ * resolves `ctx.<name>` by walking up the fiber chain and `ctx.registry` is always present, so the same walk is
+ * available without declaring. Every step is guarded: a future cordis that reorganises this yields "no route",
+ * never a crash.
+ */
+function findService<T>(ctx: PluginContext, name: string): T | undefined {
+  try {
+    const registry = (ctx as unknown as { registry?: { values?: () => Iterable<unknown> } }).registry;
+    if (typeof registry?.values !== 'function') return undefined;
+    for (const runtime of registry.values()) {
+      const fibers = (runtime as { fibers?: Iterable<unknown> }).fibers ?? [];
+      for (const fiber of fibers) {
+        const impl = (fiber as { store?: Record<string, { value?: T }> }).store?.[name];
+        if (impl?.value !== undefined) return impl.value;
+        try {
+          const value = (fiber as { ctx?: Record<string, T> }).ctx?.[name];
+          if (value !== undefined) return value;
+        } catch {
+          /* the owning fiber does not expose it either - keep looking */
+        }
+      }
+    }
+  } catch {
+    /* the registry shape changed - degrade to no route */
+  }
+  return undefined;
+}
 export function apply(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void {
   try {
     applyInner(ctx, raw);
@@ -726,7 +767,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
    * answer with the effective triple. The `/s1-tune` command and the panel's Save button share it, so the command
    * line and the button cannot drift apart in what they accept or what they report.
  */
-  const applyTuning = (parsed: Tuning): { ok: boolean; reason?: string; effective?: Tuning; persisted?: boolean } => {
+  const applyTuning = (parsed: Tuning): { ok: boolean; reason?: string; effective?: Tuning; persisted?: boolean; persistError?: string } => {
     if (parsed.depth === undefined && parsed.relevanceThreshold === undefined) {
       return { ok: false, reason: 'nothing to set: depth d must be an integer > 0 and threshold r between 0 and 1' };
     }
@@ -734,7 +775,8 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
     if (parsed.relevanceThreshold !== undefined) config.recall.relevanceThreshold = parsed.relevanceThreshold;
     if (parsed.window !== undefined) config.recall.window = parsed.window;
-    const persisted = writeTuningFile(appliedTuning);
+    const persist = writeTuningFile(appliedTuning);
+    const persisted = persist.ok;
     ctx.logger?.info?.(
       `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.relevanceThreshold} window=${config.recall.window}${persisted ? '' : ' (not persisted: file write failed)'}`,
     );
@@ -742,6 +784,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       ok: true,
       effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window },
       persisted,
+      ...(persist.ok ? {} : { persistError: persist.error }),
     };
   };
   registerCommands(ctx, [
@@ -848,9 +891,10 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
    * PUT takes the same text the command line takes ("3 0.7 512", or d=/r=/w=) and answers with the effective
    * triple, so a successful Save is proven by the response body rather than by the absence of an error.
  */
-  if (typeof ctx.webServer?.register === 'function') {
+  const webServer = findService<{ register: (spec: unknown) => void }>(ctx, 'webServer');
+  if (webServer !== undefined) {
     const registerRoute = (): void => {
-      ctx.webServer?.register?.({
+      webServer.register({
         kind: 'prefix',
         path: TUNING_ROUTE,
         handler: async (req: IncomingMessage, res: ServerResponse) => {
