@@ -414,6 +414,33 @@ is what it follows.
 (`--members`/`--grep` on `dsh-typert-registry` and `dsh-credentials-local` for the wire shape) and send exactly
 those field names for both the key (`{ apiKey }` is the shape the shipped LLM credential uses) and the tuning
 value. Until that lands, the values are validated in the UI but a session still runs at the policy defaults.
+### Recall tuning persistence — two transports eliminated with evidence (round 22)
+
+The panel carries **BFS depth d** and **relevance threshold r**, validated locally (verified live: `d = 0` is
+refused with *"depth d must be an integer greater than 0"*), and the host already parses and applies them
+(`parseTuning`, applied to the live policy at session start, reported through `/s1`). What is still missing is the
+*transport* that stores them, and two candidates are now ruled out by measurement rather than by guesswork:
+
+1. **`remote.credentials.set(ref, value)`** — refused by the boundary declared in
+   `dsh-api-settings-controller` (`credentials/set` carries `:ref` and `:value` type symbols):
+
+   ```
+   tuning save refused: typert gateway: credentials/set: wire field "value" failed boundary validation
+   ```
+
+   with a bare string it answered *"invalid payload for credentials.set"*. The store underneath
+   (`dsh-credentials-local`) accepts a plain string — `async set(ref, value) { if (value.length === 0) throw … await
+   this.write(ref, value); }` — so the RPC validates more than the store does, and an arbitrary ref such as
+   `s1cap/tuning` is not what that boundary is for. The key belongs there; the tuning does not.
+2. **`remote.settings.mutate(ns, ops, expectedRevision)`** — the right home for non-secret plugin settings, and its
+   wire shape is confirmed (`:ns`, `:ops`, `:expectedRevision`, view type
+   `@deepseek-ai/dsh-settings/types#SettingsNamespaceView`), **but the namespace has to be registered on the host
+   first** through the `dsh-settings` service. That is the next concrete step: read `dsh-settings`' registration
+   API (`--members`/`--grep`), declare an `s1cap` namespace with `depth` and `tau` fields, have the panel write
+   through `settings.mutate`, and keep the host's `parseTuning` as the fail-safe gate.
+
+Until that lands, the two knobs are visible and validated but a session still runs at the policy defaults — stated
+plainly here so nobody reads the panel as proof that a run used a non-default depth.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
