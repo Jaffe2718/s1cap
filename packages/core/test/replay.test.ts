@@ -49,6 +49,21 @@ test('the digest is key-order independent but value sensitive', () => {
   assert.notEqual(digestRecords([a as never]), digestRecords([{ ...a, seq: 1 } as never]));
 });
 
+test('a malformed tape fails at the offending line instead of producing a partial replay', () => {
+  const first = JSON.stringify({ schema: 1, sessionId: 'S', step: 1, messages: [] });
+  const cases = [
+    ['{bad json', /line 2: invalid JSON/],
+    ['null', /line 2: expected a step object/],
+    [JSON.stringify({ schema: 2, sessionId: 'S', step: 2, messages: [] }), /line 2: unsupported schema 2/],
+    [JSON.stringify({ schema: 1, sessionId: 'S', step: 2 }), /line 2: messages must be an array/],
+    [JSON.stringify({ schema: 1, sessionId: 'other', step: 2, messages: [] }), /line 2: sessionId changed/],
+    [JSON.stringify({ schema: 1, sessionId: 'S', step: 1.5, messages: [] }), /line 2: step must be a non-negative integer/],
+  ] as const;
+  for (const [badLine, reason] of cases) {
+    assert.throws(() => parseTape(`${first}\n${badLine}`), reason);
+  }
+});
+
 test('the cells behave as the ablation claims: C1 selects nothing, C4 accounts a real budget', () => {
   const tape = parseTape(tapeText);
   const c1 = replayTape(tape, { ...OPTIONS, policy: cellPolicy('C1') });

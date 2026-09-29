@@ -74,23 +74,46 @@ export function digestRecords(records: readonly AssemblyEvent[]): string {
 export function parseTape(text: string, fallbackSessionId = 'tape'): Tape {
   const steps: TapeStep[] = [];
   let sessionId = fallbackSessionId;
-  let schema: number = TAPE_SCHEMA_VERSION;
-  for (const line of text.split(/\r?\n/)) {
+  let explicitSessionId: string | undefined;
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
     const trimmed = line.trim();
     if (trimmed === '') continue;
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    if (parsed['sessionId'] !== undefined && typeof parsed['sessionId'] === 'string') sessionId = parsed['sessionId'];
-    if (typeof parsed['schema'] === 'number') schema = parsed['schema'];
-    const messages = parsed['messages'];
-    if (Array.isArray(messages)) {
-      steps.push({
-        step: typeof parsed['step'] === 'number' ? parsed['step'] : steps.length + 1,
-        messages,
-        ...(typeof parsed['systemPrompt'] === 'string' ? { systemPrompt: parsed['systemPrompt'] } : {}),
-      });
+    const lineNumber = index + 1;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error(`Tape line ${lineNumber}: invalid JSON`);
     }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`Tape line ${lineNumber}: expected a step object`);
+    }
+    const record = parsed as Record<string, unknown>;
+    if (record['schema'] !== undefined && record['schema'] !== TAPE_SCHEMA_VERSION) {
+      throw new Error(`Tape line ${lineNumber}: unsupported schema ${String(record['schema'])}`);
+    }
+    if (record['sessionId'] !== undefined) {
+      if (typeof record['sessionId'] !== 'string' || record['sessionId'] === '') {
+        throw new Error(`Tape line ${lineNumber}: invalid sessionId`);
+      }
+      if (explicitSessionId !== undefined && record['sessionId'] !== explicitSessionId) {
+        throw new Error(`Tape line ${lineNumber}: sessionId changed`);
+      }
+      explicitSessionId = record['sessionId'];
+      sessionId = record['sessionId'];
+    }
+    const messages = record['messages'];
+    if (!Array.isArray(messages)) throw new Error(`Tape line ${lineNumber}: messages must be an array`);
+    if (record['step'] !== undefined && (typeof record['step'] !== 'number' || !Number.isSafeInteger(record['step']) || record['step'] < 0)) {
+      throw new Error(`Tape line ${lineNumber}: step must be a non-negative integer`);
+    }
+    steps.push({
+      step: typeof record['step'] === 'number' ? record['step'] : steps.length + 1,
+      messages,
+      ...(typeof record['systemPrompt'] === 'string' ? { systemPrompt: record['systemPrompt'] } : {}),
+    });
   }
-  return { schema: schema === TAPE_SCHEMA_VERSION ? TAPE_SCHEMA_VERSION : TAPE_SCHEMA_VERSION, sessionId, steps };
+  return { schema: TAPE_SCHEMA_VERSION, sessionId, steps };
 }
 
 /** Replay a tape through the pipeline. Pure: the same tape and options give the same digest. */
