@@ -318,10 +318,10 @@ const TUNING_FILE = './.s1cap/tuning.json';
 function readTuningFile()         {
   try {
     const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
-    const parsed = JSON.parse(raw)                                      ;
+    const parsed = JSON.parse(raw)                                          ;
     const out         = {};
     if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth > 0) out.depth = parsed.depth;
-    if (typeof parsed.tau === 'number' && parsed.tau >= 0 && parsed.tau <= 1) out.tau = parsed.tau;
+    if (typeof parsed.releTao === 'number' && parsed.releTao >= 0 && parsed.releTao <= 1) out.releTao = parsed.releTao;
     return out;
   } catch {
     return {};
@@ -623,10 +623,10 @@ function applyInner(ctx               , raw                             )       
       appliedTuning = parseTuning(tuningRead.key);
       const fromFile = readTuningFile();
       if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
-      if (fromFile.tau !== undefined) appliedTuning.tau = fromFile.tau;
+      if (fromFile.releTao !== undefined) appliedTuning.releTao = fromFile.releTao;
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
-      if (appliedTuning.tau !== undefined) config.recall.tau = appliedTuning.tau;
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, tau: config.recall.tau } }) + '\n');
+      if (appliedTuning.releTao !== undefined) config.recall.releTao = appliedTuning.releTao;
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, releTao: config.recall.releTao } }) + '\n');
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
         observer,
@@ -661,17 +661,17 @@ function applyInner(ctx               , raw                             )       
       input: { hint: 'd r   (e.g. "3 0.7", or "d=3", or "r=0.7")' },
       handler: ({ rawInput }) => {
         const parsed = parseTuningArgs(rawInput);
-        if (parsed.depth === undefined && parsed.tau === undefined) {
+        if (parsed.depth === undefined && parsed.releTao === undefined) {
           return { ok: false, reason: 'nothing to set: depth d must be an integer > 0 and threshold r between 0 and 1' };
         }
         appliedTuning = { ...appliedTuning, ...parsed };
         if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
-        if (parsed.tau !== undefined) config.recall.tau = parsed.tau;
+        if (parsed.releTao !== undefined) config.recall.releTao = parsed.releTao;
         const persisted = writeTuningFile(appliedTuning);
         ctx.logger?.info?.(
-          `[s1cap] recall tuning: depth=${config.recall.depth} tau=${config.recall.tau}${persisted ? '' : ' (not persisted: file write failed)'}`,
+          `[s1cap] recall tuning: depth=${config.recall.depth} releTao=${config.recall.releTao}${persisted ? '' : ' (not persisted: file write failed)'}`,
         );
-        return { ok: true, effective: { depth: config.recall.depth, tau: config.recall.tau }, persisted };
+        return { ok: true, effective: { depth: config.recall.depth, releTao: config.recall.releTao }, persisted };
       },
     },
     {
@@ -688,7 +688,7 @@ function applyInner(ctx               , raw                             )       
           recall: config.recall,
           tuning: {
             stored: appliedTuning,
-            effective: { depth: config.recall.depth, tau: config.recall.tau },
+            effective: { depth: config.recall.depth, releTao: config.recall.releTao },
             keySource: credentialSource,
           },
           tail: config.tail,

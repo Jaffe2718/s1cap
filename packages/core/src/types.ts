@@ -86,7 +86,14 @@ export interface AssemblyPolicy {
   };
   recall: {
     /** relevance threshold τ */
-    tau: number;
+      /** relevance threshold (recall.releTao, 0..1) */
+      releTao: number;
+      /**
+       * S1 scoring window w (recall.window): a new segment is scored only against the most recent w
+       * segments. It exists purely to save System-1 calls - BFS recall (depth d, threshold r) is
+       * unaffected, and segments outside the window stay in the graph as nodes and remain reachable.
+       */
+      window: number;
     /** bounded BFS depth d */
     depth: number;
     /** per-node expansion fanout k */
@@ -174,7 +181,8 @@ export function defaultPolicy(): AssemblyPolicy {
     cache: { reselectPolicy: 'perTask', blockTokens: 64 },
     tas: { on: true, tMaxChars: 8000, updatePolicy: 'perTask' },
     recall: {
-      tau: 0.55,
+      releTao: 0.55,
+    window: 1024,
       depth: 2,
       fanout: 8,
       tier1: 'embed',

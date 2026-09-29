@@ -73,13 +73,13 @@ test('recall: bounded BFS honours τ, depth and fanout', () => {
   g.upsertEdge(edge('a', 'b', 0.8));
   g.upsertEdge(edge('c', 'x', 0.3)); // below τ
 
-  const hits = g.recall(['x'], { tau: 0.55, depth: 2, fanout: 8, lambdaMs: 1e9, now: 1000 });
+  const hits = g.recall(['x'], { releTao: 0.55, depth: 2, fanout: 8, lambdaMs: 1e9, now: 1000 });
   const ids = hits.map((h) => h.id);
   assert.deepEqual(ids, ['a', 'b'], 'a then b by weight; c filtered by τ');
   assert.equal(hits[1]?.via, 'a');
   assert.equal(hits[1]?.depth, 2);
 
-  const shallow = g.recall(['x'], { tau: 0.55, depth: 1, fanout: 8, lambdaMs: 1e9, now: 1000 });
+  const shallow = g.recall(['x'], { releTao: 0.55, depth: 1, fanout: 8, lambdaMs: 1e9, now: 1000 });
   assert.deepEqual(shallow.map((h) => h.id), ['a'], 'depth 1 stops before b');
 });
 
@@ -89,7 +89,7 @@ test('recall: fanout keeps only the strongest k neighbours', () => {
   g.upsertEdge(edge('x', 'a', 0.95));
   g.upsertEdge(edge('x', 'b', 0.85));
   g.upsertEdge(edge('x', 'c', 0.75));
-  const hits = g.recall(['x'], { tau: 0.5, depth: 1, fanout: 2, lambdaMs: 1e9, now: 1000 });
+  const hits = g.recall(['x'], { releTao: 0.5, depth: 1, fanout: 2, lambdaMs: 1e9, now: 1000 });
   assert.deepEqual(hits.map((h) => h.id), ['a', 'b']);
 });
 
@@ -120,7 +120,7 @@ function buildAssemblerFixture(): {
 test('assemble (C4/TAS on): recalled block ordered by weight, x last, budget accounted', () => {
   const fx = buildAssemblerFixture();
   const policy = defaultPolicy();
-  policy.recall.tau = 0.5;
+  policy.recall.releTao = 0.5;
   policy.recall.budgetRatio = 0.5;
   const res = assemble({
     graph: fx.graph,
@@ -155,7 +155,7 @@ test('assemble (C4/TAS on): recalled block ordered by weight, x last, budget acc
 test('assemble: TAS off drops the state proxy and orders recall chronologically', () => {
   const fx = buildAssemblerFixture();
   const policy = cellPolicy('C3'); // selection on, TAS off
-  policy.recall.tau = 0.5;
+  policy.recall.releTao = 0.5;
   policy.recall.budgetRatio = 0.5;
   const res = assemble({
     graph: fx.graph,
@@ -207,7 +207,7 @@ test('assemble: thin recall degrades to the recency window', () => {
   g.upsertEdge(edge('x', 'tiny', 0.9)); // 5 tokens << μ·budget
 
   const policy = defaultPolicy();
-  policy.recall.tau = 0.5;
+  policy.recall.releTao = 0.5;
   policy.recall.budgetRatio = 0.5;
   const res = assemble({
     graph: g,

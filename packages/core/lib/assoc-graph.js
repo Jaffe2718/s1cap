@@ -15,7 +15,7 @@ export function decayedWeight(w        , ageMs        , lambdaMs        )       
 
                                 
                               
-              
+                  
                             
                 
                                     
@@ -37,6 +37,12 @@ export function decayedWeight(w        , ageMs        , lambdaMs        )       
 
 export class AssociationGraph {
   #segments = new Map                 ();
+  /** insertion order, for the scoring window */
+  #order           = [];
+  /** how many entries of #order have been scored already */
+  #scored = 0;
+  /** cumulative pair comparisons - the number recall.window is meant to bound */
+  #scoredPairs = 0;
   #edges = new Map                         ();
   #adj = new Map                  ();
 
@@ -49,9 +55,56 @@ export class AssociationGraph {
   }
 
   addSegments(segments                   )       {
-    for (const s of segments) this.#segments.set(s.id, s);
+      for (const s of segments) {
+        this.#segments.set(s.id, s);
+        if (!this.#order.includes(s.id)) this.#order.push(s.id);
+      }
   }
 
+  /**
+   * Score segments that arrived since the last call, each against only the most recent `windowN` segments.
+   *
+   * This is where `recall.window = w` lives. The cost is one pass of `w` comparisons per new segment - O(w),
+   * independent of how long the session has grown - and `scoredPairs` makes that saving measurable instead of
+   * rhetorical. Segments outside the window are untouched: they keep every edge they already had and stay
+   * reachable by `recall()`, because w only decides *whether a pair is scored*, not what exists in the graph.
+   */
+  scoreNew(opts                                                                                    )   
+                        
+                  
+    {
+    const windowN = Math.max(1, Math.trunc(opts.windowN));
+    const scorer = opts.score ?? lexicalScore;
+    let scoredPairs = 0;
+    let edges = 0;
+    while (this.#scored < this.#order.length) {
+      const id = this.#order[this.#scored]          ;
+      this.#scored += 1;
+      const current = this.#segments.get(id);
+      if (current === undefined) continue;
+      const from = Math.max(0, this.#scored - 1 - windowN);
+      for (let i = from; i < this.#scored - 1; i += 1) {
+        const otherId = this.#order[i]          ;
+        const other = this.#segments.get(otherId);
+        if (other === undefined) continue;
+        scoredPairs += 1;
+        const weight = scorer(current, other);
+        if (weight < opts.threshold) continue;
+        this.upsertEdge({
+          from: otherId,
+          to: id,
+          w: weight,
+          wTier1: weight,
+          source: 's1',
+          verifiedAt: current.ts,
+          provenance: 'window:' + String(windowN),
+        });
+        edges += 1;
+      }
+    }
+    this.#scoredPairs += scoredPairs;
+    return { scoredPairs, edges };
+  }
   getSegment(id        )                      {
     return this.#segments.get(id);
   }
@@ -103,7 +156,7 @@ export class AssociationGraph {
             const age = opts.now - e.verifiedAt;
             return { other, w: decayedWeight(e.w, age, opts.lambdaMs) };
           })
-          .filter((n) => n.w > opts.tau)
+          .filter((n) => n.w > opts.releTao)
           .sort((a, b) => b.w - a.w)
           .slice(0, Math.max(0, opts.fanout));
 
@@ -129,7 +182,29 @@ export class AssociationGraph {
       .sort((a, b) => b.w - a.w);
   }
 
-  stats()                                      {
-    return { segments: this.#segments.size, edges: this.#edges.size };
+    stats()                                                           {
+      return { segments: this.#segments.size, edges: this.#edges.size, scoredPairs: this.#scoredPairs };
   }
+}
+
+/**
+ * Local lexical fallback scorer (shared tokens over the smaller token count). It stands in for the System-1
+ * association backend so the window and its cost are testable offline; the S1 scorer replaces it later without
+ * touching the windowing logic.
+ */
+export function lexicalScore(a         , b         )         {
+  const left = tokensOf(a.text);
+  const right = tokensOf(b.text);
+  if (left.size === 0 || right.size === 0) return 0;
+  let shared = 0;
+  for (const token of left) if (right.has(token)) shared += 1;
+  return shared / Math.min(left.size, right.size);
+}
+
+function tokensOf(text        )              {
+  const out = new Set        ();
+  for (const token of text.toLowerCase().split(/[^\\p{L}\\p{N}_]+/u)) {
+    if (token.length > 1) out.add(token);
+  }
+  return out;
 }

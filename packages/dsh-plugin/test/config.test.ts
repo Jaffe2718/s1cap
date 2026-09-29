@@ -139,16 +139,16 @@ test('every config problem is reported as a warning and the session keeps its de
     enabled: true,
     cell: 'C9' as unknown as 'C4',
     termination: 'harness-owned' as unknown as 'model-owned',
-    recall: { tau: 3 } as never,
+    recall: { releTao: 3 } as never,
     laya: { enabled: true, autoStart: false, port: 99999 },
   });
   const warns = h.warns.join('\n');
   assert.match(warns, /cell: must be one of/);
   assert.match(warns, /termination: must be "model-owned"/);
-  assert.match(warns, /recall\.tau: must be within/);
+  assert.match(warns, /recall\.releTao: must be within/);
   assert.match(warns, /laya\.port: must be within/);
-  const status = h.commands.get('s1')?.({}) as { recall: { tau: number }; cell: string };
-  assert.equal(status.recall.tau, 0.55, 'invalid value falls back to the default');
+  const status = h.commands.get('s1')?.({}) as { recall: { releTao: number }; cell: string };
+  assert.equal(status.recall.releTao, 0.55, 'invalid value falls back to the default');
   assert.equal(status.cell, 'C4');
 });
 

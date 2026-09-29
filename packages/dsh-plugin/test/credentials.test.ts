@@ -65,15 +65,15 @@ test('no service, an empty answer, or a service without entry points stay silent
   assert.ok(reports.some((r) => r['result'] === 'not found' && Array.isArray(r['available'])));
 });
 test('parseTuning accepts d>0 int and 0<=r<=1 float, and drops anything else', () => {
-  assert.deepEqual(parseTuning('2 0.55'), { depth: 2, tau: 0.55 });
-  assert.deepEqual(parseTuning('1 0'), { depth: 1, tau: 0 });
-  assert.deepEqual(parseTuning('3 1'), { depth: 3, tau: 1 });
-  assert.deepEqual(parseTuning('   4   0.25  '), { depth: 4, tau: 0.25 });
+  assert.deepEqual(parseTuning('2 0.55'), { depth: 2, releTao: 0.55 });
+  assert.deepEqual(parseTuning('1 0'), { depth: 1, releTao: 0 });
+  assert.deepEqual(parseTuning('3 1'), { depth: 3, releTao: 1 });
+  assert.deepEqual(parseTuning('   4   0.25  '), { depth: 4, releTao: 0.25 });
 
   // out-of-range fields are dropped, never clamped: the policy default must stand
-  assert.deepEqual(parseTuning('0 0.5'), { tau: 0.5 }, 'd must be greater than 0');
-  assert.deepEqual(parseTuning('-2 0.5'), { tau: 0.5 });
-  assert.deepEqual(parseTuning('2.5 0.5'), { tau: 0.5 }, 'd must be an integer');
+  assert.deepEqual(parseTuning('0 0.5'), { releTao: 0.5 }, 'd must be greater than 0');
+  assert.deepEqual(parseTuning('-2 0.5'), { releTao: 0.5 });
+  assert.deepEqual(parseTuning('2.5 0.5'), { releTao: 0.5 }, 'd must be an integer');
   assert.deepEqual(parseTuning('2 1.5'), { depth: 2 }, 'r must be at most 1');
   assert.deepEqual(parseTuning('2 -0.1'), { depth: 2 }, 'r must be at least 0');
 
@@ -83,13 +83,13 @@ test('parseTuning accepts d>0 int and 0<=r<=1 float, and drops anything else', (
   assert.equal(TUNING_REF, 's1cap/tuning');
 });
 test('parseTuningArgs accepts d/r by position and by name, and drops out-of-range values', () => {
-  assert.deepEqual(parseTuningArgs('3 0.7'), { depth: 3, tau: 0.7 });
-  assert.deepEqual(parseTuningArgs('d=3 r=0.7'), { depth: 3, tau: 0.7 });
-  assert.deepEqual(parseTuningArgs('depth=4 tau=1'), { depth: 4, tau: 1 });
-  assert.deepEqual(parseTuningArgs('r=0.2'), { tau: 0.2 });
+  assert.deepEqual(parseTuningArgs('3 0.7'), { depth: 3, releTao: 0.7 });
+  assert.deepEqual(parseTuningArgs('d=3 r=0.7'), { depth: 3, releTao: 0.7 });
+  assert.deepEqual(parseTuningArgs('depth=4 releTao=1'), { depth: 4, releTao: 1 });
+  assert.deepEqual(parseTuningArgs('r=0.2'), { releTao: 0.2 });
   assert.deepEqual(parseTuningArgs('5'), { depth: 5 });
 
-  assert.deepEqual(parseTuningArgs('0 0.5'), { tau: 0.5 }, 'd must be greater than 0');
+  assert.deepEqual(parseTuningArgs('0 0.5'), { releTao: 0.5 }, 'd must be greater than 0');
   assert.deepEqual(parseTuningArgs('2.5'), {}, 'd must be an integer');
   assert.deepEqual(parseTuningArgs('2 2'), { depth: 2 }, 'r must be at most 1');
   assert.deepEqual(parseTuningArgs(''), {});

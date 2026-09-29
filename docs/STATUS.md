@@ -568,6 +568,32 @@ path becomes available to the panel button.
 **What works today, without that domain:** the panel's two fields with their validation, and `/s1-tune d r` which
 applies the values immediately and persists them (proven: `read == effective` in a real round). The panel button is
 the only thing still blocked, and it says so in its own message.
+### Round 29: `recall.window = w` lands in core (tests green, wiring still to do)
+
+What is in and green (107/107):
+
+- **`AssociationGraph.scoreNew({ windowN, threshold, score? })`** — segments that arrived since the last call are
+  each scored against only the most recent `windowN` segments. Cost per new segment is one pass of `w`
+  comparisons, `O(w)`, independent of session length — the whole point of the parameter.
+- **`stats()` now reports `scoredPairs`** (cumulative pair comparisons), so the saving is a number rather than a
+  claim, and the counter is what the telemetry fields will carry.
+- **Segments outside the window are untouched**: they keep every edge they already have and stay reachable by
+  `recall()`. `w` decides *whether a pair is scored*, never what exists in the graph — exactly the semantics
+  settled in `prompt.txt` (no revival scoring).
+- **`recall.tau` is renamed to `recall.releTao`** (validation rule moved with it) and **`recall.window`** is added
+  as an integer >= 1 with default 1024; `lexicalScore` is the offline stand-in for the System-1 scorer so the
+  window is testable without the model.
+
+**Caught mid-round and worth recording:** the first two attempts at these edits used exact-string replacements
+whose anchors contained non-ASCII characters and indentation copied by eye; three of them silently missed, one
+inserted a block twice, and the duplicate `lexicalScore` declaration made six test files fail to load at all
+(`SyntaxError: Identifier 'lexicalScore' has already been declared`). The suite went 107 -> 56 -> 58 -> 107. The
+rule this reinforces: **edit these files line-based with ASCII-only anchors, and assert the post-condition**
+(count of declarations, presence of the method) in the same command that writes them.
+
+Still to do: wire `scoreNew` into the observation path and add the two add-only telemetry fields (`windowN`,
+`scoredPairs`); panel third field plus `/s1-tune ... w=`; the four documents; the real-session evidence
+(`/s1-tune d=3 r=0.7 w=512` -> `read == effective` with `windowN: 512`).
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
