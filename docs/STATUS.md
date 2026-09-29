@@ -762,6 +762,23 @@ real profile before touching the panel.
 profile's sandbox refuses writes to the repository, so the model declines to issue the shell commands and only one
 assembly is recorded (where `scoredPairs` is necessarily 0). The live per-step curve therefore has to come from the
 web sandbox driven through a browser, where the tool calls can actually run.
+### Round 37: why the headless profile cannot produce a multi-step session
+
+Two dead ends, both measured rather than assumed, so the next attempt does not repeat them:
+
+1. **It is not the working directory.** Running the round with the working directory outside the repository changed
+   nothing: the model still declined to issue the shell commands, and one assembly was recorded (`scoredPairs` 0).
+2. **It is not a key in the profile patch.** `~/.dsh/profiles/s1capobs/cordis.patch.yml` contains only the S1CAP row
+   (`enabled`, `observation`, `cell`, `assemblyDeadlineMs`, `s1`, `laya`, `telemetry`, ...) and carries no sandbox,
+   permission or approval key at all. The sandbox that refuses tool execution therefore comes from the profile's base
+   composition, and relaxing it means adding the configuration row of whichever plugin owns it - whose id and schema
+   are not yet known - rather than editing a value in place.
+
+So the live per-step curve needs one of: that composition row identified and relaxed in the throwaway profile (never
+the desktop profile), or the web sandbox driven through a browser where tool calls actually run. The offline curve in
+`scripts/window-curve.mjs` remains the reproducible evidence for the parameter's bound - it shows the tail step
+costing exactly w (64/256/1024) against 4095 for full-history scoring at T = 4096 - and it is labelled as the model
+it is, not as a live measurement.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
