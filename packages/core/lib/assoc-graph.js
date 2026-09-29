@@ -69,7 +69,24 @@ export class AssociationGraph {
    * rhetorical. Segments outside the window are untouched: they keep every edge they already had and stay
    * reachable by `recall()`, because w only decides *whether a pair is scored*, not what exists in the graph.
    */
-  scoreNew(opts                                                                                    )   
+  async scoreNew(opts   
+                    
+                      
+                                               
+       
+                                                                                                               
+                  
+      
+                                                                                                             
+                                                                                                              
+                                                                                                                
+                                                                                                           
+       
+                  
+                       
+                                     
+                                                                                
+   )   
                         
                   
     {
@@ -83,15 +100,37 @@ export class AssociationGraph {
       const current = this.#segments.get(id);
       if (current === undefined) continue;
       const from = Math.max(0, this.#scored - 1 - windowN);
+      // Collect the window first so a batch scorer sees it as a unit. The pairs counted here are the same
+      // pairs either way: w decides how much is scored, not who does the scoring.
+      const candidates            = [];
       for (let i = from; i < this.#scored - 1; i += 1) {
-        const otherId = this.#order[i]          ;
-        const other = this.#segments.get(otherId);
-        if (other === undefined) continue;
-        scoredPairs += 1;
-        const weight = scorer(current, other);
-        if (weight < opts.threshold) continue;
+        const other = this.#segments.get(this.#order[i]          );
+        if (other !== undefined) candidates.push(other);
+      }
+      if (candidates.length === 0) continue;
+      scoredPairs += candidates.length;
+
+      let weights                   ;
+      if (opts.scoreBatch !== undefined) {
+        // `undefined` is the batch scorer's way of saying "I could not answer this one" - a backend that
+        // timed out, or a level the answer did not carry. That degrades to the local lexical scorer for this
+        // segment, which is less accurate but never wrong by omission: a system with no System-1 still works.
+        const batch = await opts.scoreBatch(current, candidates);
+        weights = batch === undefined ? candidates.map((other) => scorer(current, other)) : batch;
+        if (weights.length !== candidates.length) {
+          throw new Error(
+            `batch scorer returned ${weights.length} weights for ${candidates.length} candidates`,
+          );
+        }
+      } else {
+        weights = candidates.map((other) => scorer(current, other));
+      }
+
+      for (let i = 0; i < candidates.length; i += 1) {
+        const weight = weights[i]          ;
+        if (!Number.isFinite(weight) || weight < opts.threshold) continue;
         this.upsertEdge({
-          from: otherId,
+          from: (candidates[i]           ).id,
           to: id,
           w: weight,
           wTier1: weight,

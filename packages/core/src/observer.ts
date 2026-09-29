@@ -36,6 +36,14 @@ export interface ObserveStepInput {
   systemPrompt?: string;
   policy: AssemblyPolicy;
   now: number;
+  /**
+   * Optional batch scorer, forwarded to the graph. Supplied when a System-1 backend is live, absent otherwise -
+   * the graph falls back to its lexical scorer, which is what keeps observation mode free and offline.
+   */
+  scoreBatch?: (
+    current: Segment,
+    candidates: readonly Segment[],
+  ) => readonly number[] | Promise<readonly number[]>;
   contextWindow: number;
   reserveOutputTokens: number;
   fixedOverheadTokens: number;
@@ -91,7 +99,9 @@ export interface EmptyStepObservation {
   report: AdapterReport;
 }
 
-export function observeStep(input: ObserveStepInput): StepObservation | EmptyStepObservation {
+export async function observeStep(
+  input: ObserveStepInput,
+): Promise<StepObservation | EmptyStepObservation> {
   const { events, report } = adaptMessages(input.messages, {
     sessionId: input.sessionId,
     startSeq: input.seq,
@@ -106,9 +116,10 @@ export function observeStep(input: ObserveStepInput): StepObservation | EmptySte
   // the most recent w segments. Segments outside the window keep their edges and stay reachable. The result is
   // not read here - the graph keeps the running total - but the scoring itself must still happen, or the
   // segments this step added would stay unconnected to the window.
-  input.graph.scoreNew({
+  await input.graph.scoreNew({
     windowN: input.policy.recall.window,
     threshold: input.policy.recall.relevanceThreshold,
+    ...(input.scoreBatch !== undefined ? { scoreBatch: input.scoreBatch } : {}),
   });
 
   const pinned = segments.filter((s) => s.kind === 'systemPinned');

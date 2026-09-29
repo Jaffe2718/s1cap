@@ -23,7 +23,7 @@ const OPTIONS = {
   lambdaMs: 36 * 60 * 60 * 1000,
 };
 
-test('a tape round-trips through parse and replays identically every time', () => {
+test('a tape round-trips through parse and replays identically every time', async () => {
   const tape = parseTape(tapeText);
   assert.equal(tape.steps.length, 3);
   assert.equal(tape.sessionId, 'fixture-synthetic');
@@ -32,8 +32,8 @@ test('a tape round-trips through parse and replays identically every time', () =
     [1, 2, 3],
   );
 
-  const first = replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
-  const again = replayTape(parseTape(tapeText), { ...OPTIONS, policy: cellPolicy('C4') });
+  const first = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
+  const again = await replayTape(parseTape(tapeText), { ...OPTIONS, policy: cellPolicy('C4') });
 
   assert.equal(first.records.length, 3);
   assert.deepEqual(again.records, first.records, 'records must be identical field for field');
@@ -41,7 +41,7 @@ test('a tape round-trips through parse and replays identically every time', () =
   assert.equal(again.digest, first.digest);
 });
 
-test('the digest is key-order independent but value sensitive', () => {
+test('the digest is key-order independent but value sensitive', async () => {
   const a = { type: 'assembly', seq: 0, blocks: { pinned: 3, tail: 1 } };
   const b = { blocks: { tail: 1, pinned: 3 }, seq: 0, type: 'assembly' };
   assert.equal(stableStringify(a), stableStringify(b), 'key order must not matter');
@@ -49,7 +49,7 @@ test('the digest is key-order independent but value sensitive', () => {
   assert.notEqual(digestRecords([a as never]), digestRecords([{ ...a, seq: 1 } as never]));
 });
 
-test('a malformed tape fails at the offending line instead of producing a partial replay', () => {
+test('a malformed tape fails at the offending line instead of producing a partial replay', async () => {
   const first = JSON.stringify({ schema: 1, sessionId: 'S', step: 1, messages: [] });
   const cases = [
     ['{bad json', /line 2: invalid JSON/],
@@ -64,10 +64,10 @@ test('a malformed tape fails at the offending line instead of producing a partia
   }
 });
 
-test('the cells behave as the ablation claims: C1 selects nothing, C4 accounts a real budget', () => {
+test('the cells behave as the ablation claims: C1 selects nothing, C4 accounts a real budget', async () => {
   const tape = parseTape(tapeText);
-  const c1 = replayTape(tape, { ...OPTIONS, policy: cellPolicy('C1') });
-  const c4 = replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
+  const c1 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C1') });
+  const c4 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
 
   for (const record of c1.records) {
     assert.equal(record.selected, 0, 'the baseline cell never recalls anything by design');
@@ -85,9 +85,9 @@ test('the cells behave as the ablation claims: C1 selects nothing, C4 accounts a
   }
 });
 
-test('a taped system prompt becomes the pinned block and never moves between steps', () => {
+test('a taped system prompt becomes the pinned block and never moves between steps', async () => {
   const tape = parseTape(tapeText);
-  const result = replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
+  const result = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
 
   const pinned = result.records.map((r) => r.blocks['pinned'] ?? 0);
   assert.ok(
@@ -98,10 +98,10 @@ test('a taped system prompt becomes the pinned block and never moves between ste
   assert.ok(result.records.every((r) => r.prefixTokensStable === r.blocks['pinned']));
 });
 
-test('replays are independent of the graph a previous replay built', () => {
+test('replays are independent of the graph a previous replay built', async () => {
   const tape = parseTape(tapeText);
-  const once = replayTape(tape, { ...OPTIONS, policy: defaultPolicy() });
-  const twiceInOneProcess = replayTape(tape, { ...OPTIONS, policy: defaultPolicy() });
+  const once = await replayTape(tape, { ...OPTIONS, policy: defaultPolicy() });
+  const twiceInOneProcess = await replayTape(tape, { ...OPTIONS, policy: defaultPolicy() });
   assert.deepEqual(twiceInOneProcess.records, once.records);
   assert.equal(twiceInOneProcess.digest, once.digest);
 });

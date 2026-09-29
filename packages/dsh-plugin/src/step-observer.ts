@@ -24,6 +24,14 @@ export interface StepObserverOptions {
   lambdaMs: number;
   /** how far the graph may lag the session, in turns (policy: rgMaintenance.maxLagTurns) */
   maxLagTurns?: number;
+  /**
+   * One S1 call per new segment, scoring the whole window at once. Present only when a backend is configured;
+   * its absence is what falls the graph back to lexical scoring, so observation mode stays free and offline.
+   */
+  scoreBatch?: (
+    current: Segment,
+    candidates: readonly Segment[],
+  ) => readonly number[] | Promise<readonly number[]>;
   sessionId?: string;
   onWarn?(message: string): void;
   onObserved?(summary: string): void;
@@ -73,8 +81,13 @@ export interface StepObserverStats {
 }
 
 export interface StepObserver {
-  /** `agent/pre-step`: observe one LLM call, change nothing */
-  observe(payload: unknown): void;
+  /**
+   * `agent/pre-step`: observe one LLM call, change nothing.
+   *
+   * Returns a promise because scoring a new segment may be one System-1 call. The caller in `index.ts` awaits
+   * it inside its own try/catch, so a rejected scorer still costs the record and never the step.
+   */
+  observe(payload: unknown): Promise<void>;
   /** `session/event`: capture the system prompt and queue the event for asynchronous upkeep */
   noteSessionEvent(event: unknown): void;
   /** N1: the rendered system prompt, read from the harness registry (see system-prompt.ts) */
@@ -166,7 +179,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   const queue = createUpkeepQueue<unknown>({
     maxLagTurns: opts.maxLagTurns ?? 2,
     onWarn: (message) => opts.onWarn?.(message),
-    onEvent: (event) => {
+    onEvent: async (event) => {
       // Asynchronous upkeep, which is what the session-event stream is FOR: adapt, segment, fold into the
       // graph, score the new segment against the last w. No assemble happens here - this is not a step, and
       // assembling per event would be both wrong and expensive. The model view is assembled once, at pre-step.
@@ -193,10 +206,20 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       }
       const segments = raw.flatMap((ev) => segmentEvent(ev));
       graph.addSegments(segments);
-      const scored = graph.scoreNew({
-        windowN: opts.policy.recall.window,
-        threshold: opts.policy.recall.relevanceThreshold,
-      });
+      // Upkeep is where most pairs are scored now, so it is also where most S1 calls happen. It stays off the
+      // critical path: the queue already defers this to a timer, and a failure here must cost the edges, not
+      // the session - so a backend that is down degrades to no edges for that segment rather than throwing.
+      let scored: { scoredPairs: number; edges: number } = { scoredPairs: 0, edges: 0 };
+      try {
+        scored = await graph.scoreNew({
+          windowN: opts.policy.recall.window,
+          threshold: opts.policy.recall.relevanceThreshold,
+          ...(opts.scoreBatch !== undefined ? { scoreBatch: opts.scoreBatch } : {}),
+        });
+      } catch (err) {
+        stats.errors += 1;
+        opts.onWarn?.(`[s1cap] upkeep scoring failed for a new ${segments.length}-segment batch: ${String(err)}`);
+      }
       stats.upkeepEvents += 1;
       stats.upkeepSegments += segments.length;
       stats.upkeepScoredPairs += scored.scoredPairs;
@@ -206,11 +229,13 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
 
   function tick(): void {
     scheduled = false;
+    // The queue is synchronous in shape (bounded drain, counted failures) and its handler may be async. The
+    // handler's own promise is caught inside the queue, so nothing escapes this timer.
     queue.flush();
   }
 
   return {
-    observe(payload: unknown): void {
+    async observe(payload: unknown): Promise<void> {
       stats.steps += 1;
       const messages = readMessages(payload);
       if (messages === undefined) {
@@ -220,7 +245,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       const started = opts.now();
       try {
         const sessionId = readSessionId(payload, opts.sessionId ?? 'unassigned');
-        const observation = observeStep({
+        const observation = await observeStep({
           sessionId,
           step: readStep(payload),
           seq,

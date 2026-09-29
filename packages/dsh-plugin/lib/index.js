@@ -42,6 +42,7 @@ import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from './cred
                                                
 import { createStepObserver } from './step-observer.js';
                                                        
+import { createS1Relevance } from './s1-relevance.js';
 
                                                            
                                                                                                
@@ -426,7 +427,7 @@ export function preStepMiddleware(
     try {
       // M1 observation mode: segment, recall and assemble for real, record the result in the control
       // plane, and return the decision completely untouched. `observe()` never throws.
-      observer?.observe(payload);
+      await observer?.observe(payload);
     } catch (err) {
       ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
     }
@@ -658,8 +659,25 @@ function applyInner(ctx               , raw                             )       
       onError: (message) => ctx.logger?.warn?.(`[s1cap] control sink: ${message}`),
     });
     const controlLog = new ControlPlaneLog((line) => sink.write(line));
+    // One System-1 call per new segment, scoring the whole window. Absent when no backend is configured, and
+    // that absence is the point: the graph then scores lexically, which is what keeps observation mode free,
+    // offline and deterministic. A configured backend that fails answers `undefined` and degrades the same way.
+    const relevance =
+      client === undefined
+        ? undefined
+        : createS1Relevance({
+            decide: (state, questions) => client.decide(state, questions),
+            questionsPerCall: config.s1.questionsPerCall,
+            onWarn: (message) => ctx.logger?.warn?.(message),
+          });
+    if (relevance !== undefined) {
+      ctx.logger?.info?.(
+        `[s1cap] relevance: S1 batch scoring active (${describeS1Backend(backend)}, up to ${config.s1.questionsPerCall} candidates per call)`,
+      );
+    }
     observer = createStepObserver({
       policy: config,
+      ...(relevance !== undefined ? { scoreBatch: relevance } : {}),
       emit: (event) => {
         try {
           controlLog.emit(event);

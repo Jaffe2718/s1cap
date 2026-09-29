@@ -54,19 +54,19 @@ const BASE = {
   lambdaMs: 36 * 60 * 60 * 1000,
 };
 
-function run(policyOverrides: Record<string, unknown> = {}) {
+async function run(policyOverrides: Record<string, unknown> = {}) {
   const policy = { ...defaultPolicy(), ...policyOverrides };
   const graph = new AssociationGraph();
   return {
     policy,
     graph,
-    observation: observeStep({ ...BASE, policy, graph }),
+    observation: await observeStep({ ...BASE, policy, graph }),
   };
 }
 
-test('an observation is deterministic: the same step replayed produces the same record', () => {
-  const first = run().observation;
-  const replay = run().observation;
+test('an observation is deterministic: the same step replayed produces the same record', async () => {
+  const first = (await run()).observation;
+  const replay = (await run()).observation;
 
   assert.deepEqual(replay.event, first.event, 'the control-plane record must be identical');
   assert.deepEqual(replay.selectedIds, first.selectedIds);
@@ -76,15 +76,15 @@ test('an observation is deterministic: the same step replayed produces the same 
   assert.deepEqual(replay.report, first.report);
 });
 
-test('observation never mutates the payload it is reading', () => {
+test('observation never mutates the payload it is reading', async () => {
   const snapshot = structuredClone(MESSAGES);
-  const { observation } = run();
+  const { observation } = await run();
   assert.deepEqual(MESSAGES, snapshot, 'the harness message list must be untouched');
   assert.ok(observation.segments.length > 0);
 });
 
-test('the adapter maps the verified DSH vocabulary and reports what it does not know', () => {
-  const { observation } = run();
+test('the adapter maps the verified DSH vocabulary and reports what it does not know', async () => {
+  const { observation } = await run();
   const report = observation.report;
 
   assert.equal(report.unknownRoles.length, 0, 'every DSH role has a rule');
@@ -108,14 +108,14 @@ test('the adapter maps the verified DSH vocabulary and reports what it does not 
   );
 });
 
-test('a message with no text is reported as empty, and an unknown part keeps its payload bounded', () => {
+test('a message with no text is reported as empty, and an unknown part keeps its payload bounded', async () => {
   const messages = [
     { role: 'system', content: [] },
     { role: 'assistant', content: [{ type: 'image', data: 'x'.repeat(4000) }] },
     { role: 'user', content: [{ type: 'text', text: 'go' }] },
   ];
   const graph = new AssociationGraph();
-  const observation = observeStep({ ...BASE, messages, policy: defaultPolicy(), graph });
+  const observation = await observeStep({ ...BASE, messages, policy: defaultPolicy(), graph });
 
   assert.equal(observation.report.empty, 1);
   assert.deepEqual(observation.report.unknownPartTypes, ['image']);
@@ -125,8 +125,8 @@ test('a message with no text is reported as empty, and an unknown part keeps its
   assert.ok(imageSegment!.text.length < 2100, 'raw payloads stay bounded');
 });
 
-test('the control-plane record carries the frozen schema and the full C1/C4 contrast', () => {
-  const c4 = run().observation;
+test('the control-plane record carries the frozen schema and the full C1/C4 contrast', async () => {
+  const c4 = (await run()).observation;
   assert.equal(c4.event.type, 'assembly');
   assert.equal(c4.event.schema, TELEMETRY_SCHEMA_VERSION);
   assert.equal(c4.event.seq, BASE.seq);
@@ -137,7 +137,7 @@ test('the control-plane record carries the frozen schema and the full C1/C4 cont
   // C1 is the baseline cell: no System-1 selection at all, so nothing is recalled.
   const c1Policy = cellPolicy('C1');
   const graph = new AssociationGraph();
-  const c1 = observeStep({ ...BASE, policy: c1Policy, graph });
+  const c1 = await observeStep({ ...BASE, policy: c1Policy, graph });
   assert.equal(c1.event.selected, 0);
   assert.deepEqual(c1.selectedIds, []);
   assert.equal(c1.event.candidates, 0);
@@ -147,11 +147,11 @@ test('the control-plane record carries the frozen schema and the full C1/C4 cont
   assert.ok(c4.wouldSaveTokens >= 0);
 });
 
-test('the graph accumulates across steps, so a later step can recall an earlier one', () => {
+test('the graph accumulates across steps, so a later step can recall an earlier one', async () => {
   const policy = cellPolicy('C4');
   const graph = new AssociationGraph();
-  const first = observeStep({ ...BASE, policy, graph, messages: MESSAGES.slice(0, 2), step: 1 });
-  const second = observeStep({ ...BASE, policy, graph, step: 2 });
+  const first = await observeStep({ ...BASE, policy, graph, messages: MESSAGES.slice(0, 2), step: 1 });
+  const second = await observeStep({ ...BASE, policy, graph, step: 2 });
 
   assert.equal(first.segments.length, 2);
   assert.ok(graph.stats().segments >= MESSAGES.length, 'segments from both steps live in one graph');

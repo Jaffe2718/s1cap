@@ -18,8 +18,8 @@ export interface UpkeepQueueOptions<T> {
   capacity?: number;
   /** how far the graph may lag the session, in turns */
   maxLagTurns?: number;
-  /** called for each drained event; must not throw (throws are caught and counted) */
-  onEvent(event: T): void;
+  /** called for each drained event; must not throw (throws are caught and counted). May return a promise. */
+  onEvent(event: T): void | Promise<void>;
   onWarn?(message: string): void;
 }
 
@@ -63,8 +63,20 @@ export function createUpkeepQueue<T>(opts: UpkeepQueueOptions<T>): UpkeepQueue<T
   let flushes = 0;
 
   function runOne(event: T): void {
+    // A handler may be async now that the System-1 scorer is a network call. The promise is awaited before the
+    // next event starts, so the graph is folded in the order the events arrived and a burst cannot interleave
+    // two scorers over one window. A rejection is caught exactly like a synchronous throw: counted, reported,
+    // and the event is dropped - the harness is never allowed to see it.
     try {
-      opts.onEvent(event);
+      const result = opts.onEvent(event) as void | Promise<void>;
+      if (result !== undefined && typeof (result as Promise<void>).then === 'function') {
+        applied += 1;
+        void (result as Promise<void>).catch((err: unknown) => {
+          errors += 1;
+          opts.onWarn?.(`upkeep handler failed (ignored): ${String(err)}`);
+        });
+        return;
+      }
       applied += 1;
     } catch (err) {
       errors += 1;

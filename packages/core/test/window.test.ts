@@ -16,7 +16,7 @@ function seg(i: number): Segment {
   };
 }
 
-test('recall.window = w bounds the scored pairs, and older segments stay in the graph', () => {
+test('recall.window = w bounds the scored pairs, and older segments stay in the graph', async () => {
   const graph = new AssociationGraph();
   const w = 64;
   const total = 400;
@@ -24,7 +24,7 @@ test('recall.window = w bounds the scored pairs, and older segments stay in the 
 
   for (const segment of segments) {
     graph.addSegments([segment]);
-    graph.scoreNew({ windowN: w, threshold: 0 });
+    await graph.scoreNew({ windowN: w, threshold: 0 });
   }
 
   const stats = graph.stats();
@@ -42,7 +42,7 @@ test('recall.window = w bounds the scored pairs, and older segments stay in the 
   const wider = new AssociationGraph();
   for (const segment of Array.from({ length: total }, (_, i) => seg(i))) {
     wider.addSegments([segment]);
-    wider.scoreNew({ windowN: w * 2, threshold: 0 });
+    await wider.scoreNew({ windowN: w * 2, threshold: 0 });
   }
   const ratio = wider.stats().scoredPairs / stats.scoredPairs;
   assert.ok(ratio > 1.5 && ratio < 2.5, 'cost tracks w, not the history length (ratio ' + String(ratio) + ')');

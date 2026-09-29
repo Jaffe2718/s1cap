@@ -119,7 +119,7 @@ export function parseTape(text: string, fallbackSessionId = 'tape'): Tape {
 }
 
 /** Replay a tape through the pipeline. Pure: the same tape and options give the same digest. */
-export function replayTape(tape: Tape, opts: ReplayOptions): ReplayResult {
+export async function replayTape(tape: Tape, opts: ReplayOptions): Promise<ReplayResult> {
   const graph = new AssociationGraph();
   const records: AssemblyEvent[] = [];
   const selectedIds: string[][] = [];
@@ -131,7 +131,7 @@ export function replayTape(tape: Tape, opts: ReplayOptions): ReplayResult {
 
   for (const step of tape.steps) {
     if (step.systemPrompt !== undefined) carriedPrompt = step.systemPrompt;
-    const observation = observeStep({
+    const observation = await observeStep({
       sessionId: tape.sessionId,
       step: step.step,
       seq,

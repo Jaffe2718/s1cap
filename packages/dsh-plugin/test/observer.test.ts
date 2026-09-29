@@ -193,7 +193,7 @@ test('enabled + observation log writes the record to the configured sink, isolat
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('an unknown observation value falls back to the default and is reported', () => {
+test('an unknown observation value falls back to the default and is reported', async () => {
   const h = harness();
   apply(h.ctx, {
     enabled: true,
@@ -254,7 +254,7 @@ test('a captured system prompt becomes the pinned block, and upkeep never runs i
   assert.equal(after.upkeep.overLag, false);
 });
 
-test('upkeep lag is visible in the stats and clears when the tick runs', () => {
+test('upkeep lag is visible in the stats and clears when the tick runs', async () => {
   const ticks: (() => void)[] = [];
   const observer = createStepObserver({
     policy: defaultPolicy(),
