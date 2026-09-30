@@ -1415,6 +1415,17 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
    hook contracts registered, every optional surface failing soft with a warning.
 8. **Measurement honesty:** a telemetry record is metadata only (ids, counts, timings). Session content never
    enters the control plane, and control-plane records never become segments.
+9. **Every test round answers inside its own randomly named directory.** A round used to write its answer to the
+   workspace root under a name the task text itself supplied (`pelican-bicycle.html`), which meant a later round
+   could read the previous round's answer instead of solving the task, and two rounds writing the same name
+   replaced one another. The path is now `<workspace>/<salt>/<answer>.html`, where the salt is 48 bits of
+   urandom: a name that cannot be derived from the previous round's prompt, and therefore cannot be aimed at.
+   Open a round with `node scripts/new-test-run.mjs --create`, which prints the directory and the task line that
+   names it. The **workspace itself is not reconfigured** — the session's workspace is part of what the
+   experiment observes, so narrowing it per round would change the thing under study. What the salt does *not*
+   do is hide the other rounds: they are still inside the workspace, so move a finished round's directory out
+   once its evidence is collected. The artifacts from before this rule live in `260930164900/` (a timestamp,
+   from when the rule was a timestamp).
 
 ## 5. Verify everything right now
 
