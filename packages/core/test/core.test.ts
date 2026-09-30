@@ -101,7 +101,7 @@ test('assemble: two chunks of one passage cannot both be selected', () => {
   // independently; without the parent check both can be selected and the overlap is paid for twice.
   const graph = new AssociationGraph();
   const policy = defaultPolicy();
-  policy.recall.relevanceThreshold = 0.1;
+  policy.recall.threshold = 0.1;
   policy.recall.budgetRatio = 0.9;
   policy.recall.tier1 = 'embed';
 
@@ -159,13 +159,13 @@ test('recall: bounded BFS honours τ, depth and fanout', () => {
   g.upsertEdge(edge('a', 'b', 0.8));
   g.upsertEdge(edge('c', 'x', 0.3)); // below τ
 
-  const hits = g.recall(['x'], { relevanceThreshold: 0.55, depth: 2, fanout: 8, lambdaMs: 1e9, now: 1000 });
+  const hits = g.recall(['x'], { threshold: 0.55, depth: 2, fanout: 8, lambdaMs: 1e9, now: 1000 });
   const ids = hits.map((h) => h.id);
   assert.deepEqual(ids, ['a', 'b'], 'a then b by weight; c filtered by τ');
   assert.equal(hits[1]?.via, 'a');
   assert.equal(hits[1]?.depth, 2);
 
-  const shallow = g.recall(['x'], { relevanceThreshold: 0.55, depth: 1, fanout: 8, lambdaMs: 1e9, now: 1000 });
+  const shallow = g.recall(['x'], { threshold: 0.55, depth: 1, fanout: 8, lambdaMs: 1e9, now: 1000 });
   assert.deepEqual(shallow.map((h) => h.id), ['a'], 'depth 1 stops before b');
 });
 
@@ -175,7 +175,7 @@ test('recall: fanout keeps only the strongest k neighbours', () => {
   g.upsertEdge(edge('x', 'a', 0.95));
   g.upsertEdge(edge('x', 'b', 0.85));
   g.upsertEdge(edge('x', 'c', 0.75));
-  const hits = g.recall(['x'], { relevanceThreshold: 0.5, depth: 1, fanout: 2, lambdaMs: 1e9, now: 1000 });
+  const hits = g.recall(['x'], { threshold: 0.5, depth: 1, fanout: 2, lambdaMs: 1e9, now: 1000 });
   assert.deepEqual(hits.map((h) => h.id), ['a', 'b']);
 });
 
@@ -206,7 +206,7 @@ function buildAssemblerFixture(): {
 test('assemble (C4/TAS on): recalled block ordered by weight, x last, budget accounted', () => {
   const fx = buildAssemblerFixture();
   const policy = defaultPolicy();
-  policy.recall.relevanceThreshold = 0.5;
+  policy.recall.threshold = 0.5;
   policy.recall.budgetRatio = 0.5;
   const res = assemble({
     graph: fx.graph,
@@ -242,7 +242,7 @@ test('xFirst places the task before history; the default places it last', () => 
   const build = (xFirst: boolean) => {
     const fx = buildAssemblerFixture();
     const policy = defaultPolicy();
-    policy.recall.relevanceThreshold = 0.5;
+    policy.recall.threshold = 0.5;
     policy.recall.budgetRatio = 0.5;
     policy.xFirst = xFirst;
     return assemble({
@@ -282,7 +282,7 @@ test('the task joins the stable head only when it is placed first, and prefixTok
   const build = (xFirst: boolean) => {
     const fx = buildAssemblerFixture();
     const policy = defaultPolicy();
-    policy.recall.relevanceThreshold = 0.5;
+    policy.recall.threshold = 0.5;
     policy.recall.budgetRatio = 0.5;
     policy.xFirst = xFirst;
     return assemble({
@@ -331,7 +331,7 @@ test('the task joins the stable head only when it is placed first, and prefixTok
 test('assemble: TAS off drops the state proxy and orders recall chronologically', () => {
   const fx = buildAssemblerFixture();
   const policy = cellPolicy('C3'); // selection on, TAS off
-  policy.recall.relevanceThreshold = 0.5;
+  policy.recall.threshold = 0.5;
   policy.recall.budgetRatio = 0.5;
   const res = assemble({
     graph: fx.graph,
@@ -387,7 +387,7 @@ test('assemble: a selector that selected nothing degrades to the recency window'
   g.upsertEdge(edge('x', 'tiny', 0.9)); // the only thing relevance found
 
   const policy = defaultPolicy();
-  policy.recall.relevanceThreshold = 0.5;
+  policy.recall.threshold = 0.5;
   policy.recall.budgetRatio = 0.5;
   policy.recall.minRecalledSegments = 2;
   const res = assemble({
@@ -425,7 +425,7 @@ test('assemble: a thin but real selection is delivered, not replaced', () => {
   g.upsertEdge(edge('x', 'tiny', 0.9));
 
   const policy = defaultPolicy();
-  policy.recall.relevanceThreshold = 0.5;
+  policy.recall.threshold = 0.5;
   policy.recall.budgetRatio = 0.5;
   const res = assemble({
     graph: g,
@@ -446,7 +446,7 @@ test('assemble: a thin but real selection is delivered, not replaced', () => {
 
   // Opting back in is still possible, and still reported as a fallback rather than as a selection.
   const withFloor = defaultPolicy();
-  withFloor.recall.relevanceThreshold = 0.5;
+  withFloor.recall.threshold = 0.5;
   withFloor.recall.budgetRatio = 0.5;
   withFloor.recall.minRecalledShare = 0.25;
   const floored = assemble({

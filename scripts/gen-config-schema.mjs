@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs';
 const mod = await import('file:///E:/Coding/TypeScript/system_one/s1cap/packages/dsh-plugin/lib/index.js');
 const resolved = mod.resolvePluginConfig({ enabled: true });
 const cfg = resolved.config ?? resolved;
-const VOLATILE = new Set(['recall.depth', 'recall.relevanceThreshold', 'recall.window']);
+const VOLATILE = new Set(['recall.depth', 'recall.threshold', 'recall.window']);
 const list = [];
 const walk = (value, prefix, depth) => {
   for (const [k, v] of Object.entries(value)) {

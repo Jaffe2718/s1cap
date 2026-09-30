@@ -365,7 +365,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       try {
         scored = await graph.scoreNew({
           windowN: opts.policy.recall.window,
-          threshold: opts.policy.recall.relevanceThreshold,
+          threshold: opts.policy.recall.threshold,
           ...(opts.scoreBatch !== undefined ? { scoreBatch: opts.scoreBatch } : {}),
         });
       } catch (err) {

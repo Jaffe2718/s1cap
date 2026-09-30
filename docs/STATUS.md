@@ -583,7 +583,7 @@ What is in and green (107/107):
 - **Segments outside the window are untouched**: they keep every edge they already have and stay reachable by
   `recall()`. `w` decides *whether a pair is scored*, never what exists in the graph — exactly the semantics
   settled in `prompt.txt` (no revival scoring).
-- **`recall.tau` is renamed to `recall.relevanceThreshold`** (validation rule moved with it) and **`recall.window`** is added
+- **`recall.tau` is renamed to `recall.threshold`** (validation rule moved with it) and **`recall.window`** is added
   as an integer >= 1 with default 1024; `lexicalScore` is the offline stand-in for the System-1 scorer so the
   window is testable without the model.
 
@@ -605,12 +605,12 @@ Green and committed (107/107):
   dropped like every other out-of-range field), and `parseTuningArgs` accepts `w=512` / `window=512` / a third
   positional value;
 - `/s1-tune d r w` applies it to `config.recall.window`, persists it, and reports
-  `effective: { depth, relevanceThreshold, window }` — so the host half of the parameter is complete;
+  `effective: { depth, threshold, window }` — so the host half of the parameter is complete;
 - the panel half is **not**: its state and read-back learned about the window, but the input row, the local
   validation and the third value in the saved string are missing, because the patch anchor for the save path did
   not match and I did not re-check the post-condition for the UI row. The panel therefore still shows two fields.
 
-Also missed (cosmetic): one log line in `index.ts` still prints only depth and relevanceThreshold.
+Also missed (cosmetic): one log line in `index.ts` still prints only depth and threshold.
 
 **Next:** add the third input row to the panel (label `w`, `min=1`, `step=1`, placeholder 1024), its local
 validation, and `String(w)` in the persisted payload; then the real-session evidence
@@ -620,16 +620,16 @@ validation, and `String(w)` in the persisted payload; then the real-session evid
 caught instead of shipping a half-wired parameter. The remaining gap is exactly what those assertions said.
 ### Round 31: `w` is applied from the tuning file, and the window has a regression test
 
-Evidence from a real headless session (`~/.dsh/.s1cap/tuning.json` = depth 3, relevanceThreshold 0.7, window 512):
+Evidence from a real headless session (`~/.dsh/.s1cap/tuning.json` = depth 3, threshold 0.7, window 512):
 
 ```json
-{"kind":"tuning-file","read":{"depth":3,"relevanceThreshold":0.7,"window":512},"effective":{"depth":3,"relevanceThreshold":0.7,"window":512}}
+{"kind":"tuning-file","read":{"depth":3,"threshold":0.7,"window":512},"effective":{"depth":3,"threshold":0.7,"window":512}}
 ```
 
 `read` equals `effective`, window included, and the control-plane record for that session reports `windowN: 512`.
 Two gaps surfaced while getting there, both the same shape - a value added to one parse path and forgotten in the
 sibling: `readTuningFile()` did not carry `window` at all, and the merge from the file into `appliedTuning`
-copied depth and relevanceThreshold but not window. The probe is what caught both, which is why it prints `read` and
+copied depth and threshold but not window. The probe is what caught both, which is why it prints `read` and
 `effective` side by side.
 
 `packages/core/test/window.test.ts` now pins the parameter's contract offline: with w = 64 over 400 segments,
@@ -658,7 +658,7 @@ Our panel registers into `settings.section` (a general settings slot) with **no 
 Config fields**, so there is nothing for `set`/`mutate` to write into: the earlier `settings/mutate` refusals were
 that slot mismatch showing through, not a `WEB_SETTINGS_NAMESPACES` allowlist problem.
 
-**Concrete next step:** declare `depth`, `relevanceThreshold` and `window` as `Volatile<number>` fields in the
+**Concrete next step:** declare `depth`, `threshold` and `window` as `Volatile<number>` fields in the
 plugin `Config` schema (`.volatile()`, with the same bounds the parsers enforce), read them with `.get()` at session
 start and on `loader/volatile-update`, and expose the card through the Plugins page's form so `form.mutate` performs
 the write. `/s1-tune` stays as the headless path, and the tuning file as the fallback store.
@@ -714,7 +714,7 @@ then does the panel's Save button write; `/s1-tune` and the tuning file stay as 
 ### Round 35: volatile updates re-apply live, and the rule that got us there
 
 Landed and green (109/109): the host half subscribes to `loader/volatile-update` and, when it fires, re-reads the
-tuning store and re-applies `depth`, `relevanceThreshold` and `window` to the live policy, so an edit lands without a
+tuning store and re-applies `depth`, `threshold` and `window` to the live policy, so an edit lands without a
 restart. The handler is wrapped and logged - an event that never fires costs nothing, a throw would take the harness
 down with it - and the subscription is registered **before** the pre-step middleware deliberately, because the plugin
 test pins the recorded order:
@@ -722,7 +722,7 @@ test pins the recorded order:
     assert.deepEqual(h.events, ['session/event', 'loader/volatile-update', 'agent/pre-step'], ...);
 
 A real round re-confirmed the store path end to end:
-`{"kind":"tuning-file","read":{"depth":3,"relevanceThreshold":0.7,"window":512},"effective":{...same...}}`.
+`{"kind":"tuning-file","read":{"depth":3,"threshold":0.7,"window":512},"effective":{...same...}}`.
 
 **Ground rule 11 - read the failure before editing the expectation.** This took two rounds for one line. The first
 attempt assumed the new subscription would be appended to the event list and patched the expectation accordingly; the
@@ -730,7 +730,7 @@ suite stayed red, and the diagnostic round then printed the actual diff, which s
 *between* the other two. Both attempts were gated - expectation first, subscription second, suite re-run, and a full
 revert when it was not green - which is why the tree never sat red and the wasted round cost only time.
 
-**Still open for the panel's Save button:** declaring `depth`, `relevanceThreshold` and `window` as volatile fields in
+**Still open for the panel's Save button:** declaring `depth`, `threshold` and `window` as volatile fields in
 the exported `Config` (`z.number().min(...).step(...).default(...).volatile()`, bounds matching the parsers) and letting
 the Plugins page's `form.mutate` perform the write - that is the part that turns Save from a validation demo into a
 working control. The precedent is confirmed: installed third-party plugins import schemastery directly, so host
@@ -833,7 +833,7 @@ not activate at all:
     rgMaintenance: mode(string) maxLagTurns(number)
     cache: reselectPolicy(string) blockTokens(number)
     tas: on(bool) tMaxChars(number) updatePolicy(string)
-    recall: relevanceThreshold(window|depth|fanout)(number) tier1(string) embedModel(string)
+    recall: threshold(window|depth|fanout)(number) tier1(string) embedModel(string)
             budgetRatio(number) minRecalledShare(number)
     tail: k(number)
     planGate: on(bool) maxPlans(number) attemptCap(number) abstainConfidence(number)

@@ -300,7 +300,7 @@ $$
 A newly arrived session-event segment `s` (a user input `x`, a model output, a tool result) is scored by the
 System-1 association backend against only the **most recent w segments** of history, not against all of it. The
 graph itself stays unbounded: segments that fall out of the window keep every edge they already have and remain
-reachable by the bounded BFS (`recall.depth = d`, `recall.relevanceThreshold = r`). **w decides whether a pair is scored;
+reachable by the bounded BFS (`recall.depth = d`, `recall.threshold = r`). **w decides whether a pair is scored;
 it never decides what exists in the graph.**
 
 Cost per new segment, with `t` segments already in the graph:

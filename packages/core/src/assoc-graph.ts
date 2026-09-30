@@ -15,7 +15,7 @@ export function decayedWeight(w: number, ageMs: number, lambdaMs: number): numbe
 
 export interface RecallOptions {
   /** relevance threshold τ */
-  relevanceThreshold: number;
+  threshold: number;
   /** bounded BFS depth d */
   depth: number;
   /** per-node expansion fanout k */
@@ -305,7 +305,7 @@ export class AssociationGraph {
             const age = opts.now - e.verifiedAt;
             return { other, w: decayedWeight(e.w, age, opts.lambdaMs) };
           })
-          .filter((n) => n.w > opts.relevanceThreshold)
+          .filter((n) => n.w > opts.threshold)
           .sort((a, b) => b.w - a.w)
           .slice(0, Math.max(0, opts.fanout));
 

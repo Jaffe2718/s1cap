@@ -42,7 +42,7 @@ export const NUMBER_RULES: readonly NumberRule[] = [
   { path: 'rgMaintenance.maxLagTurns', min: 0, max: 100, integer: true },
   { path: 'cache.blockTokens', min: 1, max: 4096, integer: true },
   { path: 'tas.tMaxChars', min: 0, max: 200_000, integer: true },
-  { path: 'recall.relevanceThreshold', min: 0, max: 1 },
+  { path: 'recall.threshold', min: 0, max: 1 },
   { path: 'recall.window', min: 64, max: 1048576, integer: true },
   { path: 'recall.depth', min: 1, max: 6, integer: true },
   { path: 'recall.fanout', min: 1, max: 64, integer: true },

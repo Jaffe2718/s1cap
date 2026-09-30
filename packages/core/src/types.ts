@@ -94,8 +94,8 @@ export interface AssemblyPolicy {
   };
   recall: {
     /** relevance threshold τ */
-      /** relevance threshold (recall.relevanceThreshold, 0..1) */
-      relevanceThreshold: number;
+      /** relevance threshold (recall.threshold, 0..1) */
+      threshold: number;
       /**
        * S1 scoring window w (recall.window): a new segment is scored only against the most recent w
        * segments. It exists purely to save System-1 calls - BFS recall (depth d, threshold r) is
@@ -277,7 +277,7 @@ export function defaultPolicy(): AssemblyPolicy {
     cache: { reselectPolicy: 'perTask', blockTokens: 64 },
     tas: { on: true, tMaxChars: 8000, updatePolicy: 'perTask' },
     recall: {
-      relevanceThreshold: 0.55,
+      threshold: 0.55,
     window: 1024,
       depth: 2,
       fanout: 8,

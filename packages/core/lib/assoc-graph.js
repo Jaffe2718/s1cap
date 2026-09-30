@@ -15,7 +15,7 @@ export function decayedWeight(w        , ageMs        , lambdaMs        )       
 
                                 
                               
-                             
+                    
                             
                 
                                     
@@ -305,7 +305,7 @@ export class AssociationGraph {
             const age = opts.now - e.verifiedAt;
             return { other, w: decayedWeight(e.w, age, opts.lambdaMs) };
           })
-          .filter((n) => n.w > opts.relevanceThreshold)
+          .filter((n) => n.w > opts.threshold)
           .sort((a, b) => b.w - a.w)
           .slice(0, Math.max(0, opts.fanout));
 

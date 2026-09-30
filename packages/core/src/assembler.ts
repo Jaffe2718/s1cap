@@ -73,7 +73,7 @@ export function assemble(input: AssembleInput): AssemblyResult {
 
   if (policy.recall.tier1 !== 'off' && recalledBudget > 0) {
     const hits = graph.recall([current.id], {
-      relevanceThreshold: policy.recall.relevanceThreshold,
+      threshold: policy.recall.threshold,
       depth: policy.recall.depth,
       fanout: policy.recall.fanout,
       lambdaMs: input.lambdaMs,

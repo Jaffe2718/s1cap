@@ -160,7 +160,7 @@ export async function observeStep(
   if (input.scoreOnStepPath !== false) {
     await input.graph.scoreNew({
       windowN: input.policy.recall.window,
-      threshold: input.policy.recall.relevanceThreshold,
+      threshold: input.policy.recall.threshold,
       ...(input.scoreBatch !== undefined ? { scoreBatch: input.scoreBatch } : {}),
     });
   }

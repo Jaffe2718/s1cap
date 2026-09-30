@@ -1126,7 +1126,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         relevance: client !== undefined,
         planGate: client !== undefined,
         xFirst: config.xFirst,
-        recall: { d: config.recall.depth, r: config.recall.relevanceThreshold, w: config.recall.window },
+        recall: { d: config.recall.depth, r: config.recall.threshold, w: config.recall.window },
         tas: config.tas,
       }) + '\n',
     );
@@ -1170,12 +1170,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       // failure mode. Say it out loud at activation, and tell the reader how to get a cell-pure run.
       const cellBefore = {
         depth: config.recall.depth,
-        relevanceThreshold: config.recall.relevanceThreshold,
+        relevanceThreshold: config.recall.threshold,
         window: config.recall.window,
         xFirst: config.xFirst,
       };
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
-      if (appliedTuning.relevanceThreshold !== undefined) config.recall.relevanceThreshold = appliedTuning.relevanceThreshold;
+      if (appliedTuning.relevanceThreshold !== undefined) config.recall.threshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
       if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
       // The panel's Laya fields land on the *live* config object — the same one the launcher, the conflict check
@@ -1218,7 +1218,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           knob === 'depth'
             ? config.recall.depth
             : knob === 'relevanceThreshold'
-              ? config.recall.relevanceThreshold
+              ? config.recall.threshold
               : knob === 'window'
                 ? config.recall.window
                 : config.xFirst;
@@ -1229,7 +1229,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           );
         }
       }
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window, xFirst: config.xFirst } }) + '\n');
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, xFirst: config.xFirst } }) + '\n');
       await primeSystemPrompt({
         service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
         observer,
@@ -1247,7 +1247,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       try {
         const reread = readTuningFile();
         if (reread.depth !== undefined) config.recall.depth = reread.depth;
-        if (reread.relevanceThreshold !== undefined) config.recall.relevanceThreshold = reread.relevanceThreshold;
+        if (reread.relevanceThreshold !== undefined) config.recall.threshold = reread.relevanceThreshold;
         if (reread.window !== undefined) config.recall.window = reread.window;
         appliedTuning = { ...appliedTuning, ...reread };
       } catch (err) {
@@ -1348,19 +1348,19 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       );
     }
     if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
-    if (parsed.relevanceThreshold !== undefined) config.recall.relevanceThreshold = parsed.relevanceThreshold;
+    if (parsed.relevanceThreshold !== undefined) config.recall.threshold = parsed.relevanceThreshold;
     if (parsed.window !== undefined) config.recall.window = parsed.window;
     if (parsed.xFirst !== undefined) config.xFirst = parsed.xFirst;
     const persist = writeTuningFile(appliedTuning);
     const persisted = persist.ok;
     ctx.logger?.info?.(
-      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.relevanceThreshold} window=${config.recall.window} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
+      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.threshold} window=${config.recall.window} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
     );
     return {
       ok: true,
       effective: {
         depth: config.recall.depth,
-        relevanceThreshold: config.recall.relevanceThreshold,
+        relevanceThreshold: config.recall.threshold,
         window: config.recall.window,
         xFirst: config.xFirst,
       },
@@ -1411,7 +1411,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
             stored: appliedTuning,
             effective: {
               depth: config.recall.depth,
-              relevanceThreshold: config.recall.relevanceThreshold,
+              relevanceThreshold: config.recall.threshold,
               window: config.recall.window,
               xFirst: config.xFirst,
             },
@@ -1587,7 +1587,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     const storedNow = readTuningFile();
     appliedTuning = { ...appliedTuning, ...storedNow };
     if (storedNow.depth !== undefined) config.recall.depth = storedNow.depth;
-    if (storedNow.relevanceThreshold !== undefined) config.recall.relevanceThreshold = storedNow.relevanceThreshold;
+    if (storedNow.relevanceThreshold !== undefined) config.recall.threshold = storedNow.relevanceThreshold;
     if (storedNow.window !== undefined) config.recall.window = storedNow.window;
     if (storedNow.xFirst !== undefined) config.xFirst = storedNow.xFirst;
   }
@@ -1618,7 +1618,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
                 stored: { ...readTuningFile(), ...appliedTuning },
                 effective: {
                   depth: config.recall.depth,
-                  relevanceThreshold: config.recall.relevanceThreshold,
+                  relevanceThreshold: config.recall.threshold,
                   window: config.recall.window,
                   xFirst: effective.xFirst,
                 },
