@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { cellPolicy, defaultPolicy } from '../src/types.ts';
+import { validatePolicy } from '../src/config.ts';
 import type { Cell } from '../src/types.ts';
 import { AttemptController, orderPlans } from '../src/plan-gate.ts';
 
@@ -50,6 +51,53 @@ test('every cell leaves the assembled layout readable, whichever side x lands on
     assert.equal(typeof p.xFirst, 'boolean', `${cell}: the layout is a real branch, not an omission`);
     assert.equal(p.cell, cell, `${cell}: the record says which cell produced it`);
   }
+});
+
+/**
+ * A cell that exists in the type and in the preset, and in neither of the two places that decide what runs, is
+ * worse than a cell that does not exist: it looks configured.
+ *
+ * `deliver` was added to `AssemblyPolicy` and to `cellPolicy` in the N6 commit, and to neither `BOOLEAN_PATHS`
+ * nor the runtime's base policy. A live C4 session then reported `policy.deliver is off` on all twelve steps,
+ * with 8 of 12 assemblies carrying a non-empty recalled block: the content was assembled, delivered nowhere, and
+ * the record only said "off" because the cell name in the log is the cell *asked for*, not the policy that ran.
+ */
+test('a cell preset is what the runtime actually starts from, and an override still wins', () => {
+  // C1 is the baseline: no TAS, no selection, no gate, chronological, and it delivers nothing.
+  const c1 = validatePolicy({ cell: 'C1' });
+  assert.equal(c1.ok, true, JSON.stringify(c1.errors));
+  assert.equal(c1.policy.tas.on, false, 'C1 must not order by TAS');
+  assert.equal(c1.policy.recall.tier1, 'off', 'C1 must not select');
+  assert.equal(c1.policy.planGate.on, false, 'C1 has no gate');
+  assert.equal(c1.policy.xFirst, false, 'C1 is chronological');
+  assert.equal(c1.policy.deliver, false, 'C1 is the only cell that leaves history to the harness');
+
+  // C3 is the arm that must be able to say "S1 governance only".
+  const c3 = validatePolicy({ cell: 'C3' });
+  assert.equal(c3.policy.recall.tier1, 'embed', 'C3 selects');
+  assert.equal(c3.policy.planGate.on, true, 'C3 gates');
+  assert.equal(c3.policy.tas.on, false, 'C3 does not order by TAS');
+  assert.equal(c3.policy.xFirst, false, 'C3 is chronological');
+  assert.equal(c3.policy.deliver, true, 'and it delivers what it selected, or it measures nothing');
+
+  // C2/C4: ordered, and delivering.
+  for (const cell of ['C2', 'C4'] as Cell[]) {
+    const p = validatePolicy({ cell }).policy;
+    assert.equal(p.tas.on, true, `${cell} orders by TAS`);
+    assert.equal(p.xFirst, true, `${cell} is x-first`);
+    assert.equal(p.deliver, true, `${cell} delivers`);
+  }
+
+  // Precedence: the cell is the base, an explicit knob in the patch is the deviation, and it wins.
+  const deviated = validatePolicy({ cell: 'C3', deliver: false, xFirst: true });
+  assert.equal(deviated.policy.deliver, false, 'a patch may turn delivery off on purpose');
+  assert.equal(deviated.policy.xFirst, true, 'and may reorder a cell it disagrees with');
+  assert.equal(deviated.policy.recall.tier1, 'embed', 'while the rest of the cell still applies');
+
+  // A cell that is not a cell is an error, and falls back to C4 rather than to half a cell.
+  const bogus = validatePolicy({ cell: 'C9' });
+  assert.equal(bogus.ok, false);
+  assert.equal(bogus.policy.cell, 'C4', 'an unusable cell name costs the C4 defaults, not a partial cell');
 });
 
 test('the gate never invents a plan: an empty model plan list stays empty', () => {  const decision = orderPlans([], [], 0.5);

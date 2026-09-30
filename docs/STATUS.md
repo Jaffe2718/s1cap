@@ -1119,11 +1119,37 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   `StepObservation.layout` exposed (add-only) so a caller can deliver rather than only report;
   `context-delivery.ts` (insertion, dedupe by payload digest, `reject`/abort/step-1 guards, insertion after the
   last claimed message, never a removal); `context_delivery` telemetry on every step, delivered or not.
-- **Live measurement of the new design:** **not yet run.** The only live evidence is from the *old* design
-  (4 records, all `delivered: false`, `messagesBefore: 1`), which is what motivated the rewrite.
-- **Still open:** the deduplicated re-injection pattern. `dsh-agent-instructions` also calls
-  `agent.inbox.remove(id)` for its own prior message; S1CAP's `deliverContext` dedupes by payload text, which
-  covers the same case but has not been measured against a multi-step turn.
+- **Live verification — passed, with the evidence being the session log, not the control plane.** A C4 run with a
+  tool-using conversation produced 9 delivery records, **4 with `delivered: true`**, each carrying the state proxy,
+  and the injected message is in the log the request is built from:
+  ```json
+  {"id":"s1cap-8d321cec","sessionId":"session-…","seq":118,"kind":"user","role":"user",
+   "text":"# context assembled for this step\nThe blocks below were selected by relevance to the current task…"}
+  ```
+  The model's own later `trace` records refer back to that material, so it was read, not just logged.
+- **The bug that made delivery impossible for two rounds: the cell preset was never applied at runtime.**
+  `validatePolicy` started from `defaultPolicy()` — which *is* C4 — so a profile patched to `cell: C1` ran C4's
+  TAS, tier1, gate and layout while `/s1` reported C1. `cellPolicy()` was called from tests only. The first live
+  attempt reported `policy.deliver is off` on all 12 steps while 8 of 12 assemblies carried a non-empty recalled
+  block. Fixed in `config.ts` (`basePolicyFor`): the named cell is the base, an explicit knob in the patch still
+  wins, and an unusable cell name falls back to C4 rather than to half a cell. `deliver` was also missing from
+  `BOOLEAN_PATHS`, so it could not be set from a profile at all and was reported as an unknown path.
+- **The next obstacle, measured on the same run — recall and delivery fire on disjoint steps.** Per step:
+  | step | `blocks.recalled` | `messagesBefore` | delivered |
+  |---|---|---|---|
+  | #0, #2, #4, #8 | 0 | 1 | yes (state proxy) |
+  | #1, #3, #5, #6, #7 | 836 – 5243 tokens | 0 | no |
+  The steps that call the model claim a message and have no history yet; the steps that have history are the ones
+  the harness claims nothing for, and the loop treats an empty `decision.messages` as "no step" (so nothing is
+  lost — no request is made). Root cause is in `observeStep`: the window is the *payload's* segments when it has
+  any, so at a turn-opening step the pool is a single user message and there is nothing to select. The comment
+  there argues the graph is a superset so using it "never loses a segment the payload carried" — the direction is
+  backwards: using the payload is what loses the graph's history, and that is the history the model needs.
+- **Still open:** (1) the window fix above, which is what makes recall non-empty on a step that calls the model;
+  (2) `minRecalledShare` fired on **9 of 9** steps, so every S1 selection in that run was replaced by a recency
+  window before delivery ever saw it; (3) `dsh-agent-instructions` also calls `agent.inbox.remove(id)` for its own
+  prior message — S1CAP dedupes by payload text instead, measured as working (4 injections, no repeats) but not
+  yet measured across a turn where the selection changes back and forth.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
   remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
   index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a

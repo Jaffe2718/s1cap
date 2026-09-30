@@ -151,12 +151,21 @@ export async function observeStep(
     });
   }
   const anchor = lastIndexWhere(segments, (s) => s.kind === 'user');
-  // Where the model view is taken from. The step payload usually carries nothing (see adaptSessionEvent for the
-  // measurement), and the session-event stream that upkeep folds into the graph is what actually holds the
-  // conversation. So the window is this payload's segments when it has any, and the graph's own append order
-  // otherwise. Both are the same thing in the steady state: the payload's segments are added to this same graph
-  // immediately above, so the graph is a superset and using it never loses a segment the payload carried.
-  const window: Segment[] = segments.length > 0 ? segments : input.graph.orderedSegments();
+  // Where the model view is taken from.
+  //
+  // This used to say: the payload's segments when it has any, the graph's append order otherwise, because the
+  // graph is a superset and "using it never loses a segment the payload carried". The conclusion was right and
+  // the direction was backwards, and the cost has now been measured. The graph IS a superset — which means
+  // using the *payload* is the lossy choice, not the graph. At a turn-opening step the payload holds exactly one
+  // new user message, so the pool is that message, `history` is empty, and there is nothing for relevance to
+  // select: a live C4 run delivered the state proxy on 4 steps, every one of them with `blocks.recalled = 0`,
+  // while the five steps that did have history (836 to 5243 tokens of it) were the steps the harness claims
+  // nothing for — and an empty `decision.messages` means no request is made at all. Recall and delivery fired on
+  // disjoint steps.
+  //
+  // The graph's ordered segments are the session's own append order, so they include everything the payload
+  // carried and everything before it. That is the window a model call needs.
+  const window: Segment[] = input.graph.orderedSegments();
   const windowAnchor = anchor >= 0 ? anchor : lastIndexWhere(window, (s) => s.kind === 'user');
   const current = windowAnchor >= 0 ? window[windowAnchor] : window[window.length - 1];
   if (current === undefined) {

@@ -8,7 +8,7 @@
  * harness must never break a session over a typo in config.
  */
 import type { AssemblyPolicy, Cell } from './types.ts';
-import { defaultPolicy } from './types.ts';
+import { cellPolicy, defaultPolicy } from './types.ts';
 
 export type Severity = 'error' | 'warning';
 
@@ -64,7 +64,17 @@ export const ENUM_RULES: readonly { path: string; values: readonly string[] }[] 
   { path: 's1.provider', values: ['jev', 'laya-serve', 'edgejev', 'kev', 'none'] },
 ];
 
-export const BOOLEAN_PATHS: readonly string[] = ['tas.on', 'planGate.on', 'xFirst'];
+/**
+ * Boolean policy paths a profile patch may set.
+ *
+ * `deliver` is here for a measured reason. It was added to the policy in the N6 commit and *not* here, and a
+ * live run then reported `policy.deliver is off` on all twelve steps of a session whose cell was C4 — with 8 of
+ * 12 assemblies carrying a non-empty recalled block and 12 of 12 carrying a state proxy. The content was there and
+ * the switch was off, because a knob missing from this list is not read from the cell preset, cannot be set
+ * from a profile, and is reported as an unknown path. A flag that exists in the type and in the cell, and in
+ * neither of the two places that decide it, is worse than a flag that does not exist: it looks configured.
+ */
+export const BOOLEAN_PATHS: readonly string[] = ['tas.on', 'planGate.on', 'xFirst', 'deliver'];
 
 /**
  * Fixed by design, not configuration: the harness owns termination, and association-graph
@@ -142,8 +152,32 @@ function looksLikeUrl(value: string): boolean {
  *
  * @param extraAllowedKeys plugin-level keys that are not policy fields (e.g. `laya`)
  */
+/**
+ * The starting policy for a raw config: the cell preset when the config names a real cell, else C4.
+ *
+ * This was `defaultPolicy()` unconditionally, and that is a measurement bug, not a style choice. `defaultPolicy`
+ * *is* C4, and `cellPolicy()` was called from tests only — so a profile patched to `cell: C1` ran C4's TAS,
+ * tier1, plan gate and x-first layout while `/s1` reported the cell as C1. Nothing in the log said so, because
+ * the record carries the cell name, not the policy that ran. A live run of this exact mistake is in N6: twelve
+ * steps of a C4 session all reported `policy.deliver is off` because `deliver` had been added to the policy and
+ * to `cellPolicy`, but the runtime never consulted the cell.
+ *
+ * Precedence, unchanged and already the documented rule: cell preset < explicit config in the profile patch.
+ * A knob set in the patch still wins, so an experiment can deviate from its cell on purpose and say so in the
+ * patch rather than in a second place.
+ */
+function basePolicyFor(raw: unknown): AssemblyPolicy {
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    const cell = (raw as Record<string, unknown>)['cell'];
+    if (typeof cell === 'string' && (CELLS as readonly string[]).includes(cell)) {
+      return cellPolicy(cell as Cell);
+    }
+  }
+  return defaultPolicy();
+}
+
 export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[] = []): ValidationResult {
-  const policy = defaultPolicy();
+  const policy = basePolicyFor(raw);
   const issues: Issue[] = [];
   const target = policy as unknown as Record<string, unknown>;
 
@@ -184,7 +218,9 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
   for (const rule of ENUM_RULES) {
     if (!present(source, rule.path)) continue;
     const value = getPath(source, rule.path);
-    // cell C1-C3 is also shortened by cellPolicy() below, but the value must be a real cell
+    // The value must be a real cell; the preset itself was already applied by basePolicyFor() before this
+    // function looked at any override, so a bad value costs an error and falls back to C4 rather than a
+    // half-applied cell.
     if (typeof value !== 'string' || !rule.values.includes(value)) {
       issues.push({
         path: rule.path,
