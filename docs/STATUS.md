@@ -1548,3 +1548,112 @@ overlap and counts what it was asked (`GET /health`). It exists because the Laya
 and the plumbing had never been exercised; point a throwaway profile at it with `s1.baseUrl`. It is a
 **verification aid, not a deliverable**: numbers produced against it say nothing about quality.
 
+## 7. Round of 2026-09-30: per-session graphs, a scorer that was never called, and a panel that could not write the backend
+
+Two requirements drove this round, and both were stated as constraints rather than suggestions: **a restart must
+not throw the association graph away** ("I do not accept 'the process dies and the RG is gone' — the user
+restarts, has to recompute, and that wastes S1"), and **different sessions must be isolated** ("isolation comes
+first"). The design chosen was one file per session, because isolation by construction beats isolation by
+remembering a `WHERE` clause.
+
+### What the isolation actually was
+
+`createStepObserver` built a single `new AssociationGraph()` for the lifetime of the activation, with a comment
+claiming the observer outlives a session. It does — and that was the bug, not the mitigation. A live window
+reported **269 segments as one long conversation**; they were several unrelated ones, so a "new chat" began with
+the previous conversation already in its recall candidates and every count in that window measured contamination.
+
+The data model had anticipated this: `Segment` has carried a `sessionId` since it was written. Only the container
+was missing it. Graphs are now keyed by session (`Map<string, AssociationGraph>`), and the queued upkeep unit is
+`{ sessionId, event }` — the id is captured in the handler that receives the event, because the event envelope
+carries no session id of its own (measured keys: `type, seq, time, data, surfaceOp`). Reading it at drain time
+attributed a late event to whichever session happened to be current, which is the leak this closes.
+
+### Persistence, and the number that makes it worth doing
+
+`AssociationGraph.snapshot()` / `fromSnapshot()` cover `segments`, `order`, `edges` and **`scored`** — the scoring
+cursor is the point. Without it a restarted session re-asks the backend about pairs it already paid for. The
+store (`packages/core/src/rg-store.ts`) is one JSON file per session, written temp-then-rename, with the session
+id inside the file and checked on read so a misnamed file cannot contaminate a session. It is an object
+interface, so SQLite can replace it later without touching the callers.
+
+`rg-session-isolation.test.ts` holds both properties: two sessions in one process get two graphs and neither
+snapshot carries the other's segments; and a second observer over the same directory **scores no segment the
+first one already scored**. The second test is what "a restart must not waste S1" means as an assertion.
+
+### The scorer that was never called
+
+Relevance had never made a real System-1 call, and the reason turned out to be a cursor race, not a missing
+client. The synchronous pre-step path also scored, with the **local lexical scorer**, and always reached
+`scoreNew` first; upkeep then found nothing new and reported `upkeepScoredPairs: 0` against a graph of 269
+segments. Scoring now belongs to the async upkeep lane, which is what `rgMaintenance: async` says and what the
+250 ms assembly deadline requires — a measured System-1 call costs 400–1500 ms, so a step that waited on scoring
+would either blow its budget or answer from a scorer that never ran. `observeStep` gained `scoreOnStepPath`
+(default true, so the core tests keep their existing contract; the plugin passes false).
+
+Underneath that sat a second, worse defect. `createS1Relevance` returns **the batch function itself** and hangs
+`stats` off it, but the plugin called `relevance.scoreBatch(state, candidates)` — a property that does not exist.
+Every segment threw `not a function`, the upkeep path caught it by design, and the session reported a populated
+graph with zero edges, `scoredPairs: 0` and zero System-1 calls while every other counter looked healthy. Nine
+real segments produced thirty-six uncounted pairs that way, and `errors: 2` was the only trace. Two things were
+changed: the call is now `relevance(state, candidates)`, and `StepObserverStats.lastError` carries the most
+recent contained failure into `/s1cap-7340`, because "healthy graph, no edges" is otherwise indistinguishable
+from "nothing to score yet". `s1-relevance.test.ts` pins the shape — the returned value is callable and has no
+`.scoreBatch` member — since no type checker runs here (the build is `stripTypeScriptTypes` and `typescript` is
+not installed, which is why a member that does not exist on the declared type ships silently).
+
+### The panel could not write the interpreter path
+
+The host half has accepted `laya=` / `weights=` / `weightsEnv=` since it was written, and `readTuningFile` reads
+the same keys — but the settings panel had **no control for any of them**. The one field that decides whether
+System-1 calls happen at all could only be set by hand-editing JSON in the harness home, while the conflict
+message told the user to fill in a control that did not exist. `credentials.ts` even states the requirement it
+was violating: *"a required field with no write path is a field that cannot be filled"*.
+
+`client.js` now renders those three inputs, sends them on the same command line `/s1-tune` takes (quoted, because
+the tokenizer keeps a quoted run together and an unquoted `D:/Program Files/…` arrives as `D:/Program`), omits an
+empty box rather than sending an empty value, and re-reads the host after a save so the conflict line reflects
+what was just written. The fields fill themselves from `stored` (the file the next launch reads) rather than from
+the live in-memory copy, so a saved path is visible instead of looking unsaved.
+
+### Verified live, and what is still unverified
+
+| Claim | State |
+| --- | --- |
+| Per-session graphs, real session ids | **verified**: `sessions: [{unassigned,0}, {a2a1de7b…,1}, {d7a786ed…,10}]` in a live instance |
+| Restart does not re-score | **verified in test** (two observers, one directory), not yet across a real process restart |
+| Conflict clears and the backend re-resolves | **verified**: `provider: none` → `laya-serve`, `conflicts: 1` → `0` after the first step |
+| The scoring path throws no more | **verified**: `lastError` empty where it previously held the `TypeError` |
+| **Pairs scored against the real checkpoint** | **verified — this is the milestone**: 9 `s1_call` records, all `role: assoc`, `kind: noul`, `ok: true`, `repo: convaiinnovations/laya/typed-decisions`, `endpoint: 127.0.0.1:8008`, `routedModel: laya-rl-agent` |
+
+### The arithmetic that ties out, which is the real proof
+
+One session held ten segments. `upkeepScoredPairs` was **45**, and the nine `s1_call` records carried
+`questions: 1,2,3,4,5,6,7,8,9`. That is exactly the window rule: the first segment has no earlier segment to be
+scored against and costs no call, the second has one candidate, and so on — 1+2+…+9 = 45 pairs and 9 calls, one
+per segment with a non-empty window. The persisted snapshot agrees: `order` 10, `scored` 10, `scoredPairs` 45.
+
+The surviving edge is a `noul` edge from the backend (`source: "s1-noul"`, `provenance: "window:1024;s1"`,
+`w: 0.5815` above the 0.55 threshold), and it connects the user's message to the assistant's reply to it — the
+association the method claims to find, found by the checkpoint rather than by string overlap.
+
+Isolation is verified per file rather than per counter: every segment inside a session's snapshot carries that
+session's id, and the two sessions' files share nothing.
+
+### One defect the RG check turned up, and one cost note
+
+- **An event that arrives before the first step is attributed to a placeholder session.** The event envelope
+  carries no session id, so `readSessionId(event, stats.sessionId)` falls back to `opts.sessionId ?? 'unassigned'`
+  when no step has run yet. Its segments go into a graph no real session will ever read — isolation applied to an
+  id that belongs to nobody silently drops the content instead of delivering it. Measured and pinned by
+  `rg-session-isolation.test.ts` ("a content event that arrives before the first step lands in a placeholder
+  session"); whether it bites depends on event/step ordering, which belongs to the host. The fix is to buffer
+  pre-session events and drain them once a step names the session, rather than inventing a session for them.
+- **Chunks of one message are scored against each other.** A long message is split into `chunkOf` segments, and
+  the window rule then asks the backend about sibling chunks — seven chunks of one skill catalogue produced 21 of
+  the 45 pairs. Those pairs are not wrong, but they are the least informative ones in the window and they are
+  paid for in S1 calls, so a large-message session spends most of its scoring budget on the message it just
+  received. Worth a rule ("do not ask about two chunks of the same parent") before any cost table is published.
+
+
+

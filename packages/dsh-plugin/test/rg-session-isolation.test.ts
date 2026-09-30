@@ -149,6 +149,30 @@ test('a restarted process resumes a session graph and does not re-score pairs it
   }
 });
 
+test('a content event that arrives before the first step lands in a placeholder session', async () => {
+  // Not an aspiration - a measurement of the current behaviour, written down because the consequence is silent.
+  // The event envelope carries no session id, so an event that arrives before any step has run is attributed to
+  // the observer's fallback (`opts.sessionId ?? 'unassigned'`). Its segments are added to that placeholder graph,
+  // and no real session ever reads it: isolation, applied to an id that belongs to nobody, quietly drops the
+  // content instead of delivering it. Whether this bites depends on event/step ordering, which is the host's.
+  const h = harness();
+  h.observer.noteSessionEvent(userEvent(1, 'a message that arrived before step one', 'early'));
+  for (let round = 0; round < 3; round += 1) {
+    h.ticks.forEach((tick) => tick());
+    h.ticks.length = 0;
+    await settle();
+  }
+  const byId = new Map(h.observer.stats().sessions.map((s) => [s.sessionId, s.segments]));
+  assert.ok(byId.has('unassigned'), 'the placeholder session exists');
+  assert.ok((byId.get('unassigned') ?? 0) > 0, 'and it holds the segments no real session will read');
+
+  // Once a step has named the session, that same event would have been attributed correctly - which is why this
+  // is an ordering hazard rather than a permanent leak.
+  await runSession(h, 'sess-late', ['a message after the step named the session'], 'late');
+  const after = new Map(h.observer.stats().sessions.map((s) => [s.sessionId, s.segments]));
+  assert.ok((after.get('sess-late') ?? 0) > 0, 'a late event reaches its own session graph');
+});
+
 test('a snapshot written for one session is never loaded into another', () => {
   const dir = mkdtempSync(join(tmpdir(), 's1cap-rg-'));
   const store = createRgFileStore({ dir });
