@@ -35,6 +35,7 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.js';
 import { deliverContext } from './context-delivery.js';
+                                                                   
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { primeSystemPrompt } from './system-prompt.js';
@@ -430,12 +431,26 @@ let probeOut                                      ;
 const earlySessionEvents            = [];
 const EARLY_EVENT_LIMIT = 16;
 
+/**
+ * A narrow check for "this payload is an object I can read fields from".
+ *
+ * The pre-step payload is untyped here on purpose: its shape is read out of the packaged harness, and this is
+ * where the two fields delivery depends on (`messages` and `step`) are pulled from it. A wrong guess about the
+ * payload must cost a skip and a recorded reason, never a crash inside the loop.
+ */
+function isRecord(value         )                                   {
+  return typeof value === 'object' && value !== null;
+}
+
                                  
                           
                                                                                                                   
-               
-                                                                                               
-                                                                                             
+                    
+                                                                                                            
+                                                                                                               
+                                                                                                  
+     
+                                                                                                                    
                                     
  
 
@@ -504,7 +519,8 @@ export function preStepMiddleware(
           kept: 0,
           dropped: 0,
           inserted: 0,
-          match: 'none',
+          blocks: [],
+          payloadId: '',
           order: observation?.layout.order ?? [],
           ...extra,
         }                  );
@@ -524,16 +540,24 @@ export function preStepMiddleware(
       return decision;
     }
     try {
-      const result = options.deliver(observation, decision                           );
-      if (result === null) {
-        report(false, 'nothing to insert, so the decision passes through unchanged', { order: observation.layout.order });
+      const result = options.deliver(observation, decision                           , payload);
+      if (!result.delivered || result.messages === null) {
+        report(false, result.reason, { blocks: result.blocks, order: observation.layout.order });
         return decision;
       }
-      report(true, `delivered ${result.length} messages in the order ${observation.layout.order.join(' > ')}`, {
-        messagesAfter: result.length,
+      report(true, result.reason, {
+        messagesAfter: result.messages.length,
+        kept: result.kept,
+        // `dropped` is reported as the harness's own number rather than a hard zero: if a future change ever
+        // removed a message here, the record would have to change with it, and a record that cannot be wrong is
+        // a record nobody reads.
+        dropped: result.dropped,
+        inserted: result.inserted,
+        blocks: result.blocks,
+        payloadId: result.payloadId,
         order: observation.layout.order,
       });
-      return { ...(decision                           ), messages: result };
+      return { ...(decision                           ), messages: result.messages };
     } catch (err) {
       // Worth a warning: it means the intervention silently did not happen for this step, which is the failure
       // this whole file exists to make impossible to miss.
@@ -1049,18 +1073,24 @@ function applyInner(ctx               , raw                             )       
       observer,
       cell: config.cell,
       emit: emitControl,
-      deliver: (built, decision) =>
+      deliver: (built, decision, payload) =>
         deliverContext({
           enabled: config.deliver,
           order: built.layout.order,
           ...(built.layout.stateProxy !== undefined ? { stateProxy: built.layout.stateProxy } : {}),
           recalled: built.layout.recalled,
-          tail: built.layout.tail,
           anchor: built.layout.anchor,
           messages: Array.isArray((decision                          ).messages)
             ? ((decision                           ).messages             )
             : [],
-        }).messages,
+          // The harness's `claimed` list, read from the pre-step payload exactly as dsh-agent-instructions
+          // reads it. It defines where a delivered block goes: after the last message this step will append to
+          // the log, which is after the question being answered, not before it.
+          ...(isRecord(payload) && Array.isArray(payload['messages'])
+            ? { claimed: payload['messages']              }
+            : {}),
+          ...(isRecord(payload) && typeof payload['step'] === 'number' ? { step: payload['step'] } : {}),
+        }),
     }),
   );
 

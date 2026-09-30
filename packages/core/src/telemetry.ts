@@ -166,11 +166,13 @@ export interface ContextDeliveryEvent {
   kept: number;
   /** harness messages the delivered list does not contain */
   dropped: number;
-  /** blocks we added (recalled segments and the state proxy) */
+  /** how many messages were added; delivery is an insertion, so this is 0 or 1 */
   inserted: number;
-  /** how the tail was matched to the harness list: exact by id, or by position */
-  match: 'id' | 'position' | 'none';
-  /** the block order that was delivered, so the record says which layout the model saw */
+  /** the blocks the injected message carried, in order: what the model was actually given */
+  blocks: string[];
+  /** digest of the injected payload, so a repeated delivery is recognisable across steps */
+  payloadId: string;
+  /** the block order the layout used for this step */
   order: string[];
 }
 

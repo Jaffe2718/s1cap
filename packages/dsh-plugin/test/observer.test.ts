@@ -77,20 +77,36 @@ function observerWith(records: unknown[], overrides: Partial<{ throws: boolean }
  */
 function preStep(observer: StepObserver, overrides: Partial<PreStepOptions> = {}): {
   middleware: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>;
-  emitted: { type?: string; delivered?: boolean; reason?: string; messagesBefore?: number; messagesAfter?: number; order?: string[] }[];
+  emitted: { type?: string; delivered?: boolean; reason?: string; messagesBefore?: number; messagesAfter?: number; order?: string[]; blocks?: string[] }[];
 } {
-  const emitted: { type?: string; delivered?: boolean; reason?: string; messagesBefore?: number; messagesAfter?: number; order?: string[] }[] = [];
+  const emitted: { type?: string; delivered?: boolean; reason?: string; messagesBefore?: number; messagesAfter?: number; order?: string[]; blocks?: string[] }[] = [];
   return {
     emitted,
     middleware: preStepMiddleware(harness().ctx, {
       observer,
       cell: 'C4',
       emit: (event) => emitted.push(event as never),
-      deliver: () => null,
+      deliver: () => SKIPPED,
       ...overrides,
     }),
   };
 }
+
+/**
+ * What `deliverContext` returns when there is nothing to deliver: a reported skip, with the harness's own list
+ * passed through. Spelled out here rather than imported so this file keeps testing the middleware's handling of
+ * a result, and `context-delivery.test.ts` keeps testing the result itself.
+ */
+const SKIPPED = {
+  delivered: false,
+  reason: 'nothing to insert: no recalled block and no state proxy',
+  messages: null,
+  blocks: [] as string[],
+  kept: 0,
+  dropped: 0,
+  inserted: 0,
+  payloadId: '',
+};
 
 test('a pre-step call emits one assembly record and returns the harness decision untouched', async () => {
   const records: { type?: unknown }[] = [];
@@ -141,25 +157,38 @@ test('a step that produced nothing delivers nothing and still reports why', asyn
   assert.equal(emitted.length, 0, 'with no assembly there is no delivery to report');
 });
 
-test('a delivery that returns a list replaces the messages, and a rejecting one changes nothing', async () => {
+test('a delivery that returns a list returns it, and a throwing one changes nothing', async () => {
   const records: unknown[] = [];
   const observer = observerWith(records);
-  const decision = { kind: 'accept', messages: [{ id: 'sys', role: 'system' }, { id: 'u2', role: 'user' }] };
+  const decision = { kind: 'enter', messages: [{ id: 'sys', role: 'system' }, { id: 'u2', role: 'user' }] };
+  // `kind: 'enter'` is the kind the packaged loop produces on a normal step (dsh-agent-loop `preStep`); a test that
+  // used a made-up kind would pass for the wrong reason if the guard ever came to check it.
+  const injected = { id: 's1cap-abc', role: 'user', content: [{ type: 'text', text: '# context assembled' }] };
 
   const delivered = preStep(observer, {
-    deliver: () => [{ id: 'sys', role: 'system' }, { id: 's1cap-recalled-h1', role: 'user' }],
+    deliver: () => ({
+      delivered: true,
+      reason: 'inserted one message after the last claimed message',
+      messages: [decision.messages[0], injected, decision.messages[1]],
+      blocks: ['recalled'],
+      kept: 2,
+      dropped: 0,
+      inserted: 1,
+      payloadId: 's1cap-abc',
+    }),
   });
   const returned = await delivered.middleware({ messages: MESSAGES, step: 3 }, async () => decision);
   assert.notEqual(returned, decision, 'a delivered step returns a new decision object');
   assert.deepEqual(
     (returned as { messages: unknown[] }).messages,
-    [{ id: 'sys', role: 'system' }, { id: 's1cap-recalled-h1', role: 'user' }],
+    [decision.messages[0], injected, decision.messages[1]],
     'with exactly the list the delivery built',
   );
   const record = delivered.emitted.find((e) => e.type === 'context_delivery');
   assert.equal(record?.delivered, true);
   assert.equal(record?.messagesBefore, 2);
-  assert.equal(record?.messagesAfter, 2);
+  assert.equal(record?.messagesAfter, 3, 'one more than it started with: an insertion, not a rewrite');
+  assert.deepEqual(record?.blocks, ['recalled'], 'and the record says which blocks the model was given');
 
   const rejecting = preStep(observer, {
     deliver: () => {
@@ -173,7 +202,9 @@ test('a delivery that returns a list replaces the messages, and a rejecting one 
 test('a rejected or aborted step is never rewritten', async () => {
   const records: unknown[] = [];
   const observer = observerWith(records);
-  const { middleware, emitted } = preStep(observer, { deliver: () => [{ id: 'nope' }] });
+  const { middleware, emitted } = preStep(observer, {
+    deliver: () => ({ ...SKIPPED, delivered: true, messages: [{ id: 'nope' }] }),
+  });
 
   const rejected = { kind: 'reject', messages: [{ id: 'u' }] };
   assert.equal(await middleware({ messages: MESSAGES, step: 1 }, async () => rejected), rejected);

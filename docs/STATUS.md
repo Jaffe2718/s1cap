@@ -1079,22 +1079,55 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
 - **Traps:** never let a telemetry write change the call; keep the two files separate (I3/I4);
   `netLatencyMs` excludes approval waits by definition.
 
-### N6 — The context rewrite (the intervention)
+### N6 — Context delivery (the intervention) — **partly done, and the design was wrong once**
 
-- **Goal:** `agent/pre-step` returns a decision whose `messages` are the assembled view, bounded by
-  `assemblyDeadlineMs`, with the user-facing transcript untouched.
-- **Why:** this is the actual product of the research; everything before it exists to make it safe.
-- **Prerequisites:** N1 (a real pinned block), N2 (upkeep off the critical path), N3 (replay parity), and a
-  green `authority.test.ts` (model-owned termination in every cell).
-- **Steps:** gate the rewrite behind a per-cell flag (`cellPolicy()` already derives C1–C4); honour the
-  deadline (on expiry return the untouched decision); record the rewrite in the control plane; assert that
-  C1/C2 cells produce byte-identical decisions to the baseline.
-- **Acceptance:** a replay tape shows a diff **only** inside the assembled blocks; a deliberately slowed
-  pipeline returns the untouched decision; the C1 baseline diff is empty; the transcript projection is
-  unchanged.
-- **Traps:** `termination` stays a literal `'model-owned'` — no configuration may flip it; never rewrite the
-  user-facing transcript; keep the pinned block byte-stable to protect the prefix cache; a rewrite that is not
-  reproducible is a bug, not a measurement.
+- **Goal (revised by measurement):** make the assembled view reach the model. What is now implemented is an
+  *insertion*: the recalled block and the state proxy, as one message, placed after the last message the
+  harness will append to the log for this step.
+- **What the packaged harness actually does** (read out of `app.asar` with `scripts/scan-dsh-asar.cjs`; note
+  that plain `node` reads nothing inside an asar and reports 0 hits for every needle, so this must be run
+  under Electron-as-Node):
+
+  ```js
+  // dsh-agent-loop/lib/index.js — preStep()
+  const claimed = this.inbox.claim(target, position.turn);
+  const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal));
+  const context = this.runtimeContext.project(joinContextSections(renderContextSections(assembly)));
+  const decision = await this.dispatch.waterfall("agent/pre-step", { messages: claimed, ...position, signal },
+    () => Promise.resolve({ kind: "enter", messages: context === void 0 ? claimed : [...claimed, context] }));
+
+  // dsh-agent-loop/lib/index.js — step(decision)
+  for (const { message, intent } of commits) this.session.append("system/message", { ... }, intent);
+  if (firstAttempt) for (const message of decision.messages) this.session.append("user/message", message, ...);
+  const request = this.buildRequest(config, preparedCall, assembly.tools, ...);
+  const stream = this.loopCtx.llm.stream(request);
+  ```
+
+- **The correction, and why the first implementation could never have worked.** `decision.messages` is the
+  step's *increment* — `claimed` plus one projected context message — **not the history**. The history lives in
+  the session log, and the request is built from that log. The first version of `context-delivery.ts` rewrote
+  `decision.messages` into a whole model view (pinned prefix, T, recalled, tail, x, in layout order); it was
+  well-formed and tested, and a live run reported `delivered: false, messagesBefore: 1` four times over. Two
+  consequences, both now the module's contract:
+  1. A plugin **can** add context: the message is appended to the log and is in the next request. This is the
+     harness's own channel — `dsh-agent-instructions` injects its instruction block exactly this way, in
+     production, with `decision.messages.toSpliced(lastClaimedIndex + 1, 0, desired)`.
+  2. A plugin **cannot** suppress history. Nothing reachable from `agent/pre-step` removes a message the log
+     already holds. A design claiming otherwise would leave the log asserting one thing and the model seeing
+     another.
+- **Done:** `policy.deliver` (C1 off — it is the only cell that leaves history to the harness; C2/C3/C4 on);
+  `StepObservation.layout` exposed (add-only) so a caller can deliver rather than only report;
+  `context-delivery.ts` (insertion, dedupe by payload digest, `reject`/abort/step-1 guards, insertion after the
+  last claimed message, never a removal); `context_delivery` telemetry on every step, delivered or not.
+- **Live measurement of the new design:** **not yet run.** The only live evidence is from the *old* design
+  (4 records, all `delivered: false`, `messagesBefore: 1`), which is what motivated the rewrite.
+- **Still open:** the deduplicated re-injection pattern. `dsh-agent-instructions` also calls
+  `agent.inbox.remove(id)` for its own prior message; S1CAP's `deliverContext` dedupes by payload text, which
+  covers the same case but has not been measured against a multi-step turn.
+- **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
+  remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
+  index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a
+  test written before the fix).
 
 ---
 
@@ -1104,8 +1137,15 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
    stay clean. Use a throwaway CLI profile for every experiment — `dsh --profile s1capobs --from-default-profile headless --dump-config`
    for automated rounds, `--from-default-profile web` for UI work — and delete it afterwards.
 2. **Read contracts from the packaged source before coding against them.** `scripts/scan-dsh-asar.cjs`
-   (`--ls`, `--dump <path> [lines]`, or bare needles) reads DSH's own code out of `app.asar` through
-   Electron-as-Node. Guessing a hook contract once killed a live round.
+   (`--ls`, `--dump <path> [lines]`, `--grep <path> <pattern> [before] [after]`, or bare needles) reads DSH's own
+   code out of `app.asar`. **Run it under Electron-as-Node** (`$env:ELECTRON_RUN_AS_NODE="1"; & "…\DeepSeek
+   Harness.exe" scripts\scan-dsh-asar.cjs …`): under plain `node` it reads nothing inside the asar and reports
+   `total hits: 0` for *every* needle, including ones that certainly exist. Guessing a hook contract once killed
+   a live round; a scanner that silently returns no findings nearly caused a second.
+3. **`agent/pre-step`'s `decision.messages` is the step's increment, not the history.** `decision.messages` is
+   `claimed` (what the inbox handed over) plus a projected context message; `dsh-agent-loop`'s `step()` appends
+   it to the session log and then builds the request *from that log*. So a plugin can add context, and cannot
+   remove any. See N6.
 3. **After any profile install, re-run `pnpm install` in the repository** — it can drop the workspace
    junctions the tests resolve `@s1cap/*` through.
 4. **Ship JavaScript.** Profile installs live under `node_modules`, where Node refuses to strip TypeScript, so
@@ -1165,7 +1205,10 @@ plausible-looking number rather than an error.
 1. **The observer asserted non-null on an empty segment list.** `assembler.ts` then threw inside a never-throw
    guard, so a live session looked healthy while nothing was observed at all.
 2. **The step payload carries no history.** `agent/pre-step` hands over `inbox.claim(...)`: one user message on
-   step 1, an empty array afterwards. The conversation lives in the session-event stream.
+   step 1, an empty array afterwards. The conversation lives in the session-event stream — and, read out of
+   `dsh-agent-loop`'s `step(decision)`, in the session log the request is built from. This was noticed here as a
+   parsing problem and only became an architectural fact when it turned out to decide what delivery can be; see
+   N6.
 3. **Upkeep never ran.** The queue only drains when something asks; `schedule` was never passed, so `flush()` was
    called by tests and nothing else.
 4. **The event payload is under `data`.** Measured envelope: `{type, seq, time, data, surfaceOp}`, where
