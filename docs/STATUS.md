@@ -1677,5 +1677,39 @@ session's id, and the two sessions' files share nothing.
   paid for in S1 calls, so a large-message session spends most of its scoring budget on the message it just
   received. Worth a rule ("do not ask about two chunks of the same parent") before any cost table is published.
 
+### The fail-open rule for pairs inside w that nobody has scored yet (user decision, not implemented yet)
+
+Measured context for why it exists: a successful System-1 call now takes a **median of 15.3 s** (mean 14.0, p90
+25.0, max 29.0) for batches of ~14 questions, so scoring the newest segments is minutes of background work, and
+a step can assemble before its own anchor has any edges. The anchor with no edges is the failure that costs the
+most: BFS returns zero candidates, the recall block is refilled from the recency window, and the intervention
+silently does not run — for a *timing* reason that no counter distinguishes from "the selector found nothing".
+
+The rule, stated so it cannot be read as "anything unscored counts as relevant":
+
+| Distance from the anchor | Pair state | Treatment |
+| --- | --- | --- |
+| `<= w` | scored | the threshold decides, as today |
+| `<= w` | **unscored, and the bounded wait expired** | **admitted as relevant** (fail open) |
+| `> w` | never asked, by design | **not** admitted — treating the whole tail as relevant would undo the saving `w` exists for |
+
+Three properties the implementation must have, because fail-open is a measurement decision as much as a safety
+one:
+
+1. **It must leave a trace.** Pairs admitted because nobody knew their weight cannot be counted with pairs the
+   backend judged, or the headline result — *recall selected by System-1* — is inflated by exactly the amount
+   that was unknown. A separate counter (`unknownAdmitted`) and a separate `EdgeSource` member keep the two
+   apart in the record, which is the same discipline as `judgedPairs` versus `scoredPairs`.
+2. **It ranks below a real score.** Admission is not promotion: unknown pairs fill space the backend's own
+   answers did not fill, and never displace a pair the backend scored higher.
+3. **It runs after the wait, not instead of it.** Order is: wait for the anchor's newest batch (a few seconds, a
+   policy parameter, so the ablation can price it) → then admit whatever is still unknown inside `w`. The wait
+   is bounded and returns immediately when the anchor's row is already computed, so this is an exception path
+   and not a per-step cost.
+
+The cost is bounded by construction: recall already fills a block under `recall.budgetRatio`, so admitting
+unknown pairs can spend the recall budget and cannot overspend it.
+
+
 
 
