@@ -81,14 +81,24 @@ env:
   HF_HUB_DISABLE_XET: "1"
 ```
 
-### Network findings (verified on a connection where huggingface.co is blocked)
+### Network findings
 
-| Check | Result |
+**Re-measured 2026-09-30, and the earlier table is wrong for this network.** The first plugin-launched start
+failed in `snapshot_download` with `LocalEntryNotFoundError` on the profile's `HF_ENDPOINT: https://hf-mirror.com`,
+while the *same command, same interpreter, no mirror* downloaded the checkpoint. The mirror no longer answers
+here at all, so the plugin is started **without** `HF_ENDPOINT` and **without** `HF_HUB_DISABLE_XET`, and the
+checkpoint comes from huggingface.co directly. The table below is kept as the history of the earlier measurement
+(connection where huggingface.co was blocked), not as this machine's configuration:
+
+| Check | Result (earlier connection, 2026-09) |
 |---|---|
 | `https://huggingface.co/api/models/convaiinnovations/laya` | unreachable (curl 000) |
 | `https://hf-mirror.com/api/models/convaiinnovations/laya` | reachable (200) |
 | download with the mirror only | **fails** after 4/5 files: `CAS Client Error: 401 Unauthorized` from `cas-server.xethub.hf.co` — the Xet content-addressed store is not proxied by the mirror |
 | download with `HF_HUB_DISABLE_XET=1` + mirror | **succeeds**; plain HTTPS downloads go through the mirror |
+
+Check before assuming either: run one start and read `~/.dsh/.s1cap/laya-launch.log`, which a failed start now
+writes in full.
 
 Working combination on this machine: `laya 0.3.21` · Python 3.13.15 · `torch 2.13.0+cu132` ·
 `transformers 5.16.1` · `huggingface_hub 1.29.0`, `english` checkpoint on CPU. A `noul` question

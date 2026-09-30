@@ -22,6 +22,12 @@ import { layaBaseUrl } from './types.js';
                 
                                              
                     
+     
+                                                                                                             
+                                                                                                                
+                                                                 
+     
+                                                   
  
 
                              
@@ -161,7 +167,14 @@ export class LayaServer {
 
     try {
       this.#child = this.#deps.spawn(plan.command, plan.args, {
-        env: plan.env,
+        // The parent environment, with the plan's values laid over it. Passing `plan.env` alone is what the first
+        // version did, and the backend started and then could not reach the Hugging Face Hub:
+        // `LocalEntryNotFoundError` after fifty lines of progress bars, while the same command with the same
+        // interpreter downloaded the checkpoint when a person ran it. The difference was the whole environment -
+        // no PATH, no proxy, no certificate variables, no SystemRoot, none of which the plan mentions and all of
+        // which a TLS connection needs. The plan stays a pure description of *overrides*; inheritance happens
+        // here, at the one place that knows there is a parent.
+        env: { ...(this.#deps.parentEnv?.() ?? {}), ...plan.env },
         ...(plan.cwd ? { cwd: plan.cwd } : {}),
       });
     } catch (err) {

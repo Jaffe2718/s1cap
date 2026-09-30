@@ -21,6 +21,7 @@
 import { defaultPolicy, validatePolicy, TELEMETRY_SCHEMA_VERSION } from '@s1cap/core';
                                                                       
 import {
+  DEFAULT_WEIGHTS_CACHE_DIR,
   LayaServer,
   createNodeDiscoveryDeps,
   createNodeLaunchDeps,
@@ -329,9 +330,14 @@ export class LayaRuntime {
    * is deliberate — this is a status line, not a log dump — and it is the tail, because that is where a Python
    * traceback ends.
  */
-  summary(tailLines = 12)                                                                           {
+  summary(tailLines         )                                                                           {
     const { logs, ...rest } = this.state();
-    return { ...rest, logLines: logs.length, logTail: logs.slice(-tailLines) };
+    // A backend that is not ready gets the whole buffer, up to a bound. The tail-only version was the second
+    // version: the first reported a count, and when the failure finally became readable it was the *end* of a
+    // Python traceback that mattered — the network error and the file it was fetching are at the top, and a
+    // twelve-line tail of a fifty-line buffer is exactly the part that does not say why.
+    const bound = tailLines ?? (rest.status === 'ready' ? 12 : 64);
+    return { ...rest, logLines: logs.length, logTail: logs.slice(-bound) };
   }
 }
 
@@ -673,6 +679,15 @@ function applyInner(ctx               , raw                             )       
   const resolved = resolvePluginConfig(raw);
   const config = resolved.config;
   const layaConfig = config.laya ?? defaultLayaConfig();
+  // The checkpoint cache is anchored, not relative. `./.s1cap/laya-cache` resolves against whatever directory the
+  // host happens to have as its working directory, so the same profile put the weights in one place when a person
+  // ran the backend by hand and in another when the plugin started it - and the second one re-downloaded a 421M
+  // checkpoint, or failed trying, while both runs reported the same configuration. Anchored against DSH_HOME it is
+  // the same directory every time, and it is the same directory the telemetry paths already use. A path the user
+  // supplied is left exactly as they wrote it, relative or not.
+  if (layaConfig.weightsCacheDir === undefined || layaConfig.weightsCacheDir === DEFAULT_WEIGHTS_CACHE_DIR) {
+    layaConfig.weightsCacheDir = resolveTelemetryPath('./.s1cap/laya-cache');
+  }
   const runtime = new LayaRuntime(layaConfig);
 
   for (const issue of resolved.policy.warnings) ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message}`);
@@ -1362,8 +1377,50 @@ function applyInner(ctx               , raw                             )       
           await runtime.start();
           const state = runtime.summary();
           ctx.logger?.info?.(`[s1cap] laya start: ${JSON.stringify(state, null, 2)}`);
+          if (state.status === 'failed') {
+            // A failed start writes its diagnostics to a file, not just to a status line. The buffer lives in this
+            // process, so when the host exits the reason a real backend would not start goes with it — and the
+            // first time this happened, the evidence was a count ("50 diagnostic lines buffered") and a manual
+            // re-run by hand. The file is append-only and beside the other run artifacts.
+            const path = resolveTelemetryPath('./.s1cap/laya-launch.log');
+            try {
+              mkdirSync(dirname(path), { recursive: true });
+              writeFileSync(
+                path,
+                [
+                  `=== ${new Date().toISOString()} start failed: ${state.error ?? 'no reason reported'}`,
+                  `command: ${state.pythonPath ?? '(no interpreter)'}`,
+                  '',
+                  ...state.logTail,
+                  '',
+                ].join('\n'),
+                'utf8',
+                { flag: 'a' },
+              );
+            } catch (err) {
+              ctx.logger?.warn?.(`[s1cap] could not write ${path}: ${(err         ).message}`);
+            }
+          }
+          // A successful start makes the client usable, which is not the same as the server running. The client was
+          // built on the first step and, in the ordinary case, while the port was still dead - so a session that
+          // starts the backend by hand kept a client pointed at a socket that refused connections, and the run made
+          // no System-1 calls while `/s1 laya status` said `ready`. Re-resolve here, where readiness is known.
+          if (state.status === 'ready') {
+            const rebuilt = buildBackend();
+            if (rebuilt.client === undefined || rebuilt.backend.baseUrl !== backend.baseUrl) {
+              ctx.logger?.info?.(
+                `[s1cap] System-1 backend picked up after start: ${describeS1Backend(backend)} -> ` +
+                  `${describeS1Backend(rebuilt.backend)}`,
+              );
+            }
+            backend = rebuilt.backend;
+            client = rebuilt.client;
+          }
           return state.status === 'failed'
-            ? commandError(`laya start failed: ${state.error ?? 'no reason reported'}`)
+            ? commandError(
+                `laya start failed: ${state.error ?? 'no reason reported'}\n` +
+                  state.logTail.map((l) => `  | ${l}`).join('\n'),
+              )
             : commandSuccess(`laya ${state.status}: ${state.baseUrl}`);
         }
         if (verb === 'stop') {

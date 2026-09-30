@@ -922,8 +922,33 @@ Discovers a Python environment by asking `conda env list --json` (never by strin
 `laya` import and the `laya-serve` console script, launches the server with injected environment variables,
 polls `/health` until ready, and buffers its stdout/stderr as diagnostics that never enter the session.
 Verified on this machine with a real call: `noul 0.8693 / 0.9251`, 90 input tokens, 13.9 s cold start.
-Machine specifics live in `docs/LAYA_RUNTIME.md` §5 (conda path, `HF_ENDPOINT`, `HF_HUB_DISABLE_XET`,
-`LAYA_THREADS`).
+
+**The backend runs.** Started through `/s1-laya start` against `D:\conda_store\envs\ml\python.exe` (laya 0.3.21):
+`status=ready` at `http://127.0.0.1:8008`, port 8008 listening, `LAYA_MODELS=typed-decisions` resolved to
+`convaiinnovations/laya` and the checkpoint downloaded into the configured cache.
+
+Three measured facts about the *first* real start, each of which looked like a code bug and was not:
+
+1. **`HF_ENDPOINT` / `HF_HUB_DISABLE_XET` are not needed here, and setting them breaks the start.** The profile
+   carried `HF_ENDPOINT: https://hf-mirror.com`; every plugin-launched start died in `snapshot_download` with
+   `LocalEntryNotFoundError` after fifty lines, while the *same command, same interpreter, no mirror* downloaded
+   the checkpoint when run by hand. Removed from the profile, the same start reached `ready`. If a machine really
+   does need a mirror, the failure is `LocalEntryNotFoundError` with an empty network cause — read
+   `~/.dsh/.s1cap/laya-launch.log`, not the status line.
+2. **The checkpoint cache must be absolute.** `./.s1cap/laya-cache` resolves against whatever directory the host
+   has as its working directory, so the same profile put the weights in one place for a person and another for the
+   plugin. It is now anchored to `DSH_HOME` unless the user names a directory.
+3. **The first step is when the panel's fields arrive, and both the client and the backend were built before
+   then.** Activation resolves the S1 backend once; `primeOnce` applies the panel's Laya fields on the first step;
+   `/s1-laya start` makes the server reachable *later* than both. Each of those three moments left a session
+   reporting a configuration while making no System-1 call. All three now re-resolve, and a cleared conflict is
+   asserted to be load-bearing rather than cosmetic.
+
+Still unproven: **no S1 call has yet been recorded from a live session.** The backend is ready and the client
+points at it, but scoring only happens when there are recall candidates, and the sessions run so far had one user
+message each. The core claim stays unclaimed until a real run scores real pairs against a named checkpoint.
+Machine specifics live in `docs/LAYA_RUNTIME.md` §5 (conda path, `LAYA_THREADS`); `HF_ENDPOINT` is no longer
+listed there as a requirement for this machine.
 
 ### D5. Plugin shell (`packages/dsh-plugin`)
 
