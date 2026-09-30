@@ -52,6 +52,20 @@ export function consoleScriptPath(pythonPath: string, platform: string): string 
  * therefore injected as environment variables only; `serveArgs` stays available for
  * releases that do accept flags.
  */
+/** The variable name used when the config does not name one. A convention, and configurable for that reason. */
+export const DEFAULT_WEIGHTS_ENV_VAR = 'HF_HOME';
+
+/** The cache S1CAP owns when the config does not choose one: under its own data directory, never the user's home. */
+export const DEFAULT_WEIGHTS_CACHE_DIR = './.s1cap/laya-cache';
+
+export function weightsCacheDir(cfg: LayaConfig): string {
+  return cfg.weightsCacheDir !== undefined && cfg.weightsCacheDir !== '' ? cfg.weightsCacheDir : DEFAULT_WEIGHTS_CACHE_DIR;
+}
+
+export function weightsEnvVar(cfg: LayaConfig): string {
+  return cfg.weightsEnvVar !== undefined && cfg.weightsEnvVar !== '' ? cfg.weightsEnvVar : DEFAULT_WEIGHTS_ENV_VAR;
+}
+
 export function buildLaunchPlan(
   cfg: LayaConfig,
   pythonPath: string,
@@ -63,6 +77,11 @@ export function buildLaunchPlan(
     LAYA_HOST: cfg.host,
     LAYA_PORT: String(cfg.port),
   };
+  // Where the checkpoints go, so the user is not asked to place or download them: the environment fetches them
+  // on first start and writes them here. A value the user put in `env` under this same name wins, because an
+  // explicit value must never be overwritten by a default - the same precedence every other override here has.
+  const cacheVar = weightsEnvVar(cfg);
+  if (env[cacheVar] === undefined) env[cacheVar] = weightsCacheDir(cfg);
   const extraArgs = cfg.serveArgs ?? [];
   const plan: LaunchPlan = { command: pythonPath, args: extraArgs, env };
   if (cfg.cwd) plan.cwd = cfg.cwd;

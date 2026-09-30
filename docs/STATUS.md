@@ -1306,6 +1306,26 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
     What is missing is a way for the panel to supply it: today the panel can set `pythonPath` and nothing else. A
     weights field that does not also carry the *variable name* the user's Laya reads would be a guess, so the
     pair (`weightsPath` + the env var name) is the shape to add — pending what that variable is called.
+- **Weights placement, decided: the user is not asked to place or download them.** The requirement is that a user
+  with a working Python environment has nothing else to do, and the environment already fetches on first start —
+  so S1CAP's only job is to decide where that download lands.
+  - `LayaConfig.weightsCacheDir` defaults to `./.s1cap/laya-cache`, a directory S1CAP owns under its own data
+    directory. Not the user's home, not a temp dir: a location they never think about and never clean by hand.
+  - `LayaConfig.weightsEnvVar` names the variable their Laya reads, defaulting to `HF_HOME`. **The default is a
+    convention, not a measured fact about the user's build**, and it is configurable for exactly that reason: if
+    their Laya does not read it, the variable goes unused, their own default cache applies, and nothing breaks. No
+    assumption about a variable name is load-bearing, and when a name is given, only that one is set — the
+    conventional name is not also set, so the two cannot silently disagree.
+  - A value the user put in `env` under the same name always wins. A default that overwrites an explicit value is
+    the kind of quiet override that makes a run impossible to explain afterwards.
+  - `/s1 laya status` prints the cache directory and the variable name, and the runtime state carries both. A
+    cache location nobody can read is a cache location nobody can debug, and the alternative — reading a
+    checkpoint identity out of a directory listing — is inference, not a record.
+  - **Still open, and it is a measurement, not a decision:** whether a given Laya build downloads the *fine-tuned*
+    checkpoint or a base one. Base measures 0.362 against 0.318 for random, so a run cannot be called valid
+    without naming the checkpoint it used. When the user's environment is available, one command reads how it
+    resolves the model (`python -c "import laya, inspect; print(laya.__file__)"`, then its config resolution)
+    and the answer goes here rather than being assumed.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
   remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
   index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a

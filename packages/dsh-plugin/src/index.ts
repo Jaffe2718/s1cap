@@ -29,6 +29,8 @@ import {
   installHint,
   layaBaseUrl,
   validateLayaConfig,
+  weightsCacheDir,
+  weightsEnvVar,
 } from '@s1cap/laya-runtime';
 import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackendIssues } from '@s1cap/s1-client';
 import type { ResolvedS1Backend } from '@s1cap/s1-client';
@@ -240,6 +242,15 @@ export interface LayaRuntimeState {
   baseUrl: string;
   pythonPath?: string;
   error?: string;
+  /**
+   * Where downloaded checkpoints go, and the environment variable that says so.
+   *
+   * Reported rather than assumed: the cache directory is a S1CAP default, the variable name is a convention the
+   * user's Laya may or may not read, and a run whose checkpoint cannot be named is a run whose System-1 answers
+   * are near noise (base checkpoints measure 0.362 against 0.318 for random). Both are printed so a mismatch is
+   * visible rather than something a reader has to infer from a directory listing.
+   */
+  weights?: { cacheDir: string; envVar: string };
   logs: readonly string[];
 }
 
@@ -302,6 +313,7 @@ export class LayaRuntime {
       baseUrl: layaBaseUrl(this.#config),
       ...(this.#pythonPath ? { pythonPath: this.#pythonPath } : {}),
       ...(this.#error ?? this.#server.error ? { error: this.#error ?? this.#server.error } : {}),
+      weights: { cacheDir: weightsCacheDir(this.#config), envVar: weightsEnvVar(this.#config) },
       logs: this.#server.logs,
     };
   }
@@ -1260,11 +1272,13 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         }
         const state = runtime.summary();
         ctx.logger?.info?.(
-          `[s1cap] laya status: ${state.status}${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` - ${state.error}` : ''}${state.logLines ? ` [${state.logLines} diagnostic lines buffered]` : ''}`,
+          `[s1cap] laya status: ${state.status}${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.weights ? ` (checkpoints: ${state.weights.envVar}=${state.weights.cacheDir})` : ''}${state.error ? ` - ${state.error}` : ''}${state.logLines ? ` [${state.logLines} diagnostic lines buffered]` : ''}`,
         );
         return commandSuccess(
           `laya ${state.status}${state.baseUrl ? ` at ${state.baseUrl}` : ''}` +
-            `${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` - ${state.error}` : ''}`,
+            `${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}` +
+            `${state.weights ? ` (checkpoints: ${state.weights.envVar}=${state.weights.cacheDir})` : ''}` +
+            `${state.error ? ` - ${state.error}` : ''}`,
         );
       },
     },

@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { defaultLayaConfig } from '../src/types.ts';
-import { LayaServer, buildLaunchPlan, consoleScriptPath } from '../src/launcher.ts';
+import {
+  DEFAULT_WEIGHTS_CACHE_DIR,
+  DEFAULT_WEIGHTS_ENV_VAR,
+  LayaServer,
+  buildLaunchPlan,
+  consoleScriptPath,
+  weightsCacheDir,
+  weightsEnvVar,
+} from '../src/launcher.ts';
 import type { LaunchDeps, SpawnedProcess } from '../src/launcher.ts';
 
 const PY = 'D:\\conda_store\\envs\\ml\\python.exe';
@@ -114,6 +122,53 @@ test('buildLaunchPlan configures Laya through the environment, not CLI flags', (
   assert.equal(env.LAYA_MODELS, 'typed-decisions');
   assert.equal(env.HF_ENDPOINT, 'https://hf-mirror.com');
   assert.equal(env.LAYA_PORT, '9001');
+});
+
+test('checkpoints go to a cache S1CAP owns, and the user is not asked to place them', () => {
+  // The convenience requirement: a user who has a working Python environment should not also have to download or
+  // place a checkpoint. The environment fetches on first start, so the only thing S1CAP has to get right is
+  // where the download lands — and a default under S1CAP's own data directory is a location the user never has
+  // to think about and never has to clean up by hand.
+  const cfg = defaultLayaConfig();
+  const env = buildLaunchPlan(cfg, PY, 'win32', false).env;
+  assert.equal(env[weightsEnvVar(cfg)], DEFAULT_WEIGHTS_CACHE_DIR);
+  assert.equal(env[DEFAULT_WEIGHTS_ENV_VAR], DEFAULT_WEIGHTS_CACHE_DIR, 'HF_HOME is the conventional name, by default');
+  assert.equal(weightsCacheDir(cfg), DEFAULT_WEIGHTS_CACHE_DIR);
+  assert.equal(weightsEnvVar(cfg), DEFAULT_WEIGHTS_ENV_VAR);
+});
+
+test('a weights variable the user named is honoured, and an explicit value is never overwritten', () => {
+  // Two separate overrides, and both have to win: the variable *name* (their Laya may not read HF_HOME) and the
+  // value (their machine may keep models elsewhere). A default that overwrites an explicit value is the kind of
+  // quiet override that makes a run impossible to explain afterwards.
+  const renamed = defaultLayaConfig();
+  renamed.weightsEnvVar = 'LAYA_CACHE_DIR';
+  assert.equal(buildLaunchPlan(renamed, PY, 'win32', false).env.LAYA_CACHE_DIR, DEFAULT_WEIGHTS_CACHE_DIR);
+  assert.equal(
+    buildLaunchPlan(renamed, PY, 'win32', false).env[DEFAULT_WEIGHTS_ENV_VAR],
+    undefined,
+    'and the conventional name is not also set, so the two cannot disagree',
+  );
+
+  const elsewhere = defaultLayaConfig();
+  elsewhere.weightsCacheDir = 'E:/models/laya';
+  assert.equal(weightsCacheDir(elsewhere), 'E:/models/laya');
+  assert.equal(buildLaunchPlan(elsewhere, PY, 'win32', false).env[DEFAULT_WEIGHTS_ENV_VAR], 'E:/models/laya');
+
+  const explicit = defaultLayaConfig();
+  explicit.env = { [DEFAULT_WEIGHTS_ENV_VAR]: 'D:/already/configured' };
+  assert.equal(
+    buildLaunchPlan(explicit, PY, 'win32', false).env[DEFAULT_WEIGHTS_ENV_VAR],
+    'D:/already/configured',
+    'a value the user set under the same name stays theirs',
+  );
+
+  // An empty string is treated as unset rather than as a path of "", which would be a directory named nothing.
+  const blank = defaultLayaConfig();
+  blank.weightsCacheDir = '';
+  blank.weightsEnvVar = '';
+  assert.equal(weightsCacheDir(blank), DEFAULT_WEIGHTS_CACHE_DIR);
+  assert.equal(weightsEnvVar(blank), DEFAULT_WEIGHTS_ENV_VAR);
 });
 
 test('LayaServer.start spawns, polls GET /health and reaches ready', async () => {

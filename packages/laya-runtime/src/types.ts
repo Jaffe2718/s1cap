@@ -16,6 +16,22 @@ export interface LayaConfig {
   extraCandidates?: string[];
   /** run `laya-serve` from the chosen environment when the console script exists */
   preferConsoleScript: boolean;
+  /**
+   * Where downloaded checkpoints live. Defaults to a directory S1CAP owns under its own data directory
+   * (`./.s1cap/laya-cache`), because a user should not have to download or place weights by hand — the
+   * environment fetches them on first start. Overridable for a machine that keeps models elsewhere.
+   */
+  weightsCacheDir?: string;
+  /**
+   * The environment variable the user's Laya reads to find that cache.
+   *
+   * Defaults to `HF_HOME`, which is the convention for this ecosystem. **That default is a convention, not a
+   * measured fact about the user's build**: if their Laya does not read it, the variable is simply unused,
+   * their own default cache applies, and nothing breaks. It is configurable precisely so that no assumption
+   * about the variable name is ever load-bearing, and `/s1 laya status` prints whichever name was used so a
+   * mismatch is visible instead of silent.
+   */
+  weightsEnvVar?: string;
   /** launch command override (e.g. a wrapper script) */
   serveCommand?: string;
   /** arguments appended to the launch command */

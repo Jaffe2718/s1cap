@@ -29,6 +29,8 @@ import {
   installHint,
   layaBaseUrl,
   validateLayaConfig,
+  weightsCacheDir,
+  weightsEnvVar,
 } from '@s1cap/laya-runtime';
 import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackendIssues } from '@s1cap/s1-client';
                                                           
@@ -240,6 +242,15 @@ function registerCommands(ctx               , specs               )           {
                   
                       
                  
+     
+                                                                                
+    
+                                                                                                                
+                                                                                                                
+                                                                                                                
+                                                                                  
+     
+                                                 
                           
  
 
@@ -302,6 +313,7 @@ export class LayaRuntime {
       baseUrl: layaBaseUrl(this.#config),
       ...(this.#pythonPath ? { pythonPath: this.#pythonPath } : {}),
       ...(this.#error ?? this.#server.error ? { error: this.#error ?? this.#server.error } : {}),
+      weights: { cacheDir: weightsCacheDir(this.#config), envVar: weightsEnvVar(this.#config) },
       logs: this.#server.logs,
     };
   }
@@ -1260,11 +1272,13 @@ function applyInner(ctx               , raw                             )       
         }
         const state = runtime.summary();
         ctx.logger?.info?.(
-          `[s1cap] laya status: ${state.status}${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` - ${state.error}` : ''}${state.logLines ? ` [${state.logLines} diagnostic lines buffered]` : ''}`,
+          `[s1cap] laya status: ${state.status}${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.weights ? ` (checkpoints: ${state.weights.envVar}=${state.weights.cacheDir})` : ''}${state.error ? ` - ${state.error}` : ''}${state.logLines ? ` [${state.logLines} diagnostic lines buffered]` : ''}`,
         );
         return commandSuccess(
           `laya ${state.status}${state.baseUrl ? ` at ${state.baseUrl}` : ''}` +
-            `${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}${state.error ? ` - ${state.error}` : ''}`,
+            `${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}` +
+            `${state.weights ? ` (checkpoints: ${state.weights.envVar}=${state.weights.cacheDir})` : ''}` +
+            `${state.error ? ` - ${state.error}` : ''}`,
         );
       },
     },
