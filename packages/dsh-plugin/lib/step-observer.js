@@ -14,6 +14,7 @@ import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQ
              
                  
            
+          
                   
                  
                    
@@ -46,8 +47,18 @@ import { isS1capInjected } from '@s1cap/core';
      
               
                                                                               
+                                                                                                         
+                                                                                                
+                                                                                             
+                     
     
                      
+     
+                                                                                                                 
+                                                                                                                 
+                                                                                 
+     
+                    
                                  
                                      
                                                                
@@ -108,6 +119,11 @@ import { isS1capInjected } from '@s1cap/core';
                          
                         
                      
+     
+                                                                                                                
+                                                                                                            
+     
+                                                                     
                            
  
 
@@ -166,10 +182,38 @@ function readEventType(event         )                     {
 }
 
 export function createStepObserver(opts                     )               {
-  const graph = new AssociationGraph();
-  // T's one-entry memo, alive for as long as the observer is. The observer is created once per activation and
-  // outlives a session, so the memo is also correct across sessions: the anchor id is a segment id, and a new
-  // session's task has a new one.
+  // One graph per session, and nothing shared between them.
+  //
+  // This used to be a single `new AssociationGraph()` for the lifetime of the activation, on the theory that the
+  // observer outlives sessions. It does — and that was the bug, not the mitigation: a "new chat" in the same host
+  // process started with the previous conversation's segments already in the graph, so the very first recall of a
+  // fresh session could retrieve out of an unrelated conversation, and every measurement of the intervention was
+  // contaminated by whatever had run before it in that window.
+  //
+  // The store, when one is supplied, makes a session's graph survive a restart. Without it the behaviour is the
+  // same per-session isolation, just in memory only — so the store is an optional surface, not a dependency.
+  const graphs = new Map                          ();
+  const graphFor = (sessionId        )                   => {
+    const known = graphs.get(sessionId);
+    if (known !== undefined) return known;
+    const resumed = opts.rgStore?.load(sessionId);
+    const created = AssociationGraph.fromSnapshot(resumed);
+    graphs.set(sessionId, created);
+    if (resumed !== undefined) {
+      opts.onWarn?.(
+        `[s1cap] session ${sessionId} resumed its graph: ${created.segmentCount} segments, ${created.edgeCount} edges, scoring cursor at ${resumed.scored}`,
+      );
+    }
+    return created;
+  };
+  // Persisted at the points where the graph actually changed: after upkeep, and after a turn boundary drains.
+  // Per-step writes would rewrite the whole snapshot for a graph that a step does not touch.
+  const persistGraph = (sessionId        )       => {
+    if (opts.rgStore === undefined) return;
+    const graph = graphs.get(sessionId);
+    if (graph !== undefined) opts.rgStore.persist(sessionId, graph.snapshot());
+  };
+  /** T's one-entry memo, alive for as long as the observer is. The anchor id is a segment id, and a new session's task has a new one. */
   const proxyCache = { id: '', text: '' };
   let systemPrompt                    ;
   let systemPromptTokens = 0;
@@ -197,6 +241,7 @@ export function createStepObserver(opts                     )               {
     upkeepScoredPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
+    sessions: [],
     upkeep: {
       enqueued: 0,
       applied: 0,
@@ -223,10 +268,17 @@ export function createStepObserver(opts                     )               {
       if (typeof (timer                          ).unref === 'function') (timer                         ).unref();
     });
 
-  const queue = createUpkeepQueue         ({
+  // The queued unit is an event *plus the session it belongs to*. The id is captured at enqueue time, in the
+  // handler that received the event, and travels with the item: reading `stats.sessionId` at drain time attributed
+  // a late-draining event to whichever session happened to be current then, which is exactly the cross-session
+  // leak this is here to close.
+  const queue = createUpkeepQueue                                       ({
     maxLagTurns: opts.maxLagTurns ?? 2,
     onWarn: (message) => opts.onWarn?.(message),
-    onEvent: async (event) => {
+    onEvent: async (item) => {
+      const event = item.event;
+      const sessionId = item.sessionId;
+      const graph = graphFor(sessionId);
       // Asynchronous upkeep, which is what the session-event stream is FOR: adapt, segment, fold into the
       // graph, score the new segment against the last w. No assemble happens here - this is not a step, and
       // assembling per event would be both wrong and expensive. The model view is assembled once, at pre-step.
@@ -236,7 +288,7 @@ export function createStepObserver(opts                     )               {
       // dropped it - which is why the graph was empty in live sessions and every recall count read zero.
       const now = opts.now();
       const { events: raw, report } = adaptSessionEvent(event, {
-        sessionId: stats.sessionId,
+        sessionId,
         startSeq: seq,
         now,
       });
@@ -258,7 +310,7 @@ export function createStepObserver(opts                     )               {
           const todos = extractTodoEvent(event);
           if (todos !== undefined) {
             try {
-              await opts.planGate.considerTodos(todos, stats.sessionId, stats.upkeepEvents);
+              await opts.planGate.considerTodos(todos, sessionId, stats.upkeepEvents);
             } catch (err) {
               stats.errors += 1;
               opts.onWarn?.(`[s1cap] plan gate failed on a todo/write (ignored): ${String(err)}`);
@@ -313,6 +365,11 @@ export function createStepObserver(opts                     )               {
       stats.upkeepEvents += 1;
       stats.upkeepSegments += segments.length;
       stats.upkeepScoredPairs += scored.scoredPairs;
+      // The graph changed here and nowhere else on this path, so this is the point to make it survive. Written
+      // per upkeep event rather than per step: a step only reads.
+      persistGraph(sessionId);
+      stats.graphSegments = graph.segmentCount;
+      stats.graphEdges = graph.edgeCount;
       seq += raw.length;
 
       // The plan gate reads the model's own step list out of its own output. It runs here, after the segments
@@ -329,7 +386,7 @@ export function createStepObserver(opts                     )               {
         for (const ev of raw) {
           if (ev.kind !== 'assistant' && ev.kind !== 'trace') continue;
           try {
-            await opts.planGate.consider(ev.text, stats.sessionId, stats.upkeepEvents);
+            await opts.planGate.consider(ev.text, sessionId, stats.upkeepEvents);
           } catch (err) {
             stats.errors += 1;
             opts.onWarn?.(`[s1cap] plan gate failed (ignored): ${String(err)}`);
@@ -364,8 +421,13 @@ export function createStepObserver(opts                     )               {
       const started = opts.now();
       try {
         const sessionId = readSessionId(payload, opts.sessionId ?? 'unassigned');
+        // The step path reads the graph and adds to it, but it does not score: scoring is upkeep's job, and the
+        // graph scores each segment only once. A step that scored here would do it with the local lexical scorer
+        // and leave upkeep nothing to ask the System-1 backend about, which is how a session ended up with a
+        // populated graph, zero `assoc` calls and every edge labelled as if a model had scored it.
         const observation = await observeStep({
           sessionId,
+          scoreOnStepPath: false,
           step: readStep(payload),
           seq,
           messages,
@@ -376,13 +438,18 @@ export function createStepObserver(opts                     )               {
           reserveOutputTokens: opts.reserveOutputTokens,
           fixedOverheadTokens: opts.fixedOverheadTokens,
           lambdaMs: opts.lambdaMs,
-          graph,
+          graph: graphFor(sessionId),
           // One slot for the whole observer, so T survives between steps. It is created here rather than inside
           // observeStep because that function is pure: a per-call cache would rebuild T every step, and T's
           // stability across steps is the property the whole block placement rests on.
           proxyCache,
         });
         seq += messages.length;
+        // The step added its own segments to the graph even though it did not score them, so this is a change
+        // worth surviving: a restart should resume at this cursor, not re-ingest a turn that is already in.
+        persistGraph(sessionId);
+        stats.graphSegments = graphFor(sessionId).segmentCount;
+        stats.graphEdges = graphFor(sessionId).edgeCount;
 
         const elapsed = Math.max(0, opts.now() - started);
         // The tape is written first, on purpose: it records what the harness actually sent, and that is worth
@@ -484,7 +551,13 @@ export function createStepObserver(opts                     )               {
               : { type: typeof event };
           this.probe({ schema: 0, kind: 'session-event-probe', ...shape });
         }
-        queue.enqueue(event);
+        // The session is decided now, in the handler that received the event, and travels with the queued item.
+        // The envelope carries no session id of its own (measured keys: `type, seq, time, data, surfaceOp`), so
+        // this reads the step's id when the event happens to expose one and falls back to the session the
+        // observer last saw a step for. That is still an attribution made at arrival time rather than at drain
+        // time, which is the difference that matters: a drain-time read gave every late event to whichever
+        // session happened to be current, mixing one session's content into another's graph.
+        queue.enqueue({ sessionId: readSessionId(event, stats.sessionId), event });
         if (!scheduled) {
           scheduled = true;
           schedule(tick);
@@ -524,12 +597,25 @@ export function createStepObserver(opts                     )               {
     },
 
     stats()                    {
-      const graphStats = graph.stats();
+      // Summed across the sessions this process holds, and reported per session as well: a single number for a
+      // per-session structure answers a question nobody asked - it reads as if one conversation had produced
+      // every segment in the window, which is precisely the confusion that made this a bug to begin with.
+      let segments = 0;
+      let edges = 0;
+      for (const g of graphs.values()) {
+        segments += g.segmentCount;
+        edges += g.edgeCount;
+      }
       return {
         ...stats,
+        graphSegments: segments,
+        graphEdges: edges,
+        sessions: [...graphs.entries()].map(([id, g]) => ({
+          sessionId: id,
+          segments: g.segmentCount,
+          edges: g.edgeCount,
+        })),
         systemPromptTokens,
-        graphSegments: graphStats.segments,
-        graphEdges: graphStats.edges,
         upkeep: queue.stats(),
       };
     },

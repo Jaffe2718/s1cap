@@ -35,6 +35,29 @@ export function decayedWeight(w        , ageMs        , lambdaMs        )       
                 
  
 
+/**
+ * The serialised form of one session's graph. Versioned, because a graph written by an older build
+ * is not a graph a newer build may half-read: an unrecognised version is treated as absent, so the
+ * worst a stale file can cost is the scoring it did not carry over.
+ */
+export const RG_SNAPSHOT_SCHEMA = 1;
+
+                             
+                 
+     
+                                                                                                               
+                                                                                                                 
+     
+                     
+                                                                      
+                  
+                      
+                           
+                                                                                                   
+                 
+                      
+ 
+
 export class AssociationGraph {
   #segments = new Map                 ();
   /** insertion order, for the scoring window */
@@ -111,11 +134,16 @@ export class AssociationGraph {
       scoredPairs += candidates.length;
 
       let weights                   ;
+      // Which scorer produced the weights, so the edge can say so. `undefined` from the batch scorer means the
+      // System-1 backend did not answer this segment and the local fallback produced every weight in it; calling
+      // that edge `'s1'` was a provenance lie, not merely an untyped literal.
+      let byBackend = false;
       if (opts.scoreBatch !== undefined) {
         // `undefined` is the batch scorer's way of saying "I could not answer this one" - a backend that
         // timed out, or a level the answer did not carry. That degrades to the local lexical scorer for this
         // segment, which is less accurate but never wrong by omission: a system with no System-1 still works.
         const batch = await opts.scoreBatch(current, candidates);
+        byBackend = batch !== undefined;
         weights = batch === undefined ? candidates.map((other) => scorer(current, other)) : batch;
         if (weights.length !== candidates.length) {
           throw new Error(
@@ -134,9 +162,11 @@ export class AssociationGraph {
           to: id,
           w: weight,
           wTier1: weight,
-          source: 's1',
+          // `'s1-noul'` is the only System-1 question shape the association path asks; `'lexical'` means
+          // "computed here, no backend consulted", which is the distinction an experiment has to be able to read.
+          source: byBackend ? 's1-noul' : 'lexical',
           verifiedAt: current.ts,
-          provenance: 'window:' + String(windowN),
+          provenance: byBackend ? `window:${String(windowN)};s1` : `window:${String(windowN)};fallback`,
         });
         edges += 1;
       }
@@ -242,6 +272,40 @@ export class AssociationGraph {
 
     stats()                                                           {
       return { segments: this.#segments.size, edges: this.#edges.size, scoredPairs: this.#scoredPairs };
+  }
+
+  /**
+   * Everything the graph holds, in a form that survives the process.
+   *
+   * The scoring cursor is part of the snapshot, and it is the reason a snapshot is worth writing at all: without
+   * `scored`, a restarted session would re-ask the System-1 backend about pairs it had already paid for. `adj`
+   * is derived from `edges` and is therefore rebuilt rather than stored.
+   */
+  snapshot()             {
+    return {
+      schema: RG_SNAPSHOT_SCHEMA,
+      order: [...this.#order],
+      segments: [...this.#segments.values()],
+      edges: [...this.#edges.values()],
+      scored: this.#scored,
+      scoredPairs: this.#scoredPairs,
+    };
+  }
+
+  /** Rebuild a graph from a snapshot. An unrecognised schema version yields an empty graph, not a partial one. */
+  static fromSnapshot(snap                        )                   {
+    const graph = new AssociationGraph();
+    if (snap === undefined || snap.schema !== RG_SNAPSHOT_SCHEMA) return graph;
+    for (const segment of snap.segments ?? []) graph.#segments.set(segment.id, segment);
+    graph.#order = (snap.order ?? []).filter((id) => graph.#segments.has(id));
+    for (const edge of snap.edges ?? []) {
+      graph.#edges.set(`${edge.from}->${edge.to}`, edge);
+      graph.#link(edge.from, edge.to);
+    }
+    // Clamped, because a cursor larger than the order array would silently skip scoring forever.
+    graph.#scored = Math.max(0, Math.min(graph.#order.length, Math.trunc(snap.scored ?? 0)));
+    graph.#scoredPairs = Math.max(0, Math.trunc(snap.scoredPairs ?? 0));
+    return graph;
   }
 }
 

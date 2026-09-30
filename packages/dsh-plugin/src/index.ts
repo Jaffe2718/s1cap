@@ -35,7 +35,7 @@ import {
 } from '@s1cap/laya-runtime';
 import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackendIssues } from '@s1cap/s1-client';
 import type { ResolvedS1Backend } from '@s1cap/s1-client';
-import { ControlPlaneLog } from '@s1cap/core';
+import { ControlPlaneLog, createRgFileStore } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.ts';
 import { deliverContext } from './context-delivery.ts';
 import type { ContextDeliveryResult } from './context-delivery.ts';
@@ -766,6 +766,11 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   let controlRecords = 0;
   let sessionLines = 0;
   let s1CallRecords = 0;
+  let s1CallFailures = 0;
+  // The session the current System-1 call belongs to. Upkeep scores one session's events at a time and awaits
+  // inside that work, so a scope variable set by the delegate that starts the call is read back by the record
+  // the call produces; the alternative was threading an id through three layers of scorer that have no use for it.
+  let s1SessionScope = 'unassigned';
   /**
    * The control log, hoisted out of the observation branch. `preStepMiddleware` is registered after that block
    * and has to write delivery records, and a block-scoped const would simply not be visible there — the same
@@ -865,6 +870,16 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
 `);
       }
     }
+    // One association graph per session, in one file per session, under the same anchored directory the
+    // weights cache uses. Two reasons, both measured rather than designed for:
+    //  - the graphs were shared, so a "new chat" in the same host process started with the previous conversation
+    //    in its recall candidates (269 segments read as one long session, and were in fact several);
+    //  - the graphs were not written anywhere, so a restart threw away every pair the System-1 backend had been
+    //    paid to score and the session scored them again.
+    const rgStore = createRgFileStore({
+      dir: resolveTelemetryPath('./.s1cap/rg'),
+      onWarn: (message) => ctx.logger?.warn?.(message),
+    });
     const sink = createControlSink({
       path: resolveTelemetryPath(resolved.telemetry.controlJsonl),
       onError: (message) => ctx.logger?.warn?.(`[s1cap] control sink: ${message}`),
@@ -892,7 +907,13 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       role: S1CallEvent['role'],
       kind: S1CallEvent['kind'],
       questions: number,
-      result: { usage?: { input_tokens: number; output_tokens: number }; ms?: number; model?: string },
+      result: {
+        usage?: { input_tokens: number; output_tokens: number };
+        ms?: number;
+        model?: string;
+        routing?: { model?: string; repo?: string };
+      },
+      sessionId: string,
     ): void => {
       try {
         controlLog.emit({
@@ -900,57 +921,132 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           schema: TELEMETRY_SCHEMA_VERSION,
           ts: Date.now(),
           provider: config.s1.provider,
+          // Which conversation paid for this call. Without it the log is a per-process pile, and a run that
+          // mixed two sessions cannot be split apart afterwards.
+          sessionId,
           role,
           kind,
           questions,
           inputTokens: result.usage?.input_tokens ?? 0,
           outputTokens: result.usage?.output_tokens ?? 0,
           ms: result.ms ?? 0,
+          ok: true,
           ...(result.model !== undefined ? { routedModel: result.model } : {}),
+          // The address and the checkpoint that answered, not the name this plugin was configured with: a stub
+          // answering on the configured port calls itself `laya-serve` too, and only the server's own `routing`
+          // block tells the two apart afterwards.
+          ...(backend.baseUrl !== '' ? { endpoint: backend.baseUrl } : {}),
+          ...(result.routing?.repo !== undefined ? { repo: result.routing.repo } : {}),
         });
         s1CallRecords += 1;
       } catch (err) {
         ctx.logger?.warn?.(`[s1cap] s1_call record rejected: ${String(err)}`);
       }
     };
-    // One System-1 call per new segment, scoring the whole window. Absent when no backend is configured, and
-    // that absence is the point: the graph then scores lexically, which is what keeps observation mode free,
-    // offline and deterministic. A configured backend that fails answers `undefined` and degrades the same way.
-    relevance =
-      client === undefined
-        ? undefined
-        : createS1Relevance({
-            decide: async (state, questions) => {
-              const result = await client.decide(state, questions);
-              recordS1Call('assoc', 'noul', Object.keys(questions).length, result);
-              return result;
-            },
-            questionsPerCall: config.s1.questionsPerCall,
-            onWarn: (message) => ctx.logger?.warn?.(message),
-          });
-    if (relevance !== undefined) {
+    // A call that threw used to record nothing at all, which is how a session reached `s1CallRecords: 0` while
+    // every score silently came from the lexical fallback: the failure existed only in a logger line this host
+    // never shows. Recording it costs one line and turns "the backend is not being used" from an inference into
+    // a measurement.
+    const recordS1Failure = (
+      role: S1CallEvent['role'],
+      kind: S1CallEvent['kind'],
+      questions: number,
+      err: unknown,
+      sessionId: string,
+    ): void => {
+      try {
+        controlLog.emit({
+          type: 's1_call',
+          schema: TELEMETRY_SCHEMA_VERSION,
+          ts: Date.now(),
+          provider: config.s1.provider,
+          sessionId,
+          role,
+          kind,
+          questions,
+          inputTokens: 0,
+          outputTokens: 0,
+          ms: 0,
+          ok: false,
+          error: String(err).slice(0, 300),
+          ...(backend.baseUrl !== '' ? { endpoint: backend.baseUrl } : {}),
+        });
+        s1CallFailures += 1;
+      } catch (nested) {
+        ctx.logger?.warn?.(`[s1cap] s1_call failure record rejected: ${String(nested)}`);
+      }
+    };
+    // One System-1 call per new segment, scoring the whole window. Both of these are built **unconditionally** and
+    // read the current `client` at call time, rather than being built when a client happens to exist. The previous
+    // shape — `client === undefined ? undefined : createS1Relevance(...)`, handed to the observer as a snapshot — is
+    // what a real three-turn run exposed: the interpreter arrives on the first step and the backend is started by
+    // hand after that, so `client` was defined by the time `/s1` reported it and `relevance` was `undefined` anyway.
+    // The session then reported a working System-1 backend, scored 66 and 78 pairs, and every one of those scores
+    // came from the lexical fallback, with `s1CallRecords: 0`. A delegate that answers `undefined` when there is no
+    // client is the same thing the missing object meant, so behaviour is unchanged when nothing is configured —
+    // `packages/core/src/assoc-graph.ts` treats an `undefined` batch as "score these lexically".
+    relevance = createS1Relevance({
+      decide: async (state, questions) => {
+        if (client === undefined) return undefined;
+        const count = Object.keys(questions).length;
+        try {
+          const result = await client.decide(state, questions);
+          recordS1Call('assoc', 'noul', count, result, s1SessionScope);
+          return result;
+        } catch (err) {
+          // Recorded, then the same `undefined` an absent client produces: the graph scores that batch lexically
+          // and the session continues. What must not happen is the failure leaving no trace in the data.
+          recordS1Failure('assoc', 'noul', count, err, s1SessionScope);
+          return undefined;
+        }
+      },
+      questionsPerCall: config.s1.questionsPerCall,
+      onWarn: (message) => ctx.logger?.warn?.(message),
+    });
+    if (client !== undefined) {
       ctx.logger?.info?.(
         `[s1cap] relevance: S1 batch scoring active (${describeS1Backend(backend)}, up to ${config.s1.questionsPerCall} candidates per call)`,
       );
     }
     // The plan gate scores the model's own candidate plans with a choice question. It is advisory: the order is
-    // computed and recorded, and nothing in this plugin feeds it back into a prompt or a stop decision. The gate
-    // only runs when a System-1 backend exists, since without one it would just return the model's own order.
-    planGate =
-      client === undefined
-        ? undefined
-        : createPlanGate(
-            { policy: config, emit: (event) => controlLog.emit(event), onWarn: (m) => ctx.logger?.warn?.(m) },
-            async (state, questions) => {
-              const result = await client.decide(state, questions);
-              recordS1Call('decide', 'choice', Object.keys(questions).length, result);
-              return result;
-            },
-          );
+    // computed and recorded, and nothing in this plugin feeds it back into a prompt or a stop decision.
+    planGate = createPlanGate(
+      { policy: config, emit: (event) => controlLog.emit(event), onWarn: (m) => ctx.logger?.warn?.(m) },
+      async (state, questions) => {
+        if (client === undefined) return undefined;
+        const count = Object.keys(questions).length;
+        try {
+          const result = await client.decide(state, questions);
+          recordS1Call('decide', 'choice', count, result, s1SessionScope);
+          return result;
+        } catch (err) {
+          recordS1Failure('decide', 'choice', count, err, s1SessionScope);
+          return undefined;
+        }
+      },
+    );
     observer = createStepObserver({
       policy: config,
-      ...(relevance !== undefined ? { scoreBatch: relevance } : {}),
-      ...(planGate !== undefined ? { planGate } : {}),
+      // Every session gets its own graph, and the graph is written to disk as it changes, so "start a new chat"
+      // no longer inherits the previous conversation's recall candidates and a restart does not re-pay for
+      // scoring the previous process had already bought.
+      rgStore,
+      scoreBatch: (state, candidates) => {
+        // The candidates are segments, and segments know their session; the scoring that follows is theirs.
+        s1SessionScope = candidates[0]?.sessionId ?? s1SessionScope;
+        return relevance === undefined ? Promise.resolve(undefined) : relevance.scoreBatch(state, candidates);
+      },
+      planGate: {
+        consider: async (...args) => {
+          s1SessionScope = String(args[1] ?? s1SessionScope);
+          return planGate?.consider(...(args as Parameters<typeof planGate.consider>));
+        },
+        considerTodos: async (...args) => {
+          s1SessionScope = String(args[1] ?? s1SessionScope);
+          return planGate?.considerTodos(...(args as Parameters<typeof planGate.considerTodos>));
+        },
+        stats: () => planGate?.stats() ?? null,
+      },
       emit: (event) => {
         try {
           controlLog.emit(event);
@@ -990,7 +1086,16 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         ? {
             onTape: (step: number, messages: readonly unknown[], systemPrompt: string | undefined) => {
               tapeSink?.write(
-                `${JSON.stringify({ schema: 1, sessionId: 'live', step, ...(systemPrompt !== undefined ? { systemPrompt } : {}), messages })}\n`,
+                `${JSON.stringify({
+                  schema: 1,
+                  // The id of the session this step belongs to, read back from the observer that just saw it.
+                  // It used to be the literal 'live', which made a tape from two conversations indistinguishable
+                  // from one long one - and separating them after the fact is not possible from a constant.
+                  sessionId: observer?.stats().sessionId ?? 'unassigned',
+                  step,
+                  ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+                  messages,
+                })}\n`,
               );
             },
           }
@@ -1006,8 +1111,11 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         schema: 0,
         kind: 'wiring',
         s1: backend.mode === 'none' ? 'none' : { provider: backend.provider, mode: backend.mode, baseUrl: backend.baseUrl },
-        relevance: relevance !== undefined,
-        planGate: planGate !== undefined,
+        // Whether the scorers will actually reach a backend, not whether the objects exist. They are built
+        // unconditionally now so that a late-arriving client is picked up, which makes "the object is there" a
+        // statement about nothing and "there is a client to call" the fact worth writing down.
+        relevance: client !== undefined,
+        planGate: client !== undefined,
         xFirst: config.xFirst,
         recall: { d: config.recall.depth, r: config.recall.relevanceThreshold, w: config.recall.window },
         tas: config.tas,
@@ -1334,8 +1442,15 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
             controlRecords,
             sessionLines,
             s1CallRecords,
+            // Calls that threw. `s1CallRecords` alone cannot distinguish "the backend was never configured" from
+            // "it was configured and every call failed", and those two want opposite responses.
+            s1CallFailures,
             sessionPath: resolveTelemetryPath(resolved.telemetry.sessionJsonl),
             controlPath: resolveTelemetryPath(resolved.telemetry.controlJsonl),
+            // Where the per-session graphs live, and which sessions have one. The listing is what makes the
+            // isolation claim checkable from the outside instead of something the code comments assert.
+            rgDir: resolveTelemetryPath('./.s1cap/rg'),
+            rgSessions: observer?.stats().sessions ?? [],
           },
           configIssues: {
             errors: resolved.policy.errors.concat(resolved.laya.errors as Issue[]).map((i) => `${i.path}: ${i.message}`),

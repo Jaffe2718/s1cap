@@ -67,6 +67,26 @@ export interface S1CallEvent {
   scoredSegmentIds?: string[];
   /** checkpoint the backend actually routed to (e.g. Laya's `english` / `typed-decisions`) */
   routedModel?: string;
+  /**
+   * Where the call went. The configured `provider` name is not evidence of who answered: a stub
+   * listening on the configured port answers under the name `laya-serve` just the same. Recording
+   * the endpoint makes a run reproducible against an address rather than against a label.
+   */
+  endpoint?: string;
+  /**
+   * The checkpoint repository the server named in its own `routing` block, e.g.
+   * `convaiinnovations/laya`. Reported only by a real Laya deployment, so its presence is what
+   * separates "scored by the model we claim to score by" from "scored by something on that port".
+   */
+  repo?: string;
+  /**
+   * False when the call raised, in which case the scoring fell back to the lexical path. Absent on
+   * records written before failures were recorded at all, so `ok !== false` keeps a success intact
+   * while older logs stay readable.
+   */
+  ok?: boolean;
+  /** Short error text on a failed call; content-free, so it is safe to log. */
+  error?: string;
 }
 
 export interface ToolCallEvent {

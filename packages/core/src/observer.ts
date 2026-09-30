@@ -46,6 +46,12 @@ export interface ObserveStepInput {
     candidates: readonly Segment[],
   ) => readonly number[] | Promise<readonly number[]>;
   /**
+   * Default true. Pass false on a synchronous path whose system has an asynchronous scoring path: the graph scores
+   * each new segment once, from whichever caller reaches `scoreNew` first, so a step that scores lexically does not
+   * merely add edges - it takes the scoring away from the System-1 backend. See the note at the call site.
+   */
+  scoreOnStepPath?: boolean;
+  /**
    * One-entry memo for T, held by the caller so it survives across steps. It is passed in rather than created
    * here because `observeStep` is a pure function of its input: a per-call proxy cache would rebuild T on every
    * step, which is exactly the instability the block is placed to avoid.
@@ -139,14 +145,25 @@ export async function observeStep(
   const segments: Segment[] = ingestable.flatMap((ev) => segmentEvent(ev));
   input.graph.addSegments(segments);
   // recall.window = w: only segments that arrived since the previous step are scored, each against
-  // the most recent w segments. Segments outside the window keep their edges and stay reachable. The result is
-  // not read here - the graph keeps the running total - but the scoring itself must still happen, or the
-  // segments this step added would stay unconnected to the window.
-  await input.graph.scoreNew({
-    windowN: input.policy.recall.window,
-    threshold: input.policy.recall.relevanceThreshold,
-    ...(input.scoreBatch !== undefined ? { scoreBatch: input.scoreBatch } : {}),
-  });
+  // the most recent w segments. Segments outside the window keep their edges and stay reachable.
+  //
+  // `scoreOnStepPath` exists because there are two callers of this function and they are not the same call. In the
+  // plugin, the synchronous pre-step path and the asynchronous upkeep path both add segments to the same graph, and
+  // `scoreNew` advances a cursor: whoever gets there first owns the scoring for those segments. Left to itself, the
+  // pre-step path won every time and scored every pair with the local lexical scorer, so upkeep later found nothing
+  // new to score and the System-1 association backend was asked nothing at all - `upkeepScoredPairs: 0` with a
+  // healthy-looking graph, which is what a live session actually measured.
+  //
+  // Routing the scoring to upkeep is also the only reading consistent with the policy: `rgMaintenance` is declared
+  // `async`, and a measured System-1 call costs 400-1500 ms against a 250 ms assembly deadline. A step that waited
+  // on scoring would either blow its own budget or answer from a scorer that never ran.
+  if (input.scoreOnStepPath !== false) {
+    await input.graph.scoreNew({
+      windowN: input.policy.recall.window,
+      threshold: input.policy.recall.relevanceThreshold,
+      ...(input.scoreBatch !== undefined ? { scoreBatch: input.scoreBatch } : {}),
+    });
+  }
 
   const pinned = segments.filter((s) => s.kind === 'systemPinned');
   // The rendered system prompt is pinned, never a recall candidate: it has to stay byte-stable at the front

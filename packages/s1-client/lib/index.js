@@ -61,11 +61,29 @@
                         
  
 
+/**
+ * `routing` is what separates a real Laya deployment from anything answering under the same
+ * protocol. Measured against `laya-serve` 0.3.21 (typed-decisions checkpoint) on 2026-09-30, a
+ * successful answer carries `{model: "english", repo: "convaiinnovations/laya", reason: ...}`:
+ * the script/language the router picked and the repository the checkpoint came from. A stub, or
+ * any other server speaking the wire format, has no reason to produce it. Recording it is what
+ * lets an experiment say which checkpoint produced a given score instead of trusting the
+ * `provider` name in its own config - a stub answering on the configured port is otherwise
+ * indistinguishable from the model in the telemetry.
+ */
+                            
+                 
+                
+                  
+ 
+
                                  
                 
                                     
                  
              
+                                                                  
+                      
  
 
                                   
@@ -144,6 +162,9 @@ export class S1Client {
         answers: json.answers ?? {},
         usage: json.usage ?? { input_tokens: 0, output_tokens: 0 },
         ms: Date.now() - started,
+        // Forwarded verbatim when the server reports it. Absent is information too: a server
+        // that never names its checkpoint is not identifiable as Laya from the telemetry alone.
+        ...(json.routing !== undefined ? { routing: json.routing } : {}),
       };
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') throw new S1TimeoutError(this.#timeoutMs);

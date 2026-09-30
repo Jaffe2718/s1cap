@@ -30,7 +30,15 @@ export interface Segment {
   chunkOf?: string;
 }
 
-export type EdgeSource = 'meta' | 'embed' | 's1-noul' | 's1-score';
+/**
+ * Where an edge's weight came from. `lexical` is a first-class value, not an absence: the
+ * association graph keeps working when no System-1 backend answers, and an edge it produced by
+ * itself must never be indistinguishable from one a model scored. Before this distinction existed
+ * the window scorer wrote the literal `'s1'` for every edge it made, including the ones produced
+ * by the lexical fallback - which made `/s1 why` claim System-1 provenance for scores no System-1
+ * had ever seen, and made the paper's central comparison unmeasurable.
+ */
+export type EdgeSource = 'meta' | 'embed' | 's1-noul' | 's1-score' | 'lexical';
 
 export interface AssociationEdge {
   from: string;

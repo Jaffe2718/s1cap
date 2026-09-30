@@ -7,6 +7,7 @@ export * from './observer.js';
 export * from './upkeep-queue.js';
 export * from './replay.js';
 export * from './assoc-graph.js';
+export * from './rg-store.js';
 export * from './assembler.js';
 export * from './plan-gate.js';
 export * from './telemetry.js';

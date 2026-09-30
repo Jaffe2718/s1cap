@@ -115,9 +115,9 @@ test('assemble: two chunks of one passage cannot both be selected', () => {
   graph.addSegments([...chunks, current]);
   // recall walks outward from the seed, so the edges run x -> chunk. Direction is not cosmetic: with the edges
   // the other way round recall finds nothing, which is exactly what a mistyped direction looks like.
-  graph.upsertEdge({ from: 'x', to: 'long1#0', w: 0.9, wTier1: 0.9, source: 's1', verifiedAt: 0, provenance: 'test' });
-  graph.upsertEdge({ from: 'x', to: 'long1#1', w: 0.8, wTier1: 0.8, source: 's1', verifiedAt: 0, provenance: 'test' });
-  graph.upsertEdge({ from: 'x', to: 'other', w: 0.7, wTier1: 0.7, source: 's1', verifiedAt: 0, provenance: 'test' });
+  graph.upsertEdge({ from: 'x', to: 'long1#0', w: 0.9, wTier1: 0.9, source: 's1-noul', verifiedAt: 0, provenance: 'test' });
+  graph.upsertEdge({ from: 'x', to: 'long1#1', w: 0.8, wTier1: 0.8, source: 's1-noul', verifiedAt: 0, provenance: 'test' });
+  graph.upsertEdge({ from: 'x', to: 'other', w: 0.7, wTier1: 0.7, source: 's1-noul', verifiedAt: 0, provenance: 'test' });
 
   const res = assemble({
     graph,
