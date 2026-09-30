@@ -104,3 +104,41 @@ test('the scoring window floor is 64, and it is dropped rather than clamped belo
   assert.deepEqual(parseTuningArgs('w=64'), { window: 64 });
   assert.deepEqual(parseTuningArgs('w=63'), {}, 'below the floor: dropped');
 });
+
+test('the panel can write the Laya fields, and a mistyped one falls back instead of failing at launch', () => {
+  // The reason these exist on this surface at all: the interpreter path is a *required* field, and a required field
+  // with no write path is one nobody can fill — which would make every Laya run impossible rather than unusual.
+  assert.deepEqual(parseTuningArgs('laya=D:/tools/laya_py/env/python.exe'), {
+    layaPythonPath: 'D:/tools/laya_py/env/python.exe',
+  });
+  assert.deepEqual(parseTuningArgs('layaPythonPath=C:\\tools\\laya_py\\env\\python.exe'), {
+    layaPythonPath: 'C:\\tools\\laya_py\\env\\python.exe',
+  });
+  assert.deepEqual(parseTuningArgs('py=/opt/laya/env/bin/python'), { layaPythonPath: '/opt/laya/env/bin/python' });
+  assert.deepEqual(parseTuningArgs('weights=D:/hf-cache layaWeightsEnvVar=HF_HOME'), {
+    layaWeightsCacheDir: 'D:/hf-cache',
+    layaWeightsEnvVar: 'HF_HOME',
+  });
+
+  // Fail-safe, exactly like the knobs: an unusable value is dropped so the default stands. A path is not checked
+  // for existence — the panel writes it on a machine where the venv may still be being created, and refusing it
+  // would break the case the field exists for. What is rejected is what cannot be a path at all.
+  assert.deepEqual(parseTuningArgs('laya=python'), {}, 'a bare token with no separator is not a path');
+  assert.deepEqual(parseTuningArgs('laya='), {}, 'and neither is an empty one');
+  assert.deepEqual(parseTuningArgs('layaWeightsEnvVar="not a name"'), {}, 'an env var name must be a name');
+  assert.deepEqual(parseTuningArgs('layaWeightsEnvVar=2BAD'), {}, 'and cannot start with a digit');
+
+  // The path this plugin is most likely to be pointed at on this machine, which is the one DSH ships — and it
+  // contains a space. Without quoting the string is cut in three and the required field silently stays empty.
+  assert.deepEqual(parseTuningArgs('laya="D:/Program Files/DeepSeek Harness/resources/python/python.exe"'), {
+    layaPythonPath: 'D:/Program Files/DeepSeek Harness/resources/python/python.exe',
+  });
+  assert.deepEqual(parseTuningArgs('d=3 laya="D:/Program Files/x/python.exe" r=0.4'), {
+    depth: 3,
+    layaPythonPath: 'D:/Program Files/x/python.exe',
+    relevanceThreshold: 0.4,
+  }, 'and the knobs around it are unaffected');
+
+  // The numeric knobs still behave: a path-looking value in a numeric field is dropped, not coerced to NaN.
+  assert.deepEqual(parseTuningArgs('d=3 laya=D:/x/python.exe'), { depth: 3, layaPythonPath: 'D:/x/python.exe' });
+});

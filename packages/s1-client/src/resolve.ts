@@ -78,8 +78,14 @@ export function singleBackendIssues(s1: S1ConfigInput, laya?: LayaEndpointInput)
   // the harness keeps working, and the run cannot quietly be something other than what was configured. The
   // path is the interpreter that owns the environment (for example `path/to/laya_py/env/python.exe`), from which
   // the console script is derived, so a wrong one is not a slow start but a different program or none at all.
+  //
+  // The exception is an explicit `baseUrl`: then the endpoint is somebody else's already-running process, S1CAP
+  // launches nothing, and demanding an interpreter would be inventing a requirement for a configuration that
+  // does not have one. A live run caught this — a profile pinned to a local endpoint came up `provider=none`
+  // with an empty interpreter, and the field it complained about was the one that could not matter there.
   const layaActive = laya.enabled || s1.provider === 'laya-serve';
-  if (layaActive && (laya.pythonPath ?? '') === '') {
+  const externalEndpoint = s1.baseUrl !== undefined && s1.baseUrl !== '';
+  if (layaActive && !externalEndpoint && (laya.pythonPath ?? '') === '') {
     issues.push(
       'Laya is selected but laya.pythonPath is empty — fill in the interpreter path in the settings panel (the ' +
         'python.exe of the laya_py environment, e.g. path/to/laya_py/env/python.exe)',

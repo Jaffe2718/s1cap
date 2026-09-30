@@ -97,6 +97,15 @@ test('choosing Laya requires the interpreter path the user typed', () => {
     [],
     'with a path filled in there is nothing to complain about',
   );
+
+  // An explicit endpoint is somebody else's process. Nothing is launched, so there is no interpreter to name —
+  // and a live run found this the hard way: a profile pinned to a running local server came up `provider=none`,
+  // complaining about the one field that could not matter for that configuration.
+  assert.deepEqual(
+    singleBackendIssues({ provider: 'laya-serve', baseUrl: 'http://127.0.0.1:8123' }, layaOnNoPath),
+    [],
+    'an external endpoint needs no interpreter, so it is not a conflict at all',
+  );
 });
 
 test('credentials never reach a log line: redaction and the status summary', () => {

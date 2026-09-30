@@ -114,6 +114,20 @@ export interface Tuning {
    * actually has; the value is a boolean so `true`/`false`, `on`/`off` and `1`/`0` are all accepted.
    */
   xFirst?: boolean;
+  /**
+   * The interpreter the local backend runs from, e.g. `path/to/laya_py/env/python.exe`.
+   *
+   * It lives here, beside the knobs, for one reason: this is the only host-side key/value surface this plugin has
+   * verified, and the requirement is that the panel can *write* it — a required field with no write path is a field
+   * that cannot be filled, and an unfillable required field makes every Laya run impossible. The same fail-safe
+   * rule applies: a value that is not a path-looking string is dropped rather than stored, so a typo leaves the
+   * default standing instead of writing something that fails only at launch.
+   */
+  layaPythonPath?: string;
+  /** where downloaded checkpoints live; empty or absent means S1CAP's own cache directory */
+  layaWeightsCacheDir?: string;
+  /** the environment variable the user's Laya reads to find that cache */
+  layaWeightsEnvVar?: string;
 }
 
 /** Read a boolean tuning token. Returns undefined for anything unrecognized, so a typo never flips a layout. */
@@ -147,6 +161,51 @@ export function parseTuning(value: string | undefined): Tuning {
   return out;
 }
 /**
+ * A path-looking string, or nothing.
+ *
+ * Deliberately loose: this does not check that the file exists, because the panel writes a path on a machine
+ * where the file may not be there yet (a venv being created, a network drive being mounted) and refusing it would
+ * make the field unusable for the case it exists for. It rejects only what cannot be a path at all — empty,
+ * whitespace, or a bare token with no separator — so a mistyped field falls back to the default instead of
+ * becoming a launch-time failure with a message nobody reads.
+ */
+function parsePath(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = unquote(value).trim();
+  if (trimmed === '') return undefined;
+  if (!/[\\/]/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+/** A plausible environment-variable name: letters, digits and underscores, starting with a letter or underscore. */
+function parseEnvName(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = unquote(value).trim();
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * Split the tuning string into tokens, honouring double quotes anywhere inside a token.
+ *
+ * Quoting is not a nicety here — it is load-bearing on this machine. The interpreter this plugin is most likely to
+ * be pointed at is the one DSH ships, and that path is `D:\Program Files\DeepSeek Harness\resources\...`. A plain
+ * space-separated split cuts it into three tokens, so the panel would store nothing at all and the required field
+ * would stay empty with no error anywhere. Found by a test written for an unrelated reason.
+ *
+ * The pattern matters: a token is a run of non-space characters *in which a quoted section counts as one unit*.
+ * A plain `\S+` alternative loses, because the scan starts at the key and the opening quote is swallowed along
+ * with the first word — the first version of this cut `laya="D:/Program Files/…"` down to `D:/Program`.
+ */
+function tokenize(input: string): string[] {
+  return input.match(/(?:[^\s"]|"[^"]*")+/g) ?? [];
+}
+
+/** Drop one layer of surrounding double quotes, which the tokenizer keeps so quoted sections stay together. */
+function unquote(value: string): string {
+  return value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
+}
+
+/**
  * Parse a tuning command line. Accepts `3 0.7`, `d=3 r=0.7`, `depth=3 relevanceThreshold=0.7`, or either field alone; the same
  * two rules apply (d an integer > 0, 0 <= r <= 1) and anything else is dropped rather than clamped.
  */
@@ -170,12 +229,33 @@ export function parseTuningArgs(input: string | undefined): Tuning {
     if (key === 'xFirst' || key === 'xf') {
       const flag = parseSwitch(raw);
       if (flag !== undefined) out.xFirst = flag;
+      return;
+    }
+    // The Laya fields are strings, so they are read before the numeric coercion above could swallow them.
+    if (key === 'layaPythonPath' || key === 'laya' || key === 'py') {
+      const path = parsePath(raw);
+      if (path !== undefined) out.layaPythonPath = path;
+      return;
+    }
+    if (key === 'layaWeightsCacheDir' || key === 'weights') {
+      const path = parsePath(raw);
+      if (path !== undefined) out.layaWeightsCacheDir = path;
+      return;
+    }
+    if (key === 'layaWeightsEnvVar' || key === 'weightsEnv') {
+      const name = parseEnvName(raw);
+      if (name !== undefined) out.layaWeightsEnvVar = name;
     }
   };
   const positional: string[] = [];
-  for (const token of input.trim().split(/\s+/)) {
+  for (const token of tokenize(input)) {
     if (token === '') continue;
-    const match = /^(depth|d|relevanceThreshold|r|window|w|xFirst|xf)\s*=\s*(\S+)$/.exec(token);
+    // The value runs to the end of the token, not to the next space: `tokenize` has already made a quoted path
+    // one token, and a `(\S+)` here would silently store `D:/Program` out of `D:/Program Files/...`.
+    const match =
+      /^(depth|d|relevanceThreshold|r|window|w|xFirst|xf|layaPythonPath|laya|py|layaWeightsCacheDir|weights|layaWeightsEnvVar|weightsEnv)\s*=\s*(.+)$/.exec(
+        token,
+      );
     if (match && match[1] !== undefined && match[2] !== undefined) assign(match[1], match[2]);
     else positional.push(token);
   }

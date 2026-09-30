@@ -1000,6 +1000,9 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       if (fromFile.relevanceThreshold !== undefined) appliedTuning.relevanceThreshold = fromFile.relevanceThreshold;
       if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
       if (fromFile.xFirst !== undefined) appliedTuning.xFirst = fromFile.xFirst;
+      if (fromFile.layaPythonPath !== undefined) appliedTuning.layaPythonPath = fromFile.layaPythonPath;
+      if (fromFile.layaWeightsCacheDir !== undefined) appliedTuning.layaWeightsCacheDir = fromFile.layaWeightsCacheDir;
+      if (fromFile.layaWeightsEnvVar !== undefined) appliedTuning.layaWeightsEnvVar = fromFile.layaWeightsEnvVar;
       // The cell preset values before the volatile layer touches them. A tuning file written during one live test
       // silently overrode the cell it was not part of: C4 ran with xFirst=false and window=1200 for an entire
       // verification session - and nothing in any counter said so. The override itself is right (the panel owns
@@ -1015,6 +1018,29 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       if (appliedTuning.relevanceThreshold !== undefined) config.recall.relevanceThreshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
       if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
+      // The panel's Laya fields land on the *live* config, not on the resolved one: the interpreter is needed to
+      // start the server, which happens before anything is resolved, and a value stored by the panel has to reach
+      // both the launcher and the conflict check. It is applied after `conflicts` were computed from the file, so
+      // the conflict a stored path resolves is re-checked below rather than assumed gone.
+      const layaConfig = laya.config as LayaConfig;
+      if (appliedTuning.layaPythonPath !== undefined) layaConfig.pythonPath = appliedTuning.layaPythonPath;
+      if (appliedTuning.layaWeightsCacheDir !== undefined) layaConfig.weightsCacheDir = appliedTuning.layaWeightsCacheDir;
+      if (appliedTuning.layaWeightsEnvVar !== undefined) layaConfig.weightsEnvVar = appliedTuning.layaWeightsEnvVar;
+      if (
+        appliedTuning.layaPythonPath !== undefined ||
+        appliedTuning.layaWeightsCacheDir !== undefined ||
+        appliedTuning.layaWeightsEnvVar !== undefined
+      ) {
+        const after = singleBackendIssues(config.s1, layaConfig);
+        const was = resolved.conflicts.length;
+        resolved.conflicts = after;
+        if (after.length !== was) {
+          ctx.logger?.info?.(
+            `[s1cap] the panel supplied ${String(appliedTuning.layaPythonPath !== undefined)} Laya path(s): ` +
+              `${was} conflict(s) before, ${after.length} after${after.length > 0 ? ` — ${after.join('; ')}` : ''}`,
+          );
+        }
+      }
       for (const knob of ['depth', 'relevanceThreshold', 'window', 'xFirst'] as const) {
         const after =
           knob === 'depth'
@@ -1319,6 +1345,13 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
               // it cannot get them from the instance log — this plugin's logger does not reach that file, which
               // is exactly what the first version of the check assumed. One route, both readers, and no second
               // surface invented for the sake of a test.
+              // The effective policy is `resolved.policy.policy` — `validatePolicy` returns the *result* object,
+              // whose `policy` field is the defaults with every valid override applied. Two wrong paths were taken
+              // here first, and both failed silently or loudly in instructive ways: reading the top-level
+              // `config.xFirst` reported nothing at all for a cell-pure run (the override slot is empty exactly
+              // when the cell is in charge), and reading `config.policy` 500s, because that field belongs to the
+              // validation result and not to the config.
+              const effective = resolved.policy.policy;
               sendJson(res, 200, {
                 ok: true,
                 stored: { ...readTuningFile(), ...appliedTuning },
@@ -1326,15 +1359,28 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
                   depth: config.recall.depth,
                   relevanceThreshold: config.recall.relevanceThreshold,
                   window: config.recall.window,
-                  xFirst: config.xFirst,
+                  xFirst: effective.xFirst,
                 },
                 status: {
                   cell: config.cell,
-                  tas: config.tas.on,
+                  tas: effective.tas.on,
                   tier1: config.recall.tier1,
-                  planGate: config.planGate.on,
-                  deliver: config.deliver,
+                  planGate: effective.planGate.on,
+                  deliver: effective.deliver,
+                  xFirst: effective.xFirst,
                   s1: { provider: backend.provider, mode: backend.mode, baseUrl: backend.baseUrl },
+                  // The Laya half the panel needs in order to render and validate its own fields: what was
+                  // supplied, what the plugin resolved it to, and the conflicts that decide whether the backend
+                  // runs at all. Without it the panel can write a path and never learn whether it took effect.
+                  laya: {
+                    supplied: {
+                      pythonPath: layaConfig.pythonPath ?? null,
+                      weightsCacheDir: layaConfig.weightsCacheDir ?? null,
+                      weightsEnvVar: layaConfig.weightsEnvVar ?? null,
+                    },
+                    state: runtime.summary(),
+                    conflicts: resolved.conflicts,
+                  },
                   observation: observer ? { ...observer.stats(), mode: resolved.observation } : null,
                   streams: { controlRecords, sessionLines, s1CallRecords },
                 },
