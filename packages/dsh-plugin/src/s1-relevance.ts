@@ -19,11 +19,25 @@
  * weights**, and the graph's caller falls back to its lexical scorer. That is deliberate. A relevance backend
  * that is briefly unavailable must cost accuracy, never the round, and never a stack trace into the harness.
  */
-import { noul, normalize } from '@s1cap/s1-client';
+import { S1CancelledError, S1TimeoutError, noul, normalize } from '@s1cap/s1-client';
 import type { NoulAnswer } from '@s1cap/s1-client';
 import type { Segment } from '@s1cap/core';
 
-const MAX_SEGMENT_CHARS = 1200;
+/**
+ * How much of each segment is shown to the backend.
+ *
+ * It was 1200, and a measured run says that was the dominant cost: a batch of 14 questions carries the current
+ * segment once plus one candidate each, so the request body was tens of thousands of characters and the median
+ * call took **15.3 seconds** (mean 14.0 s, p90 25.0 s, max 29.0 s) against a warm 8-thread local backend. Those
+ * numbers were invisible until the 2.5 s deadline was removed - before that the distribution was censored at
+ * 2408 ms and every slower call was counted as a failure, which is how "S1 is cheap and fast" survived contact
+ * with a live session for so long.
+ *
+ * 256 keeps a segment identifiable (kind, opening, and enough of the body to judge "would retrieving this help")
+ * while cutting the prefill by roughly five times. The question is a coarse one - a noul head deciding whether a
+ * candidate is worth retrieving - and a 1200-character tail of a tool result rarely changes that answer.
+ */
+const MAX_SEGMENT_CHARS = 256;
 
 export interface S1RelevanceOptions {
   decide(state: unknown, questions: Record<string, ReturnType<typeof noul>>): Promise<{
@@ -44,6 +58,18 @@ export interface S1RelevanceStats {
   inputTokens: number;
   outputTokens: number;
   lastMs: number;
+  /**
+   * Characters of segment text rendered into requests. The number that explains the latency: with 1200-character
+   * segments a fourteen-question batch cost a median 15.3 s against a local backend, and a prefill nobody measured
+   * is a prefill nobody can reduce.
+   */
+  promptChars: number;
+  /** questions the backend answered with a usable weight, as opposed to questions that were sent */
+  answeredQuestions: number;
+  /** calls that ended in the transport guard rather than an answer */
+  timedOut: number;
+  /** calls the caller cancelled, which is a cancellation and not a backend failure */
+  cancelled: number;
   /** calls that produced no usable weight and were reported */
   failures: number;
 }
@@ -84,7 +110,18 @@ function readWeight(answer: { noul?: unknown; probabilities?: Record<string, num
 }
 
 export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
-  const stats: S1RelevanceStats = { calls: 0, questions: 0, inputTokens: 0, outputTokens: 0, lastMs: 0, failures: 0 };
+  const stats: S1RelevanceStats = {
+    calls: 0,
+    questions: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    lastMs: 0,
+    promptChars: 0,
+    answeredQuestions: 0,
+    timedOut: 0,
+    cancelled: 0,
+    failures: 0,
+  };
   const perCall = Math.max(1, Math.trunc(opts.questionsPerCall ?? 16));
   /** one line, not one per segment: "no backend" is a mode, and a mode repeated per segment is noise */
   let reportedNoClient = false;
@@ -113,12 +150,19 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
       // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
       // the candidate's position in the window, so the model can still tell which part of the history it is
       // being asked about.
+      // Rendered once per batch rather than once per question: it was called inside the loop, so a fourteen
+      // question batch sliced the same 1200-character string fourteen times. More to the point, its length is the
+      // number that explains a 15-second call, so it is counted and reported instead of being left to be guessed
+      // at from a latency nobody can attribute.
+      const stateText = render(current);
       const questions: Record<string, ReturnType<typeof noul>> = {};
       batch.forEach((candidateIndex, slot) => {
+        const candidateText = render(candidates[candidateIndex] as Segment);
+        stats.promptChars += stateText.length + candidateText.length;
         questions[`h${slot}`] = noul(
           `Does retrieving this candidate help answer or continue the current segment?\n\n` +
-            `Current segment:\n${render(current)}\n\n` +
-            `Candidate h${candidateIndex}:\n${render(candidates[candidateIndex] as Segment)}`,
+            `Current segment:\n${stateText}\n\n` +
+            `Candidate h${candidateIndex}:\n${candidateText}`,
           {
             true: 'retrieving the candidate would help with the current segment',
             false: 'the candidate is unrelated or a distraction',
@@ -150,12 +194,17 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
         stats.outputTokens += result.usage?.output_tokens ?? 0;
       } catch (err) {
         stats.failures += 1;
+        // Classified, because the three are different facts about a run: a dead socket, a cancelled session, and
+        // a backend that answered something unusable. They used to arrive here as one TypeError.
+        if (err instanceof S1TimeoutError) stats.timedOut += 1;
+        else if (err instanceof S1CancelledError) stats.cancelled += 1;
         opts.onWarn?.(
           `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (falling back to lexical scoring): ${String(err)}`,
         );
         return undefined;
       }
       stats.questions += batch.length;
+      stats.answeredQuestions += batch.length;
 
       // All or nothing for the segment. A batch that answered while its neighbour timed out would leave some
       // pairs judged by the backend and others by the lexical scorer, and the graph would then hold two kinds of

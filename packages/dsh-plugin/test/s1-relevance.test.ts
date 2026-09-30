@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createS1Relevance } from '../src/s1-relevance.ts';
+import { S1CancelledError, S1TimeoutError } from '@s1cap/s1-client';
 import type { Segment } from '@s1cap/core';
 
 function segment(id: string, text: string): Segment {
@@ -110,6 +111,52 @@ test('the window is covered in batches, so the cap costs round trips and not cov
     'three candidates at a cap of two is two requests, not one request that quietly drops the third',
   );
   assert.deepEqual(weights, [0.5, 0.5, 0.5], 'and every candidate gets a weight, including the ones past the first request');
+});
+
+test('the rendered window is bounded, and how much of it was sent is reported', async () => {
+  // The cost knob, pinned. With 1200-character segments a fourteen-question batch measured a median of 15.3 s
+  // against a warm local backend - and that number only became visible once the 2.5 s deadline was removed, which
+  // is why the bound is now small and why the characters sent are a statistic rather than a guess.
+  const huge = 'x'.repeat(5000);
+  let sent = '';
+  const relevance = createS1Relevance({
+    decide: async (_state, questions) => {
+      sent = JSON.stringify(questions);
+      const answers: Record<string, { type: string; noul: number }> = {};
+      for (const key of Object.keys(questions)) answers[key] = { type: 'noul', noul: 0.5 };
+      return { answers };
+    },
+  });
+
+  await relevance(current, [segment('big', huge)]);
+  assert.ok(sent.length < 4000, `the request stayed small (was ${String(sent.length)} characters)`);
+  assert.ok(!sent.includes('x'.repeat(400)), 'and the candidate was truncated rather than sent whole');
+  const stats = relevance.stats();
+  assert.ok(stats.promptChars > 0, 'the characters rendered into the request are counted');
+  assert.ok(stats.promptChars < 2000, `and the count matches the small request (was ${String(stats.promptChars)})`);
+  assert.equal(stats.answeredQuestions, 1, 'answered questions are counted separately from questions sent');
+  assert.equal(stats.timedOut, 0);
+  assert.equal(stats.cancelled, 0);
+});
+
+test('a timeout and a cancellation are counted as themselves, not as one kind of failure', async () => {
+  const timeouts = createS1Relevance({
+    decide: async () => {
+      throw new S1TimeoutError(30_000);
+    },
+  });
+  await timeouts(current, [segment('a', 'x')]);
+  assert.equal(timeouts.stats().timedOut, 1, 'a dead socket is a timeout');
+  assert.equal(timeouts.stats().cancelled, 0);
+
+  const cancelled = createS1Relevance({
+    decide: async () => {
+      throw new S1CancelledError();
+    },
+  });
+  await cancelled(current, [segment('a', 'x')]);
+  assert.equal(cancelled.stats().cancelled, 1, 'a cancelled session is a cancellation');
+  assert.equal(cancelled.stats().timedOut, 0);
 });
 
 test('an empty window costs nothing', async () => {
