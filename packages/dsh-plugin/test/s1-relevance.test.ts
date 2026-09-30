@@ -24,8 +24,8 @@ test('one call scores the whole window, and the weights come back aligned with t
       calls.push({ state, questions });
       return {
         answers: {
-          h0: { type: 'score', score: 0.9 },
-          h1: { type: 'score', score: 0.1 },
+          h0: { type: 'noul', noul: 0.9 },
+          h1: { type: 'noul', noul: 0.1 },
         },
       };
     },
@@ -35,18 +35,26 @@ test('one call scores the whole window, and the weights come back aligned with t
   assert.equal(calls.length, 1, 'the window must cost exactly one System-1 call');
   assert.deepEqual(Object.keys(calls[0]?.questions ?? {}), ['h0', 'h1'], 'one question per candidate');
   assert.deepEqual(weights, [0.9, 0.1], 'weights stay aligned with candidate order');
+  // The figure's box says `noul relevance`; this pins the question type, because a silent drift back to some
+  // other answer shape would leave a paper claim about a box that no longer asks what the paper says.
+  for (const id of ['h0', 'h1']) {
+    const q = calls[0]?.questions[id] as { type?: string; instructions?: string; criteria?: { true: string; false: string } };
+    assert.equal(q?.type, 'noul', `${id}: relevance asks a noul question`);
+    assert.equal(typeof q?.criteria?.true, 'string', `${id}: the true criterion is stated`);
+    assert.equal(typeof q?.criteria?.false, 'string', `${id}: the false criterion is stated`);
+  }
 });
 
-test('a probability distribution is normalized into one number in [0,1]', async () => {
+test('a raw true/false distribution is read by its true-side mass', async () => {
   const relevance = createS1Relevance({
     decide: async () => ({
-      // Jev does not guarantee a sum of one, so the scorer normalizes before reading the top level.
-      answers: { h0: { type: 'score', probabilities: { a: 6, b: 2, c: 2 } } },
+      // A backend that answers with an un-normalized distribution over the criteria: the true mass is P(useful).
+      answers: { h0: { type: 'noul', probabilities: { true: 6, false: 2 } } },
     }),
   });
   const weights = await relevance(current, [candidates[0] as Segment]);
   assert.equal(weights?.length, 1);
-  assert.equal(weights?.[0], 0.6, 'the top level mass, normalized');
+  assert.equal(weights?.[0], 0.75, 'the true-side mass, normalized');
 });
 
 test('a failed call yields undefined rather than a row of zeros', async () => {
@@ -69,7 +77,7 @@ test('a failed call yields undefined rather than a row of zeros', async () => {
 test('an unreadable answer also yields undefined, so a partial batch is never mistaken for a full one', async () => {
   const relevance = createS1Relevance({
     decide: async () => ({
-      answers: { h0: { type: 'score', score: 0.9 } }, // h1 missing
+      answers: { h0: { type: 'noul', noul: 0.9 } }, // h1 missing
     }),
   });
   const weights = await relevance(current, candidates);
@@ -83,7 +91,7 @@ test('the question cap is a stated limit, not a silent truncation', async () => 
     questionsPerCall: 2,
     decide: async (_state, questions) => {
       seen.push(Object.keys(questions));
-      return { answers: { h0: { type: 'score', score: 0.5 }, h1: { type: 'score', score: 0.5 } } };
+      return { answers: { h0: { type: 'noul', noul: 0.5 }, h1: { type: 'noul', noul: 0.5 } } };
     },
     onWarn: (message) => warnings.push(message),
   });

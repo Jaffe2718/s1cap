@@ -20,52 +20,52 @@
  * that is briefly unavailable must cost accuracy, never the round, and never a stack trace into the harness.
  */
 import { noul, normalize } from '@s1cap/s1-client';
-import type { NoulAnswer } from '@s1cap/s1-client';
-import type { Segment } from '@s1cap/core';
+                                                   
+                                           
 
 const MAX_SEGMENT_CHARS = 1200;
 
-export interface S1RelevanceOptions {
-  decide(state: unknown, questions: Record<string, ReturnType<typeof noul>>): Promise<{
-    answers: Record<string, { type?: string; noul?: unknown; probabilities?: Record<string, number>; confidence?: number }>;
-    usage?: { input_tokens: number; output_tokens: number };
-    ms?: number;
-  }>;
-  /** per-request question cap (policy: s1.questionsPerCall) */
-  questionsPerCall?: number;
-  onWarn?(message: string): void;
-  /** injected for tests */
-  now?(): number;
-}
+                                     
+                                                                                       
+                                                                                                                            
+                                                            
+                
+     
+                                                               
+                            
+                                 
+                           
+                 
+ 
 
-export interface S1RelevanceStats {
-  calls: number;
-  questions: number;
-  inputTokens: number;
-  outputTokens: number;
-  lastMs: number;
-  /** calls that produced no usable weight and were reported */
-  failures: number;
-}
+                                   
+                
+                    
+                      
+                       
+                 
+                                                               
+                   
+ 
 
-export interface S1Relevance {
-  /**
-   * Weights for `candidates`, in order. Returns `undefined` when no backend answered, which is the caller's
-   * signal to use its fallback rather than to treat every pair as unrelated.
-   */
-  (current: Segment, candidates: readonly Segment[]): Promise<readonly number[] | undefined>;
-  stats(): S1RelevanceStats;
-}
+                              
+     
+                                                                                                            
+                                                                             
+     
+                                                                                             
+                            
+ 
 
 /** A segment rendered for the backend: bounded, and labelled so the model can judge the pair it is shown. */
-function render(segment: Segment): string {
+function render(segment         )         {
   const text = segment.text.length > MAX_SEGMENT_CHARS
     ? `${segment.text.slice(0, MAX_SEGMENT_CHARS)}...`
     : segment.text;
   return `[${segment.kind}] ${text}`;
 }
 
-function readWeight(answer: { noul?: unknown; probabilities?: Record<string, number> } | undefined): number | undefined {
+function readWeight(answer                                                                        )                     {
   if (answer === undefined) return undefined;
   // The noul answer *is* the weight: P("retrieving this would help") reduced to one number in [0,1]. A backend
   // that answers with a raw distribution over the criteria gets the same treatment - the true-side mass -
@@ -76,22 +76,22 @@ function readWeight(answer: { noul?: unknown; probabilities?: Record<string, num
   if (answer.probabilities !== undefined && typeof answer.probabilities === 'object') {
     const normalized = normalize(answer.probabilities);
     for (const key of ['true', 'yes']) {
-      const value = normalized[key] as number | undefined;
+      const value = normalized[key]                      ;
       if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(1, value));
     }
   }
   return undefined;
 }
 
-export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
-  const stats: S1RelevanceStats = { calls: 0, questions: 0, inputTokens: 0, outputTokens: 0, lastMs: 0, failures: 0 };
+export function createS1Relevance(opts                    )              {
+  const stats                   = { calls: 0, questions: 0, inputTokens: 0, outputTokens: 0, lastMs: 0, failures: 0 };
   const perCall = Math.max(1, Math.trunc(opts.questionsPerCall ?? 16));
 
-  const scoreBatch = async (current: Segment, candidates: readonly Segment[]): Promise<readonly number[] | undefined> => {
+  const scoreBatch = async (current         , candidates                    )                                         => {
     if (candidates.length === 0) return [];
     const started = (opts.now ?? Date.now)();
-    const questions: Record<string, ReturnType<typeof noul>> = {};
-    const index: number[] = [];
+    const questions                                          = {};
+    const index           = [];
     for (let i = 0; i < candidates.length; i += 1) {
       // The window is asked about in batches bounded by the caller's cap. A cap reached is a real limit, not a
       // silent truncation, so it is reported once and the remaining candidates simply get no weight.
@@ -103,7 +103,7 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
       questions[id] = noul(
         `Does retrieving this candidate help answer or continue the current segment?\n\n` +
         `Current segment:\n${render(current)}\n\n` +
-        `Candidate h${i}:\n${render(candidates[i] as Segment)}`,
+        `Candidate h${i}:\n${render(candidates[i]           )}`,
         {
           true: 'retrieving the candidate would help with the current segment',
           false: 'the candidate is unrelated or a distraction',
@@ -113,7 +113,7 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
     }
     if (index.length === 0) return undefined;
 
-    let answers: Awaited<ReturnType<S1RelevanceOptions['decide']>>['answers'];
+    let answers                                                              ;
     try {
       const result = await opts.decide(
         // The state is the current segment: one System-1 call judges how useful the listed candidates are for
@@ -133,9 +133,9 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
     stats.questions += index.length;
     stats.lastMs = Math.max(0, (opts.now ?? Date.now)() - started);
 
-    const weights: number[] = [];
+    const weights           = [];
     for (const i of index) {
-      const answer = answers[`h${i}`] as Partial<NoulAnswer> | undefined;
+      const answer = answers[`h${i}`]                                   ;
       const weight = readWeight(answer);
       if (weight === undefined) {
         stats.failures += 1;
@@ -145,14 +145,14 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
       weights.push(weight);
     }
     // Aligned by candidate index, so a partial batch is impossible to misread as a full one.
-    const out = new Array<number>(candidates.length).fill(0);
+    const out = new Array        (candidates.length).fill(0);
     index.forEach((candIndex, k) => {
-      out[candIndex] = weights[k] as number;
+      out[candIndex] = weights[k]          ;
     });
     return out;
   };
 
-  const relevance = scoreBatch as S1Relevance;
-  (relevance as { stats?: unknown }).stats = () => ({ ...stats });
+  const relevance = scoreBatch               ;
+  (relevance                       ).stats = () => ({ ...stats });
   return relevance;
 }
