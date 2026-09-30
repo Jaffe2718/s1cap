@@ -120,6 +120,15 @@ import { isS1capInjected } from '@s1cap/core';
                         
                      
      
+                                                
+    
+                                                                                                               
+                                                                                                              
+                                                                                                                
+                                                                                       
+     
+                    
+     
                                                                                                                 
                                                                                                             
      
@@ -241,6 +250,7 @@ export function createStepObserver(opts                     )               {
     upkeepScoredPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
+    lastError: '',
     sessions: [],
     upkeep: {
       enqueued: 0,
@@ -360,6 +370,7 @@ export function createStepObserver(opts                     )               {
         });
       } catch (err) {
         stats.errors += 1;
+        stats.lastError = `upkeep scoring: ${String(err)}`;
         opts.onWarn?.(`[s1cap] upkeep scoring failed for a new ${segments.length}-segment batch: ${String(err)}`);
       }
       stats.upkeepEvents += 1;
@@ -495,6 +506,7 @@ export function createStepObserver(opts                     )               {
         return observation;
       } catch (err) {
         stats.errors += 1;
+        stats.lastError = `observation: ${String(err)}`;
         opts.onWarn?.(`observation failed (ignored): ${String(err)}`);
         return undefined;
       }

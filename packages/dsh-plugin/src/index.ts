@@ -1034,7 +1034,13 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       scoreBatch: (state, candidates) => {
         // The candidates are segments, and segments know their session; the scoring that follows is theirs.
         s1SessionScope = candidates[0]?.sessionId ?? s1SessionScope;
-        return relevance === undefined ? Promise.resolve(undefined) : relevance.scoreBatch(state, candidates);
+        // `relevance` **is** the scorer: `createS1Relevance` returns the batch function itself and hangs `stats`
+        // off it (`s1-relevance.ts`: `const relevance = scoreBatch as S1Relevance`). Calling `relevance.scoreBatch`
+        // therefore threw `not a function` on every segment, the upkeep catch swallowed it, and the session
+        // reported a healthy graph with zero edges, zero `scoredPairs` and zero System-1 calls. Nothing in the
+        // toolchain could catch it: the build is type erasure (`stripTypeScriptTypes`) and `typescript` is not
+        // installed, so a property that does not exist on the declared type ships silently.
+        return relevance === undefined ? Promise.resolve(undefined) : relevance(state, candidates);
       },
       planGate: {
         consider: async (...args) => {

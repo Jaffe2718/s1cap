@@ -135,3 +135,24 @@ test('the reported cost is the measured cost: usage and latency reach stats()', 
   assert.equal(stats.inputTokens, 1400, 'backend-reported input tokens, not a guess');
   assert.equal(stats.outputTokens, 2, 'output tokens likewise');
 });
+
+test('the scorer is the returned value itself, not a method hanging off it', async () => {
+  // This pins the shape that the plugin's wiring got wrong. `createS1Relevance` returns the batch function and
+  // attaches `stats` to it, but index.ts called `relevance.scoreBatch(state, candidates)` - a property that does
+  // not exist. The call threw `not a function` for every segment, the upkeep path caught it by design, and the
+  // session reported a populated graph with zero edges, `scoredPairs: 0` and zero System-1 calls while every
+  // other counter looked healthy. Nine real segments produced thirty-six uncounted pairs that way.
+  //
+  // No type checker runs in this repository (the build is `stripTypeScriptTypes` and `typescript` is not a
+  // dependency), so a member that does not exist on the declared type ships silently. A test is the only place
+  // left that can hold this contract.
+  const relevance = createS1Relevance({ decide: async () => ({ answers: {} }) });
+  assert.equal(typeof relevance, 'function', 'the returned scorer is callable');
+  assert.equal(
+    (relevance as unknown as { scoreBatch?: unknown }).scoreBatch,
+    undefined,
+    'there is no `.scoreBatch` member to call by mistake',
+  );
+  assert.deepEqual(await relevance(current, []), [], 'and it is callable directly, with an empty window costing nothing');
+  assert.equal(typeof relevance.stats, 'function', 'stats hangs off the same function object');
+});

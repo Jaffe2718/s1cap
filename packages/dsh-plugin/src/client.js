@@ -14,11 +14,15 @@
  *   - the host is reached through the client RPC namespaces `remote` / `remote.credentials` (declared in `inject`;
  *     Cordis throws on access to a namespace that was not injected).
  *
- * Two things live here:
+ * Three things live here:
  *   1. the Jev key. It never passes through a command's raw input — that would put it in the session transcript —
  *      and the panel only ever shows whether a key exists, never its value;
  *   2. the recall tuning: **BFS depth d** (integer, d > 0) and **relevance threshold r** (0 <= r <= 1), stored as
- *      the plain string `"<d> <r>"` under `s1cap/tuning` and applied by the host at session start.
+ *      the plain string `"<d> <r>"` under `s1cap/tuning` and applied by the host at session start;
+ *   3. the local Laya backend: the Python interpreter, the weights cache and the environment variable that points
+ *      at it. These are the fields whose absence the host reports as a conflict, and a conflicted session makes no
+ *      System-1 calls — so a panel that could not write them left the local backend unreachable through the UI,
+ *      while the conflict message told the user to fill in a control that did not exist.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-s1cap',
@@ -76,6 +80,23 @@ window.__ModuleLoader__.load({
         const [tau, setTau] = React.useState('');
         const [win, setWin] = React.useState('');
         const [xFirst, setXFirst] = React.useState(DEFAULT_XFIRST);
+        /**
+         * The local backend's three fields.
+         *
+         * The host half has accepted these since the beginning (`parseTuningArgs` reads `laya=` / `weights=` /
+         * `weightsEnv=` and `readTuningFile` reads the same keys), and the panel had no control for any of them, so
+         * the one field that decides whether System-1 calls happen at all could only be set by hand-editing a JSON
+         * file in the harness home. The conflict message told the user to fill in a control that did not exist.
+         *
+         * They are held as strings, and an empty box is *omitted* from the command line rather than sent as empty:
+         * the host merges what it receives into what is stored, so sending nothing leaves the stored value alone
+         * while sending an empty value would erase it.
+         */
+        const [layaPath, setLayaPath] = React.useState('');
+        const [layaWeights, setLayaWeights] = React.useState('');
+        const [layaEnvVar, setLayaEnvVar] = React.useState('');
+        /** what the host says the backend is doing, so the panel can report the effect of what it just wrote */
+        const [layaStatus, setLayaStatus] = React.useState({ state: '', conflicts: [] });
 
         /**
          * Read one stored string. The store declares several read entry points and the host probes them the same
@@ -119,6 +140,10 @@ window.__ModuleLoader__.load({
             let nextTau = String(DEFAULT_TAU);
             let nextWin = String(DEFAULT_WINDOW);
             let nextXFirst = DEFAULT_XFIRST;
+            let nextLayaPath = '';
+            let nextLayaWeights = '';
+            let nextLayaEnvVar = '';
+            let nextLayaStatus = { state: '', conflicts: [] };
             let note = '';
             let answered = false;
             try {
@@ -131,6 +156,25 @@ window.__ModuleLoader__.load({
               }
               if (Number.isInteger(eff.window) && eff.window >= 64) nextWin = String(eff.window);
               if (typeof eff.xFirst === 'boolean') nextXFirst = eff.xFirst;
+              /**
+               * The Laya fields come from `stored` first, because that is the file the next launch reads: showing
+               * the live `supplied` copy would show an empty box for a path that is stored and about to be used,
+               * and the user would retype something already saved. `supplied` answers the different question
+               * "what is the backend running with right now", which is what the status line below reports.
+               */
+              const stored = answer?.stored ?? {};
+              const supplied = answer?.status?.laya?.supplied ?? {};
+              const pick = (a, b) => (typeof a === 'string' && a !== '' ? a : typeof b === 'string' ? b : '');
+              nextLayaPath = pick(stored.layaPythonPath, supplied.pythonPath);
+              nextLayaWeights = pick(stored.layaWeightsCacheDir, supplied.weightsCacheDir);
+              nextLayaEnvVar = pick(stored.layaWeightsEnvVar, supplied.weightsEnvVar);
+              const conflicts = answer?.status?.laya?.conflicts;
+              nextLayaStatus = {
+                state: String(answer?.status?.laya?.state?.status ?? ''),
+                // The conflict list is the difference between "the field is empty" and "the field is empty and that
+                // is why this session makes no System-1 calls", so it is carried into the render rather than logged.
+                conflicts: Array.isArray(conflicts) ? conflicts.map((c) => String(c)) : [],
+              };
               answered = true;
             } catch {
               note = 'the tuning route did not answer; showing the built-in defaults';
@@ -155,6 +199,10 @@ window.__ModuleLoader__.load({
             setTau(nextTau);
             setWin(nextWin);
             setXFirst(nextXFirst);
+            setLayaPath(nextLayaPath);
+            setLayaWeights(nextLayaWeights);
+            setLayaEnvVar(nextLayaEnvVar);
+            setLayaStatus(nextLayaStatus);
             setState({ phase: 'ready', configured: key !== undefined, message: note });
           } catch (err) {
             setState({ phase: 'ready', configured: false, message: 'could not read the credential store: ' + String(err) });
@@ -243,12 +291,28 @@ window.__ModuleLoader__.load({
           // One fetch, the way dsh-pet's panel does it: PUT the same text the command line takes, and let the
           // response body decide whether the save happened. There is no probe here any more - the host answers
           // with the effective triple, so a save is proven by that answer rather than by the absence of an error.
+          //
+          // The Laya fields ride on that same command line, because the host already parses them there
+          // (`parseTuningArgs`): one transport, one validator, and the panel and `/s1-tune` cannot drift apart in
+          // what they accept. Paths are quoted, and quoting is load-bearing rather than cosmetic - the tokenizer
+          // keeps a quoted run as one token, so an unquoted `D:/Program Files/python.exe` arrives as `D:/Program`.
+          // A field left empty is omitted instead of sent empty: the host merges, so omitting keeps the stored
+          // value while sending "" would try to store nothing.
+          const stripQuotes = (value) => value.trim().replace(/"/g, '');
+          const layaFields = [];
+          const layaPathValue = stripQuotes(layaPath);
+          const layaWeightsValue = stripQuotes(layaWeights);
+          const layaEnvVarValue = stripQuotes(layaEnvVar);
+          if (layaPathValue !== '') layaFields.push('laya="' + layaPathValue + '"');
+          if (layaWeightsValue !== '') layaFields.push('weights="' + layaWeightsValue + '"');
+          if (layaEnvVarValue !== '') layaFields.push('weightsEnv=' + layaEnvVarValue);
+          const body = [d + ' ' + r + ' ' + w + ' xFirst=' + (xFirst ? 'on' : 'off')].concat(layaFields).join(' ');
           setState((s) => ({ ...s, message: 'saving...' }));
           try {
             const response = await fetch('/s1cap-7340/tuning', {
               method: 'PUT',
               headers: { 'content-type': 'text/plain' },
-              body: d + ' ' + r + ' ' + w + ' xFirst=' + (xFirst ? 'on' : 'off'),
+              body: body,
             });
             const answer = await response.json();
             if (!response.ok || answer.ok !== true) {
@@ -261,17 +325,21 @@ window.__ModuleLoader__.load({
             if (Number.isFinite(eff.relevanceThreshold)) setTau(String(eff.relevanceThreshold));
             if (Number.isInteger(eff.window) && eff.window >= 64) setWin(String(eff.window));
             if (typeof eff.xFirst === 'boolean') setXFirst(eff.xFirst);
-            setState((s) => ({
-              ...s,
-              message:
-                'saved: d=' + eff.depth + ' r=' + eff.relevanceThreshold + ' w=' + eff.window +
-                  ' xFirst=' + (eff.xFirst ? 'on' : 'off') +
-                  (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')'),
-            }));
+            const summary =
+              'saved: d=' + eff.depth + ' r=' + eff.relevanceThreshold + ' w=' + eff.window +
+                ' xFirst=' + (eff.xFirst ? 'on' : 'off') +
+                (layaFields.length > 0 ? ' + ' + layaFields.length + ' Laya field(s)' : '') +
+                (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')');
+            // Re-read the host so the backend status and the conflict line reflect what was just written. The
+            // host's PUT answer echoes the recall knobs only, so without this second read the panel would show a
+            // stale conflict next to the path that just resolved it. `load()` resets the message, so the summary
+            // is applied after it.
+            await load();
+            setState((s) => ({ ...s, message: summary }));
           } catch (err) {
             setState((s) => ({ ...s, message: 'tuning save failed: ' + String(err) }));
           }
-        }, [depth, tau, win, xFirst]);
+        }, [depth, tau, win, xFirst, layaPath, layaWeights, layaEnvVar, load]);
 
         const clear = React.useCallback(async () => {
           try {
@@ -404,12 +472,79 @@ window.__ModuleLoader__.load({
               'and a re-selection re-prefills everything after it. The per-assembly numbers are in each ' +
               'control-plane record as layoutStableTokens and tokensAfterCut.',
           ),
+          e('h3', { style: S.subtitle }, 'Local Laya backend'),
+          e(
+            'p',
+            { style: S.note },
+            'The local System-1 backend runs from a Python interpreter, and these three fields are what the host ' +
+              'reads to launch it. A missing interpreter is not a cosmetic gap: it is a conflict, and a conflicted ' +
+              'session is demoted to observation mode and makes no System-1 calls at all - so a path that no one ' +
+              'can type is a backend that can never run. Empty boxes are left out of the save, so they keep ' +
+              'whatever is already stored rather than clearing it.',
+          ),
+          e(
+            'div',
+            { style: S.row },
+            e('label', { style: S.label, htmlFor: 's1cap-laya-path' }, 'python'),
+            e('input', {
+              id: 's1cap-laya-path',
+              style: S.input,
+              type: 'text',
+              value: layaPath,
+              placeholder: 'D:/conda/envs/laya_py/python.exe',
+              spellCheck: false,
+              autoComplete: 'off',
+              onChange: (event) => setLayaPath(event.target.value),
+            }),
+          ),
+          e(
+            'div',
+            { style: S.row },
+            e('label', { style: S.label, htmlFor: 's1cap-laya-weights' }, 'weights'),
+            e('input', {
+              id: 's1cap-laya-weights',
+              style: S.input,
+              type: 'text',
+              value: layaWeights,
+              placeholder: 'empty = S1CAP\u2019s own cache directory',
+              spellCheck: false,
+              autoComplete: 'off',
+              onChange: (event) => setLayaWeights(event.target.value),
+            }),
+            e('label', { style: S.label, htmlFor: 's1cap-laya-env' }, 'var'),
+            e('input', {
+              id: 's1cap-laya-env',
+              style: S.number,
+              type: 'text',
+              value: layaEnvVar,
+              placeholder: 'HF_HOME',
+              spellCheck: false,
+              autoComplete: 'off',
+              onChange: (event) => setLayaEnvVar(event.target.value),
+            }),
+          ),
+          e(
+            'div',
+            { style: S.row },
+            e('button', { style: S.button, type: 'button', onClick: () => void saveTuning() }, 'Save backend'),
+            e(
+              'span',
+              { style: S.note },
+              layaStatus.state === '' ? 'the host did not report a backend state' : 'backend: ' + layaStatus.state,
+            ),
+          ),
+          // A conflict is shown here rather than only logged, because it is the difference between "this field is
+          // empty" and "this field is empty and that is why the session is making no System-1 calls".
+          ...(layaStatus.conflicts.length > 0
+            ? [e('p', { style: S.note }, 'Conflict: ' + layaStatus.conflicts.join('; '))]
+            : []),
           e('p', { style: S.note }, state.message),
           e(
             'p',
             { style: S.note },
-            'Refs: ' + REF + ' · ' + TUNING_REF + '. The local Laya backend needs no key; status, counters and the ' +
-              'control-plane log are visible through the /s1 command.',
+            'Refs: ' + REF + ' · ' + TUNING_REF + '. The local Laya backend needs no credential; its interpreter, ' +
+              'weights cache and environment variable are the fields above, saved through the same route the knobs ' +
+              'use. Status, counters and the control-plane log are visible through the /s1 command.',
           ),
         );
       };

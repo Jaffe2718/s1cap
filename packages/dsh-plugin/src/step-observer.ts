@@ -120,6 +120,15 @@ export interface StepObserverStats {
   graphSegments: number;
   graphEdges: number;
   /**
+   * The most recent contained failure, as text.
+   *
+   * Every failure on this path is deliberately swallowed so it costs the record and not the session - which is
+   * correct, and which also made a real defect invisible: a scorer that threw on every segment showed up as a
+   * healthy graph with `errors: 2`, zero edges and zero System-1 calls, and the message itself went to a logger
+   * that does not reach the instance log. One string turns that back into a diagnosis.
+   */
+  lastError: string;
+  /**
    * One entry per session graph this process holds. Reported because a shared graph made a segment count of 269
    * look like one long conversation when it was several unrelated ones - the exact confusion this isolates.
    */
@@ -241,6 +250,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     upkeepScoredPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
+    lastError: '',
     sessions: [],
     upkeep: {
       enqueued: 0,
@@ -360,6 +370,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         });
       } catch (err) {
         stats.errors += 1;
+        stats.lastError = `upkeep scoring: ${String(err)}`;
         opts.onWarn?.(`[s1cap] upkeep scoring failed for a new ${segments.length}-segment batch: ${String(err)}`);
       }
       stats.upkeepEvents += 1;
@@ -495,6 +506,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         return observation;
       } catch (err) {
         stats.errors += 1;
+        stats.lastError = `observation: ${String(err)}`;
         opts.onWarn?.(`observation failed (ignored): ${String(err)}`);
         return undefined;
       }
