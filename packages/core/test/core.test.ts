@@ -130,8 +130,8 @@ test('assemble: two chunks of one passage cannot both be selected', () => {
     fixedOverheadTokens: 100,
     now: 1000,
     lambdaMs: 1e9,
-    // Without history the min-fill fallback (mu = 0.25 of a 1620-token budget) fires on this small fixture and
-    // empties the block, which would test the fallback rather than the de-duplication.
+    // The token-share floor is off by default, so a thin selection reaches the layout here and the test is about
+    // de-duplication rather than about a fallback that would have emptied the block first.
     history: chunks,
   });
 
@@ -373,18 +373,23 @@ test('assemble: tier1 off (C1/C2) leaves the recalled block empty by design', ()
   assert.equal(policy.recall.tier1, 'off');
 });
 
-test('assemble: thin recall degrades to the recency window', () => {
+test('assemble: a selector that selected nothing degrades to the recency window', () => {
+  // The guard that matters. One 5-token hit out of a 475-token budget is a *thin* selection, and thin is the
+  // expected shape of a working selector; the count floor is what catches a *broken* one, so this test raises it
+  // above the selection on purpose. A default that degraded here would throw away confident results in the
+  // ordinary case, which is what the old token-share floor did on 9 of 9 steps of a live run.
   const g = new AssociationGraph();
   const pinned = [seg('pin', -1, 50, 'systemPinned')];
   const current = seg('x', 10, 20, 'user');
   const tiny = seg('tiny', 2, 5);
   const older = seg('old', 1, 120);
   g.addSegments([...pinned, current, tiny, older]);
-  g.upsertEdge(edge('x', 'tiny', 0.9)); // 5 tokens << μ·budget
+  g.upsertEdge(edge('x', 'tiny', 0.9)); // the only thing relevance found
 
   const policy = defaultPolicy();
   policy.recall.relevanceThreshold = 0.5;
   policy.recall.budgetRatio = 0.5;
+  policy.recall.minRecalledSegments = 2;
   const res = assemble({
     graph: g,
     policy,
@@ -404,6 +409,60 @@ test('assemble: thin recall degrades to the recency window', () => {
     ['old', 'tiny'],
     'chronological history fills the block (recall exclusions reset)',
   );
+});
+
+test('assemble: a thin but real selection is delivered, not replaced', () => {
+  // The default, stated as a test because it is the correction. One relevant segment in a large budget is the
+  // method working: a selector that filled the budget would be selecting everything, which is the baseline it
+  // claims to beat. `minRecalledShare` stays available for an experiment that wants the old floor, and asking
+  // for it must still work.
+  const g = new AssociationGraph();
+  const pinned = [seg('pin', -1, 50, 'systemPinned')];
+  const current = seg('x', 10, 20, 'user');
+  const tiny = seg('tiny', 2, 5);
+  const older = seg('old', 1, 120);
+  g.addSegments([...pinned, current, tiny, older]);
+  g.upsertEdge(edge('x', 'tiny', 0.9));
+
+  const policy = defaultPolicy();
+  policy.recall.relevanceThreshold = 0.5;
+  policy.recall.budgetRatio = 0.5;
+  const res = assemble({
+    graph: g,
+    policy,
+    pinned,
+    tail: [],
+    current,
+    contextWindow: 1000,
+    reserveOutputTokens: 100,
+    fixedOverheadTokens: 100,
+    now: 1000,
+    lambdaMs: 1e9,
+    history: [older, tiny],
+  });
+  assert.equal(res.fallback, undefined, 'no fallback: one segment is a selection, not a failure');
+  assert.deepEqual(res.layout.recalled.map((s) => s.id), ['tiny'], 'and it is the relevant one, not the recent ones');
+  assert.equal(res.recall.selected, 1, 'the record says what was selected, so the ranking downstream consumed is visible');
+
+  // Opting back in is still possible, and still reported as a fallback rather than as a selection.
+  const withFloor = defaultPolicy();
+  withFloor.recall.relevanceThreshold = 0.5;
+  withFloor.recall.budgetRatio = 0.5;
+  withFloor.recall.minRecalledShare = 0.25;
+  const floored = assemble({
+    graph: g,
+    policy: withFloor,
+    pinned,
+    tail: [],
+    current,
+    contextWindow: 1000,
+    reserveOutputTokens: 100,
+    fixedOverheadTokens: 100,
+    now: 1000,
+    lambdaMs: 1e9,
+    history: [older, tiny],
+  });
+  assert.equal(floored.fallback, 'recency-window', 'the token-share floor still works when it is asked for');
 });
 
 // --------------------------------------------------------------- plan gate

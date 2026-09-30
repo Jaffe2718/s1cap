@@ -62,7 +62,33 @@ test('the block lands after the last claimed message, where the question is alre
   assert.equal(injected.source.kind, 'system-prompt', 'the injected-context kind the adapter already enumerates');
   assert.equal(injected.id, result.payloadId, 'the id carries the payload digest, so it cannot collide');
   assert.ok(injected.content[0].text.includes('scripts: build, test, dsh:add'), 'the recalled text is in there');
-  assert.ok(injected.content[0].text.includes('TASK: read three files'), 'and the state proxy, because C4 builds one');
+  assert.ok(
+    !injected.content[0].text.includes('TASK: read three files'),
+    'and not the state proxy, even though C4 builds one: T is S1CAP-written text and the model must not see it',
+  );
+});
+
+test('the state proxy is computed and recorded, and still not delivered', () => {
+  // The requirement, stated as a test: S1CAP's operations do not enter the LLM's context — it filters the
+  // harness's own context to reduce the LLM's workload and adds nothing of its own. T is a summary S1CAP writes,
+  // so it is internal: available to relevance and to the record, invisible to the model. The layout order still
+  // carries a `stateProxy` slot and this code walks past it, which is the whole point — the order describes the
+  // host's layout, and the delivery is a strict subset of the content that was already there.
+  const result = deliverContext(input());
+  const text = (result.messages ?? [])[2] as { content: { text: string }[] };
+  const blocks = result.blocks ?? [];
+
+  assert.ok(!blocks.includes('stateProxy'), `the telemetry names what was delivered: ${JSON.stringify(blocks)}`);
+  assert.ok(text.content[0].text.includes('quoted verbatim'), 'and the delivered text is quoted turns only');
+  assert.equal(
+    result.delivered,
+    true,
+    'a selection with no T in it is still delivered — dropping T must not have emptied the block',
+  );
+  // With no selection and no T there is nothing to add, and that is a reason, not a failure.
+  const empty = deliverContext(input({ recalled: [] }));
+  assert.equal(empty.delivered, false, 'a step where nothing was selected is left as the harness built it');
+  assert.match(empty.reason, /selected no turns/, 'and the reason says so, rather than blaming a missing proxy');
 });
 
 test('the block carries quoted session content and no S1CAP prose of its own', () => {
@@ -80,15 +106,15 @@ test('the block carries quoted session content and no S1CAP prose of its own', (
   assert.ok(!text.includes('selected by relevance'), 'no explanation of why these were chosen');
   assert.ok(!text.includes('supplement'), 'and no instruction about how to read them');
   assert.ok(text.includes('quoted verbatim'), 'each block says where its text came from');
-  assert.ok(text.includes('written by S1CAP from this session'), 'the authored state proxy says so, unlike the quotes');
+  assert.ok(!text.includes('written by S1CAP from this session'), 'and no authored content at all, T included');
+  assert.ok(!text.includes('TASK: read three files'), 'the state proxy is computed, and not sent');
   assert.ok(
     text.includes('scripts: build, test, dsh:add'),
     'the recalled turn is present word for word, not summarized',
   );
-  assert.ok(text.includes('TASK: read three files'), 'and the state proxy body, since TAS is part of the method');
 });
 
-test('the layout order decides the block order inside the message', () => {
+test('the layout order does not decide the block order, because only one block is delivered', () => {
   const xFirst = deliverContext(input({ order: ['pinned', 'stateProxy', 'anchor', 'recalled', 'tail'] }));
   const xLast = deliverContext(input({ order: ['pinned', 'stateProxy', 'recalled', 'tail', 'anchor'] }));
   const textOf = (r: ReturnType<typeof deliverContext>): string => {
@@ -97,14 +123,14 @@ test('the layout order decides the block order inside the message', () => {
     return last.content[0].text;
   };
 
-  // Both layouts carry the same blocks, so this asserts order inside the block, not a difference in content: the
-  // two cells differ in where x sits in the *transcript*, and x never travels inside the injected block.
-  assert.deepEqual(xFirst.blocks, ['stateProxy', 'recalled', 'recalled']);
-  assert.deepEqual(xLast.blocks, ['stateProxy', 'recalled', 'recalled']);
-  assert.ok(
-    textOf(xFirst).indexOf('state proxy T') < textOf(xFirst).indexOf('earlier assistant turn'),
-    'the state proxy precedes the quoted turns',
-  );
+  // The two cells differ in where x sits in the *transcript*, and x never travels inside the injected block, so
+  // both layouts deliver the same two quoted turns in the same order. This used to assert that the state proxy
+  // came first; it no longer can, because nothing authored is delivered, and it says so here rather than leaving
+  // a test that passes for the wrong reason.
+  assert.deepEqual(xFirst.blocks, ['recalled', 'recalled']);
+  assert.deepEqual(xLast.blocks, ['recalled', 'recalled'], 'the order array is walked, and only one slot produces text');
+  assert.equal(textOf(xFirst), textOf(xLast), 'so xFirst changes nothing about the delivered content');
+  assert.ok(textOf(xFirst).indexOf('quoted verbatim') >= 0, 'what is delivered is quoted session content');
 });
 
 test('a payload already in the transcript is not delivered twice', () => {
@@ -117,7 +143,7 @@ test('a payload already in the transcript is not delivered twice', () => {
   assert.equal(twice.delivered, false, 'the previous injection came back through the log and is left alone');
   assert.match(twice.reason, /already in the transcript/);
   assert.equal(twice.messages, null, 'so the harness list is returned unchanged');
-  assert.deepEqual(twice.blocks, ['stateProxy', 'recalled', 'recalled'], 'and the blocks are still reported');
+  assert.deepEqual(twice.blocks, ['recalled', 'recalled'], 'and the blocks are still reported');
 });
 
 test('a different selection is a different payload, and is delivered', () => {

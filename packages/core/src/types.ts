@@ -102,8 +102,29 @@ export interface AssemblyPolicy {
     embedModel?: string;
     /** share of the token budget available to recalled blocks (ρ) */
     budgetRatio: number;
-    /** fall back to recency window below this fill rate (μ) */
+    /**
+     * Fall back to a recency window when relevance fills less than this share of the budget (μ). **Off (0) by
+     * default, and that is a correction rather than a preference.**
+     *
+     * The method's claim is that a small number of relevant turns beats a full recency window — that is, a good
+     * selector uses *less* of the budget, not more. A floor at a quarter of the budget therefore rejects exactly
+     * the behaviour that justifies the method, silently, before delivery ever sees the selection. Measured: with
+     * μ = 0.25 the floor fired on **9 of 9** steps of a live C4 session, so every System-1 selection was replaced
+     * by recency and `scoredPairs` described a ranking nothing downstream consumed.
+     *
+     * Kept, because an experiment may want it and because deleting a knob that was measured is how the
+     * measurement gets lost. Setting it is opting back in to a heuristic that will discard confident selections.
+     */
     minRecalledShare: number;
+    /**
+     * Fall back to a recency window when relevance selected fewer than this many segments.
+     *
+     * This is the guard that actually protects the model: a selector that returned nothing — a dead backend, a
+     * threshold nothing clears, a scorer that throws on every pair — would otherwise deliver a context holding
+     * nothing but the task, while the record said a block had been assembled. One segment is the minimum that is
+     * still a selection; the token-share floor is not, because thin and confident is the expected case.
+     */
+    minRecalledSegments: number;
   };
   tail: { k: number };
   /**
@@ -250,7 +271,8 @@ export function defaultPolicy(): AssemblyPolicy {
       tier1: 'embed',
       embedModel: '',
       budgetRatio: 0.35,
-      minRecalledShare: 0.25,
+      minRecalledShare: 0,
+      minRecalledSegments: 1,
     },
     tail: { k: 3 },
     xFirst: true,

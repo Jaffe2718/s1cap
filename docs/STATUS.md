@@ -1225,6 +1225,42 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   which changes what the TAS axis of the ablation means; (2) the alternative is an **extractive** T — verbatim
   spans of real tool results rather than a written summary — which would keep TAS in the method while staying
   inside the rule. Not chosen unilaterally.
+- **Settled, and the delivered block is now quotes only.** The requirement as stated: *S1CAP's S1 operations must
+  not enter the LLM's context; they filter the harness's own context to reduce the LLM's workload.* So T is not
+  delivered. It is still computed and still recorded — it can inform relevance and ordering, and the record is
+  what a run is read back through — but the model does not see it. Dropping T is pinned by a test that also
+  checks a selection with no T in it still gets delivered, because "T is not sent" must not quietly turn into
+  "nothing is sent".
+  - **T was never what decided x-first.** In the assembler, T sits at index 1 of both layouts
+    (`['pinned','stateProxy','anchor','recalled','tail']` vs `['pinned','stateProxy','recalled','tail','anchor']`);
+    the flag only moves the anchor. What T is: a written summary and the head of the cache-stable prefix
+    (measured byte-stable within a task). With T internal, the delivery test changed from "the state proxy
+    precedes the quoted turns" to "xFirst changes nothing about the delivered content" — the old assertion would
+    have passed for the wrong reason.
+- **The position arm of the ablation cannot be imposed on this host. Measured, and it bounds the paper.**
+  A plugin's only channel appends *after the last claimed message*, and the request is built from the session
+  log, so the reachable shape is `[…history…, x, quoted block]` — which is the x-**first** arrangement. The
+  x-**last** arrangement needs an insertion in the middle of the log, and no splice does that. Consequences,
+  stated rather than papered over:
+  - Cells differing in `xFirst` (C2 vs C1, C4 vs C3) differ in what S1CAP *measures*, not in what the model
+    sees. They can be compared as a counterfactual, and the honest label for that comparison is "modelled", not
+    "applied".
+  - The one thing the plugin *can* do to the order of what the model reads is decide the order **inside** the
+    block it appends, and with only quoted turns that order is the order relevance returned them in.
+  - A host-side position intervention would need a hook this DSH build does not expose (see the probe above).
+- **Laya: one choice, and a chosen Laya requires a typed interpreter path.** Jev or Laya, never both: a profile
+  that names two answers the same questions from different models, and the cells are defined by which one is
+  running. `singleBackendIssues` now reports a conflict when Laya is active and `laya.pythonPath` is empty, and
+  the message names the field, the surface, and the file (`… laya_py/env/python.exe`). A conflict is the right
+  severity: the session drops to `provider=none`, System-1 calls go through tier-0, `/s1` and the log say so, and
+  the harness keeps working. A *warning* would have let a run be quietly not-the-run.
+  - Discovery still reports a candidate interpreter — that is how the panel offers a value to paste — but a
+    candidate is not a configuration, and auto-accepting one would make two machines with the same profile pick
+    different interpreters.
+  - **The settings panel is not in this repository** (it writes through DSH's credential service and the
+    plugin's Save route). What this side owes the panel is implemented: the requirement is enforced, it is
+    readable from `/s1` (`configIssues.conflicts`), and `/s1 laya status` already prints `pythonPath`. The field
+    itself has to be added on the panel side.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
   remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
   index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a

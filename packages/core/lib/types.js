@@ -102,8 +102,29 @@ export const CORE_SCHEMA_VERSION = 1         ;
                         
                                                                      
                         
-                                                               
+       
+                                                                                                              
+                                                                    
+      
+                                                                                                                
+                                                                                                                 
+                                                                                                                 
+                                                                                                                  
+                                                                                    
+      
+                                                                                                       
+                                                                                                                 
+       
                              
+       
+                                                                                           
+      
+                                                                                                               
+                                                                                                               
+                                                                                                                 
+                                                                                                        
+       
+                                
     
                       
      
@@ -250,7 +271,8 @@ export function defaultPolicy()                 {
       tier1: 'embed',
       embedModel: '',
       budgetRatio: 0.35,
-      minRecalledShare: 0.25,
+      minRecalledShare: 0,
+      minRecalledSegments: 1,
     },
     tail: { k: 3 },
     xFirst: true,

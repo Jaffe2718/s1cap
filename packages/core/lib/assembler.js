@@ -98,7 +98,16 @@ export function assemble(input               )                 {
       bfsDepth = Math.max(bfsDepth, hit.depth);
     }
 
-    if (used < policy.recall.minRecalledShare * recalledBudget) {
+    // Two guards, and they are not the same guard. The count floor catches a *broken* selector: nothing
+    // selected means a dead backend, a threshold nothing clears, or a scorer throwing on every pair, and
+    // delivering a context that holds nothing but the task is worse than delivering recency. The token-share
+    // floor catches a *disappointed* one — and that is the method's expected case, not an error: a selector that
+    // fills a quarter of the budget has found little, which is the whole claim. It fired on 9 of 9 steps of a
+    // live run, discarding every System-1 selection before delivery could see it, which is why it is off by
+    // default and has to be asked for.
+    const tooFew = recalled.length < Math.max(0, policy.recall.minRecalledSegments);
+    const underfilled = used < policy.recall.minRecalledShare * recalledBudget;
+    if (tooFew || underfilled) {
       fallback = 'recency-window';
       recalled = [];
       used = 0;

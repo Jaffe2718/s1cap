@@ -4,8 +4,11 @@ import assert from 'node:assert/strict';
 import { PROVIDERS } from '../src/providers.ts';
 import { describeS1Backend, redactKey, resolveS1Backend, singleBackendIssues } from '../src/resolve.ts';
 
-const layaOn = { enabled: true, host: '127.0.0.1', port: 8008 };
-const layaOff = { enabled: false, host: '127.0.0.1', port: 8008 };
+// A chosen Laya needs the interpreter the user typed. The fixtures that predate the rule carry a path, because
+// the rule makes an empty one a conflict and several tests below assert there are none.
+const layaOn = { enabled: true, host: '127.0.0.1', port: 8008, pythonPath: 'D:/tools/laya_py/env/python.exe' };
+const layaOff = { enabled: false, host: '127.0.0.1', port: 8008, pythonPath: 'D:/tools/laya_py/env/python.exe' };
+const layaOnNoPath = { enabled: true, host: '127.0.0.1', port: 8008, pythonPath: '' };
 
 test('the local Laya backend resolves to the runtime endpoint, not the built-in default', () => {
   const resolved = resolveS1Backend({ provider: 'laya-serve' }, { ...layaOn, port: 9100 }, {});
@@ -64,6 +67,36 @@ test('only one S1 backend may be active at a time', () => {
 
   const disabledButEnabled = singleBackendIssues({ provider: 'none' }, layaOn);
   assert.match(disabledButEnabled[0] ?? '', /s1.provider is "none"/);
+});
+
+test('choosing Laya requires the interpreter path the user typed', () => {
+  // Jev or Laya, one of them, and Laya is not a guess. A probe may find an interpreter on this machine, but a
+  // run whose backend depends on what a probe happened to find is not reproducible, and the machine-specific half
+  // belongs in the profile. So the path is required, and the message says which field and what shape of value.
+  const missing = singleBackendIssues({ provider: 'laya-serve' }, layaOnNoPath);
+  assert.equal(missing.length, 1, `expected one conflict, got ${JSON.stringify(missing)}`);
+  assert.match(missing[0] ?? '', /laya\.pythonPath is empty/);
+  assert.match(missing[0] ?? '', /settings panel/, 'and it points at the surface where the value is typed');
+  assert.match(missing[0] ?? '', /laya_py[\\/]env[\\/]python\.exe/, 'naming the file, not just the field');
+
+  // Both ways of having Laya active are covered: the flag alone is enough to require the path, which is the
+  // shape a profile has before the provider is switched over.
+  const flagOnly = singleBackendIssues({ provider: 'none' }, layaOnNoPath);
+  assert.equal(flagOnly.length, 2, 'the provider conflict and the path conflict are both reported');
+
+  // Jev is unaffected: a cloud backend has no local interpreter, so demanding a path would be inventing a
+  // requirement the user never asked for.
+  assert.deepEqual(singleBackendIssues({ provider: 'jev' }, layaOff), [], 'Jev needs no path');
+  assert.deepEqual(
+    singleBackendIssues({ provider: 'none' }, { enabled: false, host: '127.0.0.1', port: 8008, pythonPath: '' }),
+    [],
+    'and neither does no backend at all',
+  );
+  assert.deepEqual(
+    singleBackendIssues({ provider: 'laya-serve' }, { ...layaOnNoPath, pythonPath: 'D:/tools/laya_py/env/python.exe' }),
+    [],
+    'with a path filled in there is nothing to complain about',
+  );
 });
 
 test('credentials never reach a log line: redaction and the status summary', () => {

@@ -22,6 +22,15 @@ import { PROVIDERS } from './providers.js';
                
                
                  
+     
+                                                                                                    
+    
+                                                                                                          
+                                                                                                                 
+                                                                                                        
+                                                                                                               
+     
+                      
  
 
                                     
@@ -47,16 +56,34 @@ export function singleBackendIssues(s1               , laya                    )
   const issues           = [];
   if (!laya) return issues;
 
+  // One backend, one choice. Jev and Laya are the two options, and a profile that names both is a configuration
+  // error rather than a preference: the two would answer the same questions from different models, and the
+  // ablation cells are defined by which one is running.
   if (laya.enabled && s1.provider === 'none') {
     issues.push('laya.enabled is true but s1.provider is "none" — enable one backend or disable Laya');
-  }
-  if (laya.enabled && !PROVIDERS[s1.provider                                   ]?.local) {
+  } else if (laya.enabled && !PROVIDERS[s1.provider                                   ]?.local) {
+    // `else if`, because "enabled with no provider" is already reported above: saying it twice, in two
+    // different words, is one conflict told as two and makes the count in the log mean nothing.
     issues.push(
       `only one S1 backend may be active: laya.enabled=true conflicts with s1.provider="${s1.provider}" (set provider to "laya-serve", or disable Laya)`,
     );
   }
   if (!laya.enabled && s1.provider === 'laya-serve') {
     issues.push('s1.provider is "laya-serve" but laya.enabled is false — the local server would never start');
+  }
+  // Choosing Laya means committing to an interpreter the user typed, not one a probe happened to find.
+  //
+  // This is a conflict rather than a warning on purpose: a conflict drops the session to provider=none, which
+  // makes System-1 calls go through the tier-0 path and says so in `/s1` and the log. That is the right failure —
+  // the harness keeps working, and the run cannot quietly be something other than what was configured. The
+  // path is the interpreter that owns the environment (for example `path/to/laya_py/env/python.exe`), from which
+  // the console script is derived, so a wrong one is not a slow start but a different program or none at all.
+  const layaActive = laya.enabled || s1.provider === 'laya-serve';
+  if (layaActive && (laya.pythonPath ?? '') === '') {
+    issues.push(
+      'Laya is selected but laya.pythonPath is empty — fill in the interpreter path in the settings panel (the ' +
+        'python.exe of the laya_py environment, e.g. path/to/laya_py/env/python.exe)',
+    );
   }
   return issues;
 }

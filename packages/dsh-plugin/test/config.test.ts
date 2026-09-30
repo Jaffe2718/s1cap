@@ -86,7 +86,15 @@ function harness(): Harness {
 }
 
 /** A Laya block that never spawns anything (autoStart off) and needs no probe. */
-const layaIdle = { enabled: true, autoStart: false, host: '127.0.0.1', port: 8008 };
+// An enabled Laya carries the interpreter the user typed: choosing the local backend means committing to a
+// specific python.exe, so these fixtures state one. The rule that demands it has its own test in s1-client.
+const layaIdle = {
+  enabled: true,
+  autoStart: false,
+  host: '127.0.0.1',
+  port: 8008,
+  pythonPath: 'D:/tools/laya_py/env/python.exe',
+};
 
 test('defaults: C4 policy, provider jev, two distinct sinks, no conflicts', () => {
   const resolved = resolvePluginConfig(undefined);
@@ -102,7 +110,14 @@ test('defaults: C4 policy, provider jev, two distinct sinks, no conflicts', () =
 test('layausa runtime endpoint drives the resolved base URL when provider is laya-serve', () => {
   const resolved = resolvePluginConfig({
     s1: { provider: 'laya-serve', timeoutMs: 4000 },
-    laya: { enabled: true, autoStart: false, host: '127.0.0.1', port: 9123, model: 'english' },
+    laya: {
+      enabled: true,
+      autoStart: false,
+      host: '127.0.0.1',
+      port: 9123,
+      model: 'english',
+      pythonPath: 'D:/tools/laya_py/env/python.exe',
+    },
   });
   assert.deepEqual(resolved.conflicts, []);
   assert.equal(resolved.config.s1.provider, 'laya-serve');
@@ -114,6 +129,22 @@ test('enabling Laya while a cloud provider is selected is a conflict, never a pr
   const resolved = resolvePluginConfig({ s1: { provider: 'jev' }, laya: layaIdle });
   assert.equal(resolved.conflicts.length, 1);
   assert.match(resolved.conflicts[0] ?? '', /only one S1 backend/);
+});
+
+test('enabling Laya without an interpreter path is a conflict, not a warning', () => {
+  // The host-side half of "the settings panel must have a path for Laya": the panel is another repository, so
+  // what this side owes is a refusal that the panel can read. A conflict drops the session to provider=none and
+  // is reported in `/s1` and the log, which is what makes the field fillable rather than advisory.
+  const resolved = resolvePluginConfig({
+    s1: { provider: 'laya-serve' },
+    laya: { enabled: true, autoStart: false, host: '127.0.0.1', port: 8008 },
+  });
+  assert.equal(resolved.conflicts.length, 1, `expected one conflict, got ${JSON.stringify(resolved.conflicts)}`);
+  assert.match(resolved.conflicts[0] ?? '', /laya\.pythonPath is empty/);
+  assert.ok(
+    !resolved.config.laya?.pythonPath,
+    'and no path is invented behind the user: the field stays as given, which is what the panel fills',
+  );
 });
 
 test('merging the two telemetry streams is refused and the defaults are restored', () => {

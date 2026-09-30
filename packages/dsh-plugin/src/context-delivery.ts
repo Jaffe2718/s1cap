@@ -187,22 +187,19 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
     return NOT_DELIVERED('the decision carried no messages');
   }
 
-  // Only the two blocks that are additions. `pinned` is the harness's system prompt; `tail` and `anchor` are
-  // already in the transcript, and re-sending them here would duplicate text the model can already see.
+  // Only one block is delivered: the quoted turns.
+  //
+  // The state proxy is not, and that is a decision about the method rather than about this file. T is a summary
+  // S1CAP writes, so delivering it would put S1CAP's own text into the model's context — the same category as
+  // the prose that was removed from this block earlier, and the requirement is that S1CAP's operations do not
+  // enter the LLM's context at all: it filters the harness's own context to reduce the LLM's workload, and adds
+  // nothing of its own. T stays an internal structure: it can inform relevance and ordering, and it is still
+  // computed and recorded, but the model is not shown it. `xFirst` never depended on T — T sits at index 1 of
+  // both layouts, and the flag only moves the anchor.
   const parts: string[] = [];
   const blocks: string[] = [];
   for (const block of input.order) {
-    if (block === 'stateProxy') {
-      const text = input.stateProxy;
-      if (typeof text === 'string' && text !== '') {
-        // Labelled as authored, because it is: T is a summary S1CAP wrote, not a quotation. The recalled
-        // segments below are quoted verbatim and say so; this one must not read as if it were. Whether an
-        // authored T may be delivered at all is an open question about the method (docs/STATUS.md), not something
-        // to decide by quietly labelling it.
-        parts.push('## state proxy T, written by S1CAP from this session\n' + text);
-        blocks.push('stateProxy');
-      }
-    } else if (block === 'recalled') {
+    if (block === 'recalled') {
       for (const seg of input.recalled) {
         parts.push(renderSegment(seg));
         blocks.push('recalled');
@@ -210,9 +207,9 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
     }
   }
   if (parts.length === 0) {
-    // No state summary and nothing selected. Delivering here would add a bare header on every step of every
-    // turn, costing tokens and telling the model nothing.
-    return NOT_DELIVERED('nothing to insert: no recalled block and no state proxy');
+    // Nothing selected. Delivering an empty block would cost tokens on every step of every turn and tell the
+    // model nothing, so the step is left exactly as the harness built it.
+    return NOT_DELIVERED('nothing to insert: relevance selected no turns');
   }
 
   // No preamble, no explanation, no instruction. What the model reads is quoted session content with a
