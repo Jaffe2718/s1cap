@@ -213,6 +213,15 @@ export interface AssemblyResult {
     byBlock: Record<string, number>;
   };
   fallback?: 'recency-window';
+  /**
+   * How many segments were recalled because their pair with the anchor was inside `w` and had not been scored
+   * yet, rather than because the backend judged them relevant.
+   *
+   * Counted separately on purpose: fail-open is a measurement decision as much as a safety one, and a run that
+   * added these to the System-1 selection would report an intervention rate inflated by exactly the amount it
+   * did not know. Same discipline as `judgedPairs` against `scoredPairs`.
+   */
+  unknownAdmitted?: number;
   /** tokens of the cache-stable prefix (pinned block), for H3 accounting */
   cacheStability: {
     /** equals `blocks.pinned`; the N1 acceptance criterion, so its meaning is fixed */

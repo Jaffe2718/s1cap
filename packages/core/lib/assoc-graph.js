@@ -393,6 +393,32 @@ export class AssociationGraph {
   edgesAt(threshold        )               {
     return this.scores().filter((pair) => Number.isFinite(pair.w) && pair.w >= threshold);
   }
+
+  /**
+   * Segments within `windowN` before `seedId` whose pair with it has never been scored, nearest first.
+   *
+   * This is the fail-open set. A pair inside the window with no score is not "irrelevant" - it is "not computed
+   * yet", and the two are different facts that used to look identical. Treating the unknown as irrelevant is what
+   * made a live session's BFS anchor return zero candidates and the assembly fall back to the recency window.
+   *
+   * Pairs *beyond* the window are deliberately not returned: they were never asked, by design, and admitting them
+   * would undo the saving `w` exists for. So the distinction this draws is exactly the one the window draws, plus
+   * "and we have not heard back yet".
+   */
+  unscoredWithin(seedId        , windowN        )            {
+    const seed = this.#order.indexOf(seedId);
+    if (seed < 0) return [];
+    const from = Math.max(0, seed - Math.max(0, Math.trunc(windowN)));
+    const out            = [];
+    // Nearest first: when the backend has not answered, recency *inside* the window is the best ordering there is.
+    for (let i = seed - 1; i >= from; i -= 1) {
+      const id = this.#order[i]          ;
+      if (this.#scores.has(`${id}->${seedId}`)) continue;
+      const segment = this.#segments.get(id);
+      if (segment !== undefined) out.push(segment);
+    }
+    return out;
+  }
 }
 
 /**

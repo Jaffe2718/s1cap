@@ -68,6 +68,8 @@ export function assemble(input               )                 {
   let droppedSiblings = 0;
   let recalled            = [];
   let fallback                              ;
+  /** segments admitted because their pair with the anchor was inside w and unscored; see `AssemblyResult` */
+  let unknownAdmitted = 0;
   let candidates = 0;
   let bfsDepth = 0;
 
@@ -105,9 +107,30 @@ export function assemble(input               )                 {
     // fills a quarter of the budget has found little, which is the whole claim. It fired on 9 of 9 steps of a
     // live run, discarding every System-1 selection before delivery could see it, which is why it is off by
     // default and has to be asked for.
+    // Fail-open, and it is tried *before* recency because it is strictly better information.
+    //
+    // An empty selection has two causes that used to be indistinguishable: the backend looked and found nothing,
+    // or the backend has not answered yet. Inside the window the second is a timing fact, and the safe reading of
+    // it is "relevant" - a false positive spends tokens under a budget that already caps this block, while a false
+    // negative hands the step to the recency window, which is what a live session did for an entire run. The
+    // admitted segments are nearest-first, bounded by the same budget, and counted separately.
+    if (candidates === 0 && recalled.length === 0) {
+      const unknown = graph.unscoredWithin(current.id, policy.recall.window);
+      for (const seg of unknown) {
+        if (used + seg.tokens > recalledBudget) break;
+        const parent = seg.chunkOf ?? seg.id;
+        if (selectedParents.has(parent)) continue;
+        recalled.push(seg);
+        excluded.add(seg.id);
+        selectedParents.add(parent);
+        used += seg.tokens;
+        unknownAdmitted += 1;
+      }
+    }
+
     const tooFew = recalled.length < Math.max(0, policy.recall.minRecalledSegments);
     const underfilled = used < policy.recall.minRecalledShare * recalledBudget;
-    if (tooFew || underfilled) {
+    if ((tooFew || underfilled) && unknownAdmitted === 0) {
       fallback = 'recency-window';
       recalled = [];
       used = 0;
@@ -175,6 +198,7 @@ export function assemble(input               )                 {
       },
     },
     ...(fallback !== undefined ? { fallback } : {}),
+    ...(unknownAdmitted > 0 ? { unknownAdmitted } : {}),
     // `prefixTokensStable` keeps its established meaning - it equals `blocks.pinned`, which is the N1
     // acceptance criterion recorded in STATUS.md - so it is deliberately not reused for the layout question.
     // What the layout changes is how much of the *front* of the prompt survives a step unchanged, and that is
