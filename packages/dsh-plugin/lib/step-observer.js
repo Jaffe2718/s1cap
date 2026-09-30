@@ -120,6 +120,13 @@ import { isS1capInjected } from '@s1cap/core';
                             
                                                                  
                             
+     
+                                                                                                                  
+                                                                                                                  
+                                                                                                                 
+                                                                      
+     
+                            
                                                       
                  
                                                                                
@@ -266,6 +273,7 @@ export function createStepObserver(opts                     )               {
     upkeepSegments: 0,
     upkeepSelfDropped: 0,
     upkeepScoredPairs: 0,
+    upkeepJudgedPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
     lastError: '',
@@ -475,6 +483,7 @@ export function createStepObserver(opts                     )               {
       stats.upkeepEvents += 1;
       stats.upkeepSegments += segments.length;
       stats.upkeepScoredPairs += scored.scoredPairs;
+      stats.upkeepJudgedPairs += scored.judgedPairs;
       // The graph changed here and nowhere else on this path, so this is the point to make it survive. Written
       // per upkeep event rather than per step: a step only reads.
       persistGraph(sessionId);

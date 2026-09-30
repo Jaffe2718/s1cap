@@ -43,7 +43,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { primeSystemPrompt } from './system-prompt.js';
                                                                  
-import { TUNING_REF, parseEnvName, parsePath, parseTuning, parseTuningArgs, readCredential } from './credentials.js';
+import { TUNING_REF, parseEnvName, parsePath, parseProvider, parseTuning, parseTuningArgs, readCredential } from './credentials.js';
                                                
 import { createStepObserver } from './step-observer.js';
                                                        
@@ -420,6 +420,12 @@ export function readTuningFile()         {
     if (cacheDir !== undefined) out.layaWeightsCacheDir = cacheDir;
     const envVar = parseEnvName(typeof parsed.layaWeightsEnvVar === 'string' ? parsed.layaWeightsEnvVar : undefined);
     if (envVar !== undefined) out.layaWeightsEnvVar = envVar;
+    // The backend the radio selected, read through the same validator the command line uses. Without this reader
+    // the write half would be complete and the read half missing — the exact shape of the xFirst and Laya gaps
+    // above: the panel writes `laya-serve`, the file holds it, and the next start comes up on the profile's
+    // provider with the radio showing something else.
+    const provider = parseProvider(typeof parsed.provider === 'string' ? parsed.provider : undefined);
+    if (provider !== undefined) out.provider = provider;
     return out;
   } catch {
     return {};
@@ -1179,6 +1185,7 @@ function applyInner(ctx               , raw                             )       
       if (fromFile.layaPythonPath !== undefined) appliedTuning.layaPythonPath = fromFile.layaPythonPath;
       if (fromFile.layaWeightsCacheDir !== undefined) appliedTuning.layaWeightsCacheDir = fromFile.layaWeightsCacheDir;
       if (fromFile.layaWeightsEnvVar !== undefined) appliedTuning.layaWeightsEnvVar = fromFile.layaWeightsEnvVar;
+      if (fromFile.provider !== undefined) appliedTuning.provider = fromFile.provider;
       // The cell preset values before the volatile layer touches them. A tuning file written during one live test
       // silently overrode the cell it was not part of: C4 ran with xFirst=false and window=1200 for an entire
       // verification session - and nothing in any counter said so. The override itself is right (the panel owns
@@ -1196,6 +1203,10 @@ function applyInner(ctx               , raw                             )       
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
       if (appliedTuning.anchorWaitMs !== undefined) config.recall.anchorWaitMs = appliedTuning.anchorWaitMs;
       if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
+      // The backend the panel's radio selected. Applied to the live config *before* the conflict check and the
+      // rebuild below, because those two are what make the choice real: a provider written into the config object
+      // alone leaves the session calling the backend the user just switched away from.
+      if (appliedTuning.provider !== undefined) config.s1.provider = appliedTuning.provider;
       // The panel's Laya fields land on the *live* config object — the same one the launcher, the conflict check
       // and the status route read. This line previously declared a local of the same name from
       // `validateLayaConfig(...).config`, a normalised copy nothing else holds, so the panel's interpreter was
@@ -1208,14 +1219,16 @@ function applyInner(ctx               , raw                             )       
       if (
         appliedTuning.layaPythonPath !== undefined ||
         appliedTuning.layaWeightsCacheDir !== undefined ||
-        appliedTuning.layaWeightsEnvVar !== undefined
+        appliedTuning.layaWeightsEnvVar !== undefined ||
+        appliedTuning.provider !== undefined
       ) {
         const after = singleBackendIssues(config.s1, layaConfig);
         const was = resolved.conflicts.length;
         resolved.conflicts = after;
         if (after.length !== was) {
           ctx.logger?.info?.(
-            `[s1cap] the panel supplied ${String(appliedTuning.layaPythonPath !== undefined)} Laya path(s): ` +
+            `[s1cap] the panel supplied ${String(appliedTuning.layaPythonPath !== undefined)} Laya path(s) and ` +
+              `provider=${String(appliedTuning.provider ?? '(unchanged)')}: ` +
               `${was} conflict(s) before, ${after.length} after${after.length > 0 ? ` — ${after.join('; ')}` : ''}`,
           );
         }
@@ -1249,7 +1262,7 @@ function applyInner(ctx               , raw                             )       
           );
         }
       }
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, anchorWaitMs: config.recall.anchorWaitMs, xFirst: config.xFirst } }) + '\n');
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, anchorWaitMs: config.recall.anchorWaitMs, xFirst: config.xFirst, provider: config.s1.provider } }) + '\n');
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
         observer,
@@ -1343,12 +1356,13 @@ function applyInner(ctx               , raw                             )       
       parsed.window === undefined &&
       parsed.anchorWaitMs === undefined &&
       parsed.xFirst === undefined &&
+      parsed.provider === undefined &&
       layaOnly
     ) {
       return {
         ok: false,
         reason:
-          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, wait an integer 0..60000 (0 disables the anchor wait), xFirst on/off, or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
+          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, wait an integer 0..60000 (0 disables the anchor wait), xFirst on/off, provider=jev|laya-serve, or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
       };
     }
     appliedTuning = { ...appliedTuning, ...parsed };
@@ -1359,14 +1373,36 @@ function applyInner(ctx               , raw                             )       
     if (parsed.layaPythonPath !== undefined) layaConfig.pythonPath = parsed.layaPythonPath;
     if (parsed.layaWeightsCacheDir !== undefined) layaConfig.weightsCacheDir = parsed.layaWeightsCacheDir;
     if (parsed.layaWeightsEnvVar !== undefined) layaConfig.weightsEnvVar = parsed.layaWeightsEnvVar;
-    if (parsed.layaPythonPath !== undefined || parsed.layaWeightsCacheDir !== undefined || parsed.layaWeightsEnvVar !== undefined) {
+    // The radio. Written into the live config the same way the Laya fields are, and for the same reason: this is
+    // the object `buildBackend` reads, so the edit and the re-resolution below have to see the same value.
+    if (parsed.provider !== undefined) config.s1.provider = parsed.provider;
+    if (
+      parsed.layaPythonPath !== undefined ||
+      parsed.layaWeightsCacheDir !== undefined ||
+      parsed.layaWeightsEnvVar !== undefined ||
+      parsed.provider !== undefined
+    ) {
       const after = singleBackendIssues(config.s1, layaConfig);
       resolved.conflicts = after;
       ctx.logger?.info?.(
-        `[s1cap] laya settings applied from the panel: interpreter=${String(layaConfig.pythonPath ?? '(unset)')} ` +
+        `[s1cap] backend settings applied from the panel: provider=${config.s1.provider} ` +
+          `interpreter=${String(layaConfig.pythonPath ?? '(unset)')} ` +
           `weights=${String(layaConfig.weightsCacheDir ?? '(default)')} var=${String(layaConfig.weightsEnvVar ?? '(default)')} ` +
           `— ${after.length} conflict(s)${after.length > 0 ? `: ${after.join('; ')}` : ''}`,
       );
+      // Re-resolve the backend, or the radio would only look switched. The client was built at activation from
+      // the config as it stood then, so without this the session keeps calling the backend the user just switched
+      // away from — and, when a panel value clears or raises a conflict, keeps reporting a state that is no longer
+      // true. The first-step path does the same thing (`primeOnce`); this is that treatment for a mid-session save.
+      const rebuilt = buildBackend();
+      if (rebuilt.backend.provider !== backend.provider || rebuilt.backend.baseUrl !== backend.baseUrl) {
+        ctx.logger?.info?.(
+          `[s1cap] System-1 backend re-resolved by the panel: ${describeS1Backend(backend)} -> ` +
+            `${describeS1Backend(rebuilt.backend)}`,
+        );
+      }
+      backend = rebuilt.backend;
+      client = rebuilt.client;
     }
     if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
     if (parsed.relevanceThreshold !== undefined) config.recall.threshold = parsed.relevanceThreshold;
@@ -1376,7 +1412,7 @@ function applyInner(ctx               , raw                             )       
     const persist = writeTuningFile(appliedTuning);
     const persisted = persist.ok;
     ctx.logger?.info?.(
-      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.threshold} window=${config.recall.window} anchorWaitMs=${config.recall.anchorWaitMs} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
+      `[s1cap] recall tuning: provider=${config.s1.provider} depth=${config.recall.depth} relevanceThreshold=${config.recall.threshold} window=${config.recall.window} anchorWaitMs=${config.recall.anchorWaitMs} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
     );
     return {
       ok: true,
@@ -1386,6 +1422,7 @@ function applyInner(ctx               , raw                             )       
         window: config.recall.window,
         anchorWaitMs: config.recall.anchorWaitMs,
         xFirst: config.xFirst,
+        provider: config.s1.provider,
       },
       persisted,
       ...(persist.ok ? {} : { persistError: persist.error }),
@@ -1395,14 +1432,17 @@ function applyInner(ctx               , raw                             )       
     {
       name: 's1-tune',
       description:
-        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), anchor wait in ms (0 disables), xFirst on/off — and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
+        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), anchor wait in ms (0 disables), xFirst on/off — the backend (provider=jev|laya-serve) and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
       input: {
-        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "wait=10000", "xFirst=off", or laya="D:/conda/envs/ml/python.exe")',
+        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "wait=10000", "xFirst=off", "provider=laya-serve", or laya="D:/conda/envs/ml/python.exe")',
       },
       handler: ({ rawInput }) => {
         const outcome = applyTuning(parseTuningArgs(rawInput));
         if (!outcome.ok) return commandError(outcome.reason ?? 'the tuning was refused');
         const eff = outcome.effective;
+        // The provider leads the answer on purpose: it is the one field here that changes *which* program answers,
+        // so a save that switched the backend has to say so in the line the user reads.
+        const backendPart = `provider=${String(eff?.provider)}`;
         // A Laya-only save has no depth/threshold to report, and printing four defaults for it would tell the
         // user the button did nothing.
         const layaPart =
@@ -1413,7 +1453,9 @@ function applyInner(ctx               , raw                             )       
             : `depth=${String(eff?.depth)} relevanceThreshold=${String(eff?.relevanceThreshold)} ` +
               `window=${String(eff?.window)} wait=${String(eff?.anchorWaitMs)} xFirst=${eff?.xFirst === true ? 'on' : 'off'}`;
         return commandSuccess(
-          layaPart +
+          backendPart +
+            ' ' +
+            layaPart +
             (outcome.persisted === true ? ' (persisted)' : ` (in effect, NOT persisted: ${outcome.persistError ?? 'unknown'})`),
         );
       },
@@ -1438,6 +1480,9 @@ function applyInner(ctx               , raw                             )       
               window: config.recall.window,
               anchorWaitMs: config.recall.anchorWaitMs,
               xFirst: config.xFirst,
+              // The provider the radio selected, reported beside the knobs for the same reason they are: it is a
+              // value this panel owns now, and "what did the save actually set" must be answerable from `/s1`.
+              provider: config.s1.provider,
             },
             keySource: credentialSource,
           },
@@ -1446,6 +1491,10 @@ function applyInner(ctx               , raw                             )       
           planGate: config.planGate,
           s1: {
             provider: backend.provider,
+            // What the config asks for, next to what the session actually resolved to. The two differ whenever a
+            // conflict demotes the session to `none`, and that difference is exactly what a reader (or the panel's
+            // radio) needs in order to tell "nobody selected a backend" from "one was selected and refused".
+            configuredProvider: config.s1.provider,
             mode: backend.mode,
             baseUrl: backend.baseUrl,
             model: backend.model,
@@ -1615,6 +1664,26 @@ function applyInner(ctx               , raw                             )       
     if (storedNow.window !== undefined) config.recall.window = storedNow.window;
     if (storedNow.anchorWaitMs !== undefined) config.recall.anchorWaitMs = storedNow.anchorWaitMs;
     if (storedNow.xFirst !== undefined) config.xFirst = storedNow.xFirst;
+    // The provider the panel's radio stored, applied here and not only on the first step: this block is what makes
+    // a saved backend survive a restart, and the initial `buildBackend()` above ran before the file was read — so
+    // the choice is applied and then re-resolved, or the session would run the profile's provider while both the
+    // file and the panel said otherwise. Said out loud as a `warn`, like every other tuning override of a cell:
+    // which backend answers is not a value that may change silently between two runs of an ablation.
+    if (storedNow.provider !== undefined && storedNow.provider !== config.s1.provider) {
+      ctx.logger?.warn?.(
+        `[s1cap] tuning overrides the running cell: provider ${config.s1.provider} -> ${storedNow.provider} ` +
+          `(delete the tuning file for a cell-pure run)`,
+      );
+      config.s1.provider = storedNow.provider;
+      resolved.conflicts = singleBackendIssues(config.s1, layaConfig);
+      const rebuilt = buildBackend();
+      ctx.logger?.info?.(
+        `[s1cap] System-1 backend re-resolved from the stored provider: ${describeS1Backend(backend)} -> ` +
+          `${describeS1Backend(rebuilt.backend)}`,
+      );
+      backend = rebuilt.backend;
+      client = rebuilt.client;
+    }
   }
 
   const webServer = findService                                       (ctx, 'webServer');
@@ -1647,6 +1716,9 @@ function applyInner(ctx               , raw                             )       
                   window: config.recall.window,
                   anchorWaitMs: config.recall.anchorWaitMs,
                   xFirst: effective.xFirst,
+                  // The provider the radio selected, so the GET answers the same shape the PUT echoes back and the
+                  // panel can fill the radio from the same place it fills the knobs.
+                  provider: config.s1.provider,
                 },
                 status: {
                   cell: config.cell,
@@ -1655,7 +1727,7 @@ function applyInner(ctx               , raw                             )       
                   planGate: effective.planGate.on,
                   deliver: effective.deliver,
                   xFirst: effective.xFirst,
-                  s1: { provider: backend.provider, mode: backend.mode, baseUrl: backend.baseUrl },
+                  s1: { provider: backend.provider, configuredProvider: config.s1.provider, mode: backend.mode, baseUrl: backend.baseUrl },
                   // The Laya half the panel needs in order to render and validate its own fields: what was
                   // supplied, what the plugin resolved it to, and the conflicts that decide whether the backend
                   // runs at all. Without it the panel can write a path and never learn whether it took effect.

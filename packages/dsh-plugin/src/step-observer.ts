@@ -120,6 +120,13 @@ export interface StepObserverStats {
   upkeepSelfDropped: number;
   /** pairs scored by upkeep, across every new session segment */
   upkeepScoredPairs: number;
+  /**
+   * Of `upkeepScoredPairs`, the pairs the backend actually answered. Absent from this object until a verification
+   * run reported it as `undefined`: the counter existed on the graph and in every assembly record, and the status
+   * route - the one place an operator looks - could not see it. Read together, the difference is the size of the
+   * gap between "the window was offered" and "the window was judged".
+   */
+  upkeepJudgedPairs: number;
   /** observation failures (reported, never thrown) */
   errors: number;
   /** tokens the full history would have sent that the selected view did not */
@@ -266,6 +273,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     upkeepSegments: 0,
     upkeepSelfDropped: 0,
     upkeepScoredPairs: 0,
+    upkeepJudgedPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
     lastError: '',
@@ -475,6 +483,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       stats.upkeepEvents += 1;
       stats.upkeepSegments += segments.length;
       stats.upkeepScoredPairs += scored.scoredPairs;
+      stats.upkeepJudgedPairs += scored.judgedPairs;
       // The graph changed here and nowhere else on this path, so this is the point to make it survive. Written
       // per upkeep event rather than per step: a step only reads.
       persistGraph(sessionId);

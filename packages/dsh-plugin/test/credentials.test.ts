@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from '../src/credentials.ts';
+import { S1_PROVIDERS } from '@s1cap/s1-client';
 
 test('the first entry point that answers wins, and it is reported by name', async () => {
   const reports: Record<string, unknown>[] = [];
@@ -163,4 +164,36 @@ test('the panel can write the Laya fields, and a mistyped one falls back instead
 
   // The numeric knobs still behave: a path-looking value in a numeric field is dropped, not coerced to NaN.
   assert.deepEqual(parseTuningArgs('d=3 laya=D:/x/python.exe'), { depth: 3, layaPythonPath: 'D:/x/python.exe' });
+});
+
+test('the panel can switch the System-1 backend, and an unknown provider is dropped', () => {
+  // The radio writes this token. It changes *which* backend answers, never how many: the host already refuses a
+  // session that names two (`singleBackendIssues`), so there is one value here and not two switches.
+  assert.deepEqual(parseTuningArgs('provider=jev'), { provider: 'jev' });
+  assert.deepEqual(parseTuningArgs('provider=laya-serve'), { provider: 'laya-serve' });
+  assert.deepEqual(parseTuningArgs('provider=laya'), { provider: 'laya-serve' }, 'the short spelling of the local one');
+  assert.deepEqual(parseTuningArgs('provider=LAYA-SERVE'), { provider: 'laya-serve' }, 'a name is not case-sensitive');
+  assert.deepEqual(parseTuningArgs('provider="laya-serve"'), { provider: 'laya-serve' }, 'and the quoted form survives');
+  assert.deepEqual(parseTuningArgs('provider=none'), { provider: 'none' }, 'switching System-1 off is a name the policy allows');
+  assert.deepEqual(parseTuningArgs('d=3 provider=laya r=0.4'), {
+    depth: 3,
+    provider: 'laya-serve',
+    relevanceThreshold: 0.4,
+  }, 'and the knobs around it are unaffected');
+
+  // Dropped, never clamped to the nearest known backend: which model answers is the one value an ablation must
+  // never have chosen for it, so a typo leaves the running backend alone.
+  assert.deepEqual(parseTuningArgs('provider=openai'), {});
+  assert.deepEqual(parseTuningArgs('provider='), {});
+  assert.deepEqual(parseTuningArgs('provider=j'), {}, 'a prefix is not a name');
+  assert.deepEqual(parseTuningArgs('d=3 provider=gpt-4'), { depth: 3 });
+  assert.deepEqual(parseTuningArgs('provider=layax'), {});
+
+  // The accepted set is the policy's own list, not a second copy kept here: a provider added to S1_PROVIDERS is
+  // settable from the command line the same day. "laya" is the one alias, and it resolves to the canonical name
+  // before the membership test rather than widening the set.
+  for (const provider of S1_PROVIDERS) {
+    assert.deepEqual(parseTuningArgs('provider=' + provider), { provider }, `${provider} is a provider the policy allows`);
+  }
+  assert.ok(S1_PROVIDERS.includes('jev') && S1_PROVIDERS.includes('laya-serve'));
 });

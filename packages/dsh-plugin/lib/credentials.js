@@ -17,34 +17,34 @@
  *
  * A key that is never read is never printed: callers only ever surface it through `redactKey()`.
  */
-import type { S1ProviderName } from '@s1cap/core';
+                                                  
 import { S1_PROVIDERS } from '@s1cap/s1-client';
 
-export interface CredentialReadResult {
-  key?: string;
-  /** which entry point answered; undefined when none did */
-  method?: string;
-  /** the entry points attempted, in order */
-  tried: string[];
-}
+                                       
+               
+                                                            
+                  
+                                             
+                  
+ 
 
-export interface CredentialReadOptions {
-  /** `"<scope>/<id>"` */
-  ref: string;
-  /** the service object, as returned by `ctx.get('credentials')`, if any */
-  service: unknown;
-  /** diagnostic channel (a probe line); never receives the key itself */
-  report?(line: Record<string, unknown>): void;
-}
+                                        
+                         
+              
+                                                                            
+                   
+                                                                         
+                                               
+ 
 
-const READ_ENTRY_POINTS = ['resolve', 'readRecord', 'get', 'read', 'describeRecord'] as const;
+const READ_ENTRY_POINTS = ['resolve', 'readRecord', 'get', 'read', 'describeRecord']         ;
 
 /** Accept a plain string, or an object that carries the secret in a conventional field. */
-function unwrap(value: unknown): string | undefined {
+function unwrap(value         )                     {
   if (typeof value === 'string' && value.trim() !== '') return value;
   if (value === null || typeof value !== 'object') return undefined;
-  const record = value as { value?: unknown; secret?: unknown; text?: unknown; key?: unknown };
-  for (const field of ['value', 'secret', 'text', 'key'] as const) {
+  const record = value                                                                        ;
+  for (const field of ['value', 'secret', 'text', 'key']         ) {
     const candidate = record[field];
     if (typeof candidate === 'string' && candidate.trim() !== '') return candidate;
   }
@@ -55,8 +55,8 @@ function unwrap(value: unknown): string | undefined {
  * Try to read one credential. Never throws: an unusable service is reported, not escalated, because a plugin
  * must not be able to break a session over an optional secret.
  */
-export async function readCredential(opts: CredentialReadOptions): Promise<CredentialReadResult> {
-  const tried: string[] = [];
+export async function readCredential(opts                       )                                {
+  const tried           = [];
   const service = opts.service;
   if (service === null || typeof service !== 'object') {
     opts.report?.({ schema: 0, kind: 'credential', result: 'no credentials service', ref: opts.ref });
@@ -64,11 +64,11 @@ export async function readCredential(opts: CredentialReadOptions): Promise<Crede
   }
 
   for (const name of READ_ENTRY_POINTS) {
-    const candidate = (service as Record<string, unknown>)[name];
+    const candidate = (service                           )[name];
     if (typeof candidate !== 'function') continue;
     tried.push(name);
     try {
-      const raw = await (candidate as (ref: string) => unknown).call(service, opts.ref);
+      const raw = await (candidate                            ).call(service, opts.ref);
       const key = unwrap(raw);
       if (key !== undefined) {
         opts.report?.({ schema: 0, kind: 'credential', result: 'read', method: name, ref: opts.ref });
@@ -104,58 +104,58 @@ export async function readCredential(opts: CredentialReadOptions): Promise<Crede
  */
 export const TUNING_REF = 's1cap/tuning';
 
-export interface Tuning {
-  depth?: number;
-  relevanceThreshold?: number;
-  /** S1 scoring window w (recall.window): integer >= 64, default 1024, no upper bound */
-  window?: number;
-  /**
-   * `recall.anchorWaitMs`: how long a step may wait, in milliseconds, for the newest `user` segment's own scoring
-   * row before it assembles anyway.
-   *
-   * Default 10 000, and `0` disables the wait. The bound is the same one `NUMBER_RULES` carries in core (0..60 000)
-   * and an out-of-range value is dropped rather than clamped, on the file's usual rule: a value the researcher never
-   * chose must not silently decide whether a step waits at all.
-   */
-  anchorWaitMs?: number;
-  /**
-   * `xFirst` (policy.xFirst): place the current task before recalled history rather than after it.
-   *
-   * A layout switch, not a speed knob, but it lives here because this panel is the surface the researcher
-   * actually has; the value is a boolean so `true`/`false`, `on`/`off` and `1`/`0` are all accepted.
-   */
-  xFirst?: boolean;
-  /**
-   * The interpreter the local backend runs from, e.g. `path/to/laya_py/env/python.exe`.
-   *
-   * It lives here, beside the knobs, for one reason: this is the only host-side key/value surface this plugin has
-   * verified, and the requirement is that the panel can *write* it — a required field with no write path is a field
-   * that cannot be filled, and an unfillable required field makes every Laya run impossible. The same fail-safe
-   * rule applies: a value that is not a path-looking string is dropped rather than stored, so a typo leaves the
-   * default standing instead of writing something that fails only at launch.
-   */
-  layaPythonPath?: string;
-  /** where downloaded checkpoints live; empty or absent means S1CAP's own cache directory */
-  layaWeightsCacheDir?: string;
-  /** the environment variable the user's Laya reads to find that cache */
-  layaWeightsEnvVar?: string;
-  /**
-   * Which System-1 backend the session runs against: `jev` (cloud) or `laya-serve` (the local runtime).
-   *
-   * This is the settings panel's radio, and it belongs on this surface for the reason every other field here
-   * does: the panel's only write path is the tuning command line, and a radio with no write path is a control
-   * that looks switched while the session keeps the backend it was built with. The host already enforces one
-   * backend at a time (`singleBackendIssues`), so this changes *which* one, never how many.
-   *
-   * Validated against the policy's own provider list (`S1_PROVIDERS`, typed by `S1ProviderName`) rather than a
-   * second copy of it, and an unknown name is dropped like every other unusable value on this file — a provider
-   * nobody chose must not decide which model answers.
-   */
-  provider?: S1ProviderName;
-}
+                         
+                 
+                              
+                                                                                         
+                  
+     
+                                                                                                                  
+                                    
+    
+                                                                                                                    
+                                                                                                                     
+                                                                
+     
+                        
+     
+                                                                                                   
+    
+                                                                                                          
+                                                                                                     
+     
+                   
+     
+                                                                                        
+    
+                                                                                                                  
+                                                                                                                    
+                                                                                                                
+                                                                                                                
+                                                                             
+     
+                          
+                                                                                             
+                               
+                                                                          
+                             
+     
+                                                                                                        
+    
+                                                                                                             
+                                                                                                              
+                                                                                                             
+                                                                                            
+    
+                                                                                                               
+                                                                                                                
+                                                      
+     
+                            
+ 
 
 /** Read a boolean tuning token. Returns undefined for anything unrecognized, so a typo never flips a layout. */
-function parseSwitch(token: string | undefined): boolean | undefined {
+function parseSwitch(token                    )                      {
   if (token === undefined) return undefined;
   const t = token.trim().toLowerCase();
   if (t === '1' || t === 'on' || t === 'true' || t === 'yes') return true;
@@ -175,8 +175,8 @@ function parseSwitch(token: string | undefined): boolean | undefined {
  * would silently reinterpret an `xFirst` token that an old write already put in slot four. `parseTuningArgs` is the
  * surface that owns it.
  */
-export function parseTuning(value: string | undefined): Tuning {
-  const out: Tuning = {};
+export function parseTuning(value                    )         {
+  const out         = {};
   if (typeof value !== 'string') return out;
   const parts = value.trim().split(/\s+/);
   const depth = Number(parts[0]);
@@ -198,7 +198,7 @@ export function parseTuning(value: string | undefined): Tuning {
  * whitespace, or a bare token with no separator — so a mistyped field falls back to the default instead of
  * becoming a launch-time failure with a message nobody reads.
  */
-export function parsePath(value: string | undefined): string | undefined {
+export function parsePath(value                    )                     {
   if (typeof value !== 'string') return undefined;
   const trimmed = unquote(value).trim();
   if (trimmed === '') return undefined;
@@ -207,7 +207,7 @@ export function parsePath(value: string | undefined): string | undefined {
 }
 
 /** A plausible environment-variable name: letters, digits and underscores, starting with a letter or underscore. */
-export function parseEnvName(value: string | undefined): string | undefined {
+export function parseEnvName(value                    )                     {
   if (typeof value !== 'string') return undefined;
   const trimmed = unquote(value).trim();
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) ? trimmed : undefined;
@@ -220,7 +220,7 @@ export function parseEnvName(value: string | undefined): string | undefined {
  * `laya-serve` (`PROVIDERS` in `@s1cap/s1-client`, `S1ProviderName` in core). The alias is resolved *before* the
  * membership test, so the accepted set stays exactly the policy's list and not a second one maintained here.
  */
-const PROVIDER_ALIASES: Readonly<Record<string, string>> = { laya: 'laya-serve' };
+const PROVIDER_ALIASES                                   = { laya: 'laya-serve' };
 
 /**
  * One provider name, canonicalised, or nothing.
@@ -229,12 +229,12 @@ const PROVIDER_ALIASES: Readonly<Record<string, string>> = { laya: 'laya-serve' 
  * one, because a value the researcher never chose must not decide which backend answers. The set is the policy's
  * own `S1_PROVIDERS`, so a provider added there is settable from the panel the same day.
  */
-export function parseProvider(value: string | undefined): S1ProviderName | undefined {
+export function parseProvider(value                    )                             {
   if (typeof value !== 'string') return undefined;
   const name = unquote(value).trim().toLowerCase();
   if (name === '') return undefined;
   const canonical = PROVIDER_ALIASES[name] ?? name;
-  return (S1_PROVIDERS as readonly string[]).includes(canonical) ? (canonical as S1ProviderName) : undefined;
+  return (S1_PROVIDERS                     ).includes(canonical) ? (canonical                  ) : undefined;
 }
 
 /**
@@ -249,12 +249,12 @@ export function parseProvider(value: string | undefined): S1ProviderName | undef
  * A plain `\S+` alternative loses, because the scan starts at the key and the opening quote is swallowed along
  * with the first word — the first version of this cut `laya="D:/Program Files/…"` down to `D:/Program`.
  */
-function tokenize(input: string): string[] {
+function tokenize(input        )           {
   return input.match(/(?:[^\s"]|"[^"]*")+/g) ?? [];
 }
 
 /** Drop one layer of surrounding double quotes, which the tokenizer keeps so quoted sections stay together. */
-function unquote(value: string): string {
+function unquote(value        )         {
   return value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
 }
 
@@ -268,10 +268,10 @@ function unquote(value: string): string {
  * radio shows). It has no positional slot either: the first four tokens are the legacy `d r w xFirst` order an
  * older write already used, and a provider name landing in one of those would be silently dropped anyway.
  */
-export function parseTuningArgs(input: string | undefined): Tuning {
+export function parseTuningArgs(input                    )         {
   if (typeof input !== 'string') return {};
-  const out: Tuning = {};
-  const assign = (key: string, raw: string): void => {
+  const out         = {};
+  const assign = (key        , raw        )       => {
     const value = Number(raw);
     if (key === 'depth' || key === 'd') {
       if (Number.isInteger(value) && value > 0) out.depth = value;
@@ -322,7 +322,7 @@ export function parseTuningArgs(input: string | undefined): Tuning {
       if (provider !== undefined) out.provider = provider;
     }
   };
-  const positional: string[] = [];
+  const positional           = [];
   for (const token of tokenize(input)) {
     if (token === '') continue;
     // The value runs to the end of the token, not to the next space: `tokenize` has already made a quoted path

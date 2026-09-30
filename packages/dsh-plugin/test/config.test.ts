@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -76,6 +76,7 @@ test('the reader picks up every field the writer can store, Laya included', () =
         layaPythonPath: 'D:\\conda_store\\envs\\ml\\python.exe',
         layaWeightsCacheDir: 'D:/hf-cache',
         layaWeightsEnvVar: 'HF_HOME',
+        provider: 'laya-serve',
       }),
       'utf8',
     );
@@ -89,6 +90,10 @@ test('the reader picks up every field the writer can store, Laya included', () =
   assert.equal(stored.layaPythonPath, 'D:\\conda_store\\envs\\ml\\python.exe');
   assert.equal(stored.layaWeightsCacheDir, 'D:/hf-cache');
   assert.equal(stored.layaWeightsEnvVar, 'HF_HOME');
+  // The backend the radio selected. Read through the same validator the command line uses, because the panel's
+  // write half was already complete and a missing read half is invisible from the panel: the file holds the
+  // choice, the radio shows it, and the next start comes up on the profile's provider instead.
+  assert.equal(stored.provider, 'laya-serve');
 
   // The same validators the command line uses, so a hand-edited file cannot smuggle in a value the Save button
   // would have refused: an unusable entry is dropped and the default stands.
@@ -97,7 +102,7 @@ test('the reader picks up every field the writer can store, Laya included', () =
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, 'tuning.json'),
-      JSON.stringify({ layaPythonPath: 'python', layaWeightsEnvVar: 42, depth: 0 }),
+      JSON.stringify({ layaPythonPath: 'python', layaWeightsEnvVar: 42, depth: 0, provider: 'openai' }),
       'utf8',
     );
     return readTuningFile();
@@ -105,6 +110,7 @@ test('the reader picks up every field the writer can store, Laya included', () =
   assert.equal(partial.layaPythonPath, undefined, 'a bare token is not a path');
   assert.equal(partial.layaWeightsEnvVar, undefined, 'a number is not a variable name');
   assert.equal(partial.depth, undefined, 'and the numeric rules still hold');
+  assert.equal(partial.provider, undefined, 'and a provider no policy allows is dropped rather than guessed at');
 });
 
 test('the layout switch survives both wire formats, and a typo never flips a layout', () => {
@@ -231,6 +237,90 @@ test('an interpreter the panel stored reaches the live config, read back through
   const s1 = payload.s1 as { provider?: string; mode?: string; baseUrl?: string } | undefined;
   assert.equal(s1?.provider, 'laya-serve', 'the re-resolved provider is the one configured, not the demoted one');
   assert.notEqual(s1?.mode, 'none', 'and the session actually calls System-1 once the path is known');
+});
+
+test('switching the backend from the panel re-resolves the client, not just the config object', async () => {
+  // The mirror of the test above, for the radio. Writing `config.s1.provider` is the easy half and the wrong thing
+  // to assert: the save could set it and leave the session calling the client it was built with at activation —
+  // a radio that looks switched while the same backend keeps answering, or while none does. The assertion is
+  // therefore the provider `/s1` reports, which is read from the *resolved* backend, plus the conflict count that
+  // decided it.
+  const h = harness();
+  await withEmptyHomeAsync(async () => {
+    apply(h.ctx, { enabled: true, s1: { provider: 'jev', apiKey: 'sk-live-SWITCHED-0123456789' }, laya: layaIdle });
+
+    const read = () =>
+      JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
+        s1?: { provider?: string; configuredProvider?: string; mode?: string };
+        configIssues?: { conflicts?: string[] };
+        tuning?: { effective?: { provider?: string } };
+      };
+
+    // A profile that enables Laya while selecting the cloud backend is the demoted case: one conflict, no System-1
+    // calls, and a resolved provider of `none` rather than the configured `jev`.
+    const before = read();
+    assert.equal(before.s1?.provider, 'none', 'the conflicting profile starts demoted');
+    assert.equal(before.s1?.configuredProvider, 'jev', 'while the config still names the cloud backend');
+    assert.equal(before.configIssues?.conflicts?.length, 1);
+
+    // Exactly what the radio's Save sends, through the same parser the PUT route uses.
+    const saved = h.commands.get('s1-tune')?.({ rawInput: 'provider=laya-serve' });
+    assert.equal(commandKind(saved), 'success', commandText(saved));
+    assert.match(commandText(saved), /provider=laya-serve/, 'the answer names the backend it switched to');
+
+    const after = read();
+    assert.equal(after.s1?.configuredProvider, 'laya-serve');
+    assert.equal(
+      after.s1?.provider,
+      'laya-serve',
+      'the re-resolved provider is the one the radio sent, not the demoted one the client was built with',
+    );
+    assert.notEqual(after.s1?.mode, 'none', 'and the session calls the backend it just selected');
+    assert.deepEqual(after.configIssues?.conflicts, [], 'selecting the local backend resolves the conflict it was about');
+    assert.equal(after.tuning?.effective?.provider, 'laya-serve', 'and /s1 reports the value the save applied');
+
+    // Persisted, because the panel's only durable store is this file: a switch that lives in memory until the host
+    // exits is a radio the next start contradicts.
+    const file = JSON.parse(readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tuning.json'), 'utf8')) as {
+      provider?: string;
+    };
+    assert.equal(file.provider, 'laya-serve');
+
+    // An unknown provider is dropped before it reaches the host, so the running backend is left alone.
+    const refused = h.commands.get('s1-tune')?.({ rawInput: 'provider=openai' });
+    assert.equal(commandKind(refused), 'error', 'a provider no policy allows is refused, not clamped');
+    assert.equal(read().s1?.provider, 'laya-serve', 'and the session keeps the backend it had');
+  });
+});
+
+test('a stored provider is applied at activation and re-resolved, so a switch survives the restart', async () => {
+  // The read half of the same switch. `readTuningFile` dropping this field would be invisible from the panel: the
+  // radio would show the backend the user picked, the file would hold it, and the next start would come up on the
+  // profile's provider — the identical shape to the xFirst and Laya read-half gaps this suite already pins.
+  const h = harness();
+  await withEmptyHomeAsync(async () => {
+    const dir = join(process.env['DSH_HOME'] as string, '.s1cap');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'tuning.json'), JSON.stringify({ provider: 'laya-serve' }), 'utf8');
+
+    // The profile says the cloud backend; the panel's file says the local one. Laya is enabled but its interpreter
+    // arrives on the first step (the panel's Laya fields are read there, deliberately), so this asserts the
+    // *selection*, not a conflict-free session.
+    await apply(h.ctx, { enabled: true, s1: { provider: 'jev' }, laya: { ...layaIdle, pythonPath: '' } });
+
+    const status = JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
+      s1?: { provider?: string; configuredProvider?: string };
+      tuning?: { effective?: { provider?: string } };
+    };
+    assert.equal(status.s1?.configuredProvider, 'laya-serve', 'the stored provider is the selected one, not the profile');
+    assert.equal(status.tuning?.effective?.provider, 'laya-serve', 'and /s1 reports the same value the panel wrote');
+    // An override of the profile is said out loud, like every other tuning override of a cell: which backend
+    // answers is not a value that may change silently between two runs of an ablation.
+    assert.ok(
+      h.warns.some((w) => w.includes('provider jev -> laya-serve')),
+      `the override is reported, got: ${h.warns.join(' | ')}`,
+    );
+  });
 });
 
 test('defaults: C4 policy, provider jev, two distinct sinks, no conflicts', () => {
