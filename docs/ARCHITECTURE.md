@@ -76,7 +76,7 @@ agent's planning context-aware. It does that at exactly two points.
 |---|---|---|---|---|
 | Event intake / Segment | on | on | on | on |
 | S1 association + RG + recall | off | off | **on** | **on** |
-| ASSEMBLER (TAS layout) | off (chronological) | **on** | off (chronological) | **on** |
+| ASSEMBLER layout (`tas.on` + `xFirst`) | off / off (chronological) | **on / on** | off / off (chronological) | **on / on** |
 | S1 decision + PLAN GATE | off | off | **on** | **on** |
 | Telemetry | on | on | on | on |
 

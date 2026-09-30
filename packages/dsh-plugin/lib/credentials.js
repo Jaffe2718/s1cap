@@ -264,8 +264,8 @@ function unquote(value        )         {
  * the bounded anchor wait (an integer 0..60000, where 0 turns it off) and has no positional slot, for the reason
  * given on `parseTuning`.
  *
- * `provider=` selects the System-1 backend (`jev` or `laya-serve`; `laya` is accepted as the short spelling the
- * radio shows). It has no positional slot either: the first four tokens are the legacy `d r w xFirst` order an
+ * `provider=` selects the System-1 backend (`jev`, `laya-serve` or `none`; `laya` is accepted as the short spelling
+ * the radio shows). It has no positional slot either: the first four tokens are the legacy `d r w xFirst` order an
  * older write already used, and a provider name landing in one of those would be silently dropped anyway.
  */
 export function parseTuningArgs(input                    )         {

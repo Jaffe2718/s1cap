@@ -1362,7 +1362,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       return {
         ok: false,
         reason:
-          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, wait an integer 0..60000 (0 disables the anchor wait), xFirst on/off, provider=jev|laya-serve, or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
+          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, wait an integer 0..60000 (0 disables the anchor wait), xFirst on/off, provider=jev|laya-serve|none (none makes no System-1 calls), or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
       };
     }
     appliedTuning = { ...appliedTuning, ...parsed };
@@ -1432,9 +1432,9 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     {
       name: 's1-tune',
       description:
-        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), anchor wait in ms (0 disables), xFirst on/off — the backend (provider=jev|laya-serve) and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
+        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), anchor wait in ms (0 disables), xFirst on/off — the backend (provider=jev|laya-serve|none, where none turns System-1 off) and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
       input: {
-        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "wait=10000", "xFirst=off", "provider=laya-serve", or laya="D:/conda/envs/ml/python.exe")',
+        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "wait=10000", "xFirst=off", "provider=laya-serve", "provider=none", or laya="D:/conda/envs/ml/python.exe")',
       },
       handler: ({ rawInput }) => {
         const outcome = applyTuning(parseTuningArgs(rawInput));

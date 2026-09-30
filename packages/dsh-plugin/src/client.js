@@ -15,11 +15,11 @@
  *     Cordis throws on access to a namespace that was not injected).
  *
  * Three things live here:
- *   1. the backend choice: one radio over **Jev (cloud)** and **Laya (local)**, because the host enforces one
- *      System-1 backend at a time (`singleBackendIssues`). Only the selected backend's fields are live; the other
- *      set stays on screen but dimmed, so switching back does not lose what was typed. The choice is written as
- *      `provider=` on the same command line as everything else, and the panel re-reads it from the host after a
- *      save instead of trusting the form;
+ *   1. the backend choice: one radio over **Jev (cloud)**, **Laya (local)** and **Off** (`provider=none`), because
+ *      the host enforces one System-1 backend at a time (`singleBackendIssues`). Only the selected backend's fields
+ *      are live; the other sets stay on screen but dimmed, so switching back does not lose what was typed. The
+ *      choice is written as `provider=` on the same command line as everything else, and the panel re-reads it from
+ *      the host after a save instead of trusting the form;
  *   2. the Jev key, which belongs to the Jev half. It never passes through a command's raw input — that would put
  *      it in the session transcript — and the panel only ever shows whether a key exists, never its value;
  *   3. the recall tuning — **BFS depth d** (integer, d > 0), **relevance threshold r** (0 <= r <= 1), the
@@ -67,16 +67,21 @@ window.__ModuleLoader__.load({
     /** matches `resolvePluginConfig()`'s default `s1.provider`, so an unreachable host still shows a real backend */
     const DEFAULT_PROVIDER = 'jev';
     /**
-     * The two backends the radio offers, in the host's own spelling (`S1ProviderName` in `@s1cap/core`).
+     * The three choices the radio offers, in the host's own spelling (`S1ProviderName` in `@s1cap/core`).
      *
-     * Only these two: the policy allows more names (`edgejev`, `kev`, `none`), but a radio is a choice between
-     * the two backends this panel can configure — the cloud one and the local one — and offering a third entry
-     * whose fields live nowhere would be a button that cannot be made to work. The host accepts any name from its
-     * own list, so nothing here narrows what the command line can do.
+     * `none` is the third and it is not a backend: `resolveS1Backend` answers `{provider:'none', mode:'none'}`,
+     * `buildBackend` then constructs no client at all, and every System-1 call site answers `undefined` — which is
+     * the lexical fallback, not an error. It is offered here because the four-cell run (`docs/CELLS-RUN.md`) needs a
+     * session with System-1 off per cell, and until now the only way to get one was to hand-edit a profile.
+     *
+     * The policy allows more names (`edgejev`, `kev`), and they stay out: a radio is a choice between the backends
+     * this panel can configure, and an entry whose fields live nowhere would be a button that cannot be made to
+     * work. The host accepts any name from its own list, so nothing here narrows what the command line can do.
      */
     const PROVIDER_CHOICES = [
       { value: 'jev', label: 'Jev (cloud)' },
       { value: 'laya-serve', label: 'Laya (local)' },
+      { value: 'none', label: 'Off' },
     ];
 
     const name = 'dsh-s1cap';
@@ -122,7 +127,7 @@ window.__ModuleLoader__.load({
       note: { margin: 0, fontSize: '12px', opacity: 0.75 },
     };
 
-    /** The panel: the backend radio with its two field sets, the recall knobs, and the layout switch. */
+    /** The panel: the backend radio with its three blocks, the recall knobs, and the layout switch. */
     function makeSection(ctx) {
       return function S1CapSection() {
         const [state, setState] = React.useState({ phase: 'loading', configured: false, message: '' });
@@ -487,9 +492,9 @@ window.__ModuleLoader__.load({
         /**
          * The Jev half: its key status, the key itself, and the two key buttons.
          *
-         * Kept mounted while Laya is selected — dimmed, not deleted — so a key half-typed before switching away is
-         * still there on the way back. The status dot belongs to this half and not to the panel: "no key stored"
-         * says nothing about a run that is using the local backend.
+         * Kept mounted while another choice is selected — dimmed, not deleted — so a key half-typed before switching
+         * away is still there on the way back. The status dot belongs to this half and not to the panel: "no key
+         * stored" says nothing about a run that is using the local backend or no backend at all.
          */
         const jevGroup = e(
           'div',
@@ -597,6 +602,32 @@ window.__ModuleLoader__.load({
           ),
         );
 
+        /**
+         * The Off choice's own block — the only one with no fields, and the only one whose meaning cannot be read
+         * off its label.
+         *
+         * The text is load-bearing rather than decorative. A researcher who reads "Off" as "the C1 baseline" then
+         * measures something other than what they think: recall selection is decided by the cell preset
+         * (`cellPolicy`), not by this radio, and C1/C2 are the cells that switch it off (`recall.tier1 = 'off'`,
+         * which leaves the recalled block empty). Off inside a C3/C4 profile leaves recall selecting — from lexical
+         * edges, because with no client there is no System-1 judgement to score them with.
+         */
+        const offGroup = e(
+          'div',
+          { style: S.group(provider === 'none') },
+          e(
+            'p',
+            { style: S.note },
+            'Off writes provider=none: no System-1 judgement happens at all, so relevance scoring falls back to the ' +
+              'lexical scorer (shared tokens over the two segments) and the association graph keeps growing on ' +
+              'lexical edges only. It does not turn recall selection off — which blocks recall may select is the ' +
+              'cell preset\u2019s decision (`cellPolicy` in @s1cap/core), and C1/C2 are the cells that disable it ' +
+              '(`recall.tier1 = \'off\'`, so their recalled block is empty). Off inside a C3/C4 profile is therefore ' +
+              '"no System-1, recall still selecting", which is not a cell: Off means no System-1, not C1. Both save ' +
+              'buttons carry the selection.',
+          ),
+        );
+
         return e(
           'div',
           { style: S.wrap },
@@ -605,27 +636,31 @@ window.__ModuleLoader__.load({
             'p',
             { style: S.intro },
             'S1CAP puts a cheap System-1 decision model in charge of which context the agent sees and in which ' +
-              'order its own plans run. This panel holds the choice of System-1 backend, the credential the cloud ' +
-              'one needs, the recall knobs the ablation varies, and the layout switch.',
+              'order its own plans run. This panel holds the choice of System-1 backend (or Off, which makes no ' +
+              'System-1 calls at all), the credential the cloud one needs, the recall knobs the ablation varies, ' +
+              'and the layout switch.',
           ),
           // Backend first: it is the choice everything below it is answered by, and the host allows exactly one of
-          // the two. The fields of the selected backend sit directly under its radio; the other set stays on
-          // screen, dimmed, so switching back does not lose what was typed.
+          // the three. The fields of the selected backend sit directly under its radio; the other sets stay on
+          // screen, dimmed, so switching back does not lose what was typed. Off has no fields and carries the text
+          // that says what it does and does not do.
           e('h3', { style: S.subtitle }, 'System-1 backend'),
           e(
             'p',
             { style: S.note },
             'Exactly one backend is active at a time: the host refuses a session that names two and demotes it to ' +
-              'no System-1 calls at all, so this is one choice and not two switches. Saving writes the selection as ' +
-              'provider= on the same command line the knobs use, and the radio is then re-read from the host rather ' +
-              'than from this form.',
+              'no System-1 calls at all, so this is one choice and not two switches. Off is the third choice and it ' +
+              'writes provider=none rather than naming a backend. Saving writes the selection as provider= on the ' +
+              'same command line the knobs use, and the radio is then re-read from the host rather than from this ' +
+              'form.',
           ),
           ...PROVIDER_CHOICES.map(providerRadio),
           jevGroup,
           layaGroup,
+          offGroup,
           // A conflict is shown here rather than only logged, because it is the difference between "this field is
           // empty" and "this field is empty and that is why the session is making no System-1 calls". It sits
-          // outside the two dimmed field sets on purpose: it is about the session, not about one backend's fields.
+          // outside the dimmed backend blocks on purpose: it is about the session, not about one backend's fields.
           ...(layaStatus.conflicts.length > 0
             ? [e('p', { style: S.note }, 'Conflict: ' + layaStatus.conflicts.join('; '))]
             : []),

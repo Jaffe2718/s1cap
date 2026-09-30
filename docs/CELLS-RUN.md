@@ -27,12 +27,16 @@ here.
 Presets live in `bench/cells/`; `cellPolicy(cell)` in `packages/core/src/types.ts` derives C1–C4 from toggles,
 with `termination: model-owned` and `rgMaintenance.mode: async` fixed in every cell.
 
-| Cell | TAS ordering | S1 governance | Role |
+| Cell | `tas.on` / `xFirst` | S1 governance | Role |
 | --- | --- | --- | --- |
-| C1 | off | off | baseline: the harness manages history natively |
-| C2 | on | off | the TAS half alone |
-| C3 | off | on | the S1 half alone |
-| C4 | on | on | the project's own configuration |
+| C1 | off / off | off | baseline: the harness manages history natively |
+| C2 | on / on | off | the TAS half alone |
+| C3 | off / off | on | the S1 half alone |
+| C4 | on / on | on | the project's own configuration |
+
+Two switches, not one: `tas.on` is whether the state proxy T exists at all, `xFirst` is whether the current task x
+sits before or after the recalled block, and `cellPolicy()` moves them together here (both off for C1/C3, both on for
+C2/C4) — which is why one column carries both.
 
 ## Setup
 
@@ -76,7 +80,12 @@ received no System-1 judgements is not a cell that measured S1 governance.
 | S1 calls / duration | `s1_call` records in the control JSONL (`ms` summed, plus the ok/failed split and distinct error strings) |
 | cache hit rate | hit ÷ (hit + miss), reported **against C1** |
 
-C1 and C2 have no S1: their S1 columns are **0**, not blank — a blank reads as "not measured".
+**Correction, established after this document was first written: C1 and C2 are *not* S1-free.** Upkeep graph
+scoring is not gated on `recall.tier1`, so `tier1: 'off'` disables the recall *selection* and leaves the
+association scoring running. With a live provider, C1 and C2 still emit `s1_call` records. Only `provider=none`
+gives a genuinely zero-S1 cell — which is why the panel gained an **Off** choice. So: measure the S1 columns for
+all four cells from the data, never fill them with 0 by assumption, and put C1/C2's S1 counts on their own line
+in any report. A reader who takes C1 for a no-S1 baseline will misread the entire table.
 
 Read JSONL with `node`, not PowerShell (which mangles UTF-8). Counts, timings and paths belong in a report;
 session content does not.

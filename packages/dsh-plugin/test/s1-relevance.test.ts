@@ -91,6 +91,30 @@ test('a failed call yields undefined rather than a row of zeros', async () => {
   assert.ok(warnings.some((w) => w.includes('falling back')), 'and reported in words');
 });
 
+test('a missing client yields no weights and is a state, not a failure', async () => {
+  // This is the delegate the plugin installs when the backend resolves to `none`: `index.ts` answers `undefined`
+  // from `decide` *before* it reaches for the client (`if (client === undefined) return undefined`), so a session
+  // switched Off spends nothing and scores every window lexically. It has to be distinguishable from a backend
+  // that was asked and did not answer: an Off session must not report failed calls or retries, or a researcher
+  // reading the counters would conclude the backend was broken rather than switched off.
+  const warnings: string[] = [];
+  const relevance = createS1Relevance({ decide: async () => undefined, onWarn: (message) => warnings.push(message) });
+
+  assert.equal(await relevance(current, candidates), undefined, 'no weights, so the caller scores lexically');
+  const stats = relevance.stats();
+  assert.equal(stats.calls, 0, 'nothing was called, so no call is counted');
+  assert.equal(stats.failures, 0, 'and no failure is invented for a backend that was never configured');
+  assert.equal(stats.retries, 0, 'there is no endpoint to ask again');
+  assert.equal(stats.gaveUpAfterRetries, 0);
+  assert.equal(stats.timedOut, 0);
+  assert.equal(stats.answeredQuestions, 0);
+
+  // Reported once per session rather than once per segment: "no backend" is a mode, and a mode repeated for every
+  // window of a long run is noise that hides the one line that says why nothing was scored.
+  await relevance(current, candidates);
+  assert.equal(warnings.filter((w) => w.includes('no System-1 client')).length, 1, `got: ${warnings.join(' | ')}`);
+});
+
 test('an unreadable answer also yields undefined, so a partial batch is never mistaken for a full one', async () => {
   const relevance = createS1Relevance({
     decide: async () => ({

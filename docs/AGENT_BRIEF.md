@@ -288,6 +288,7 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 ```
 
 - Factor TAS off (cells C1/C3): `[pinned | (selected or full) history chronological | x]`, no T block.
+- **T and the position of x are two switches, not one**: `tas.on` is whether the T block exists at all and `xFirst` is whether x sits before or after the recalled block, so the diagram above is paper T's arrangement (state first, question last) rather than the only TAS-on order — cells C2/C4 carry `xFirst` on, which places x before the recalled block (`[pinned | T | x | recalled | tail]`).
 - **Fallback:** if recalled mass < `minRecalledShare` (25%), degrade to chronological last-N window; log event.
 - **Cache-awareness:** the pinned prefix is never reordered; T grows append-only; `updatePolicy: perTask` keeps T byte-stable within a task so the cache invalidation of `[T | recalled | tail | x]` happens at task boundaries, not per turn. The residual cache penalty is *measured*, not assumed (H3).
 - **DSH realization:** model-only rewrite via `surfaceOp {op:'replace'}` — the user-facing transcript is never touched. Non-DSH: the proxy rewrites the messages array before forwarding.
@@ -375,12 +376,16 @@ Report **cache-hit rate before/after each assembly change** per call — the TAS
 
 ### 9.1 Design — 2×2 within-task paired factorial
 
-| Cell | TAS ordering (factor A) | S1 governance (factor B: selection + plan gate) |
+| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: selection + plan gate) |
 |---|---|---|
-| C1 baseline | off (chronological) | off (native compaction only) |
-| C2 | **on** (`[pinned|T|history|x]`) | off |
-| C3 | off (chronological, selected blocks) | **on** |
-| C4 full | **on** | **on** |
+| C1 baseline | off / off (chronological, x last) | off (native compaction only) |
+| C2 | **on / on** (`[pinned\|T\|x\|history]`) | off |
+| C3 | off / off (chronological, selected blocks, x last) | **on** |
+| C4 full | **on / on** | **on** |
+
+`tas.on` and `xFirst` are independent switches that the presets here move together — `tas.on` is whether the state
+proxy T exists at all (the trace-as-state mechanism of paper T), `xFirst` is whether the current task x sits before
+or after the recalled block — so factor A is a pair of switches and not one, and TAS is not x-first.
 
 Same tasks, same model, temperature 0 (main), same harness version, same tool allowlist, randomized run order. Paired n per cell per benchmark: SWE-bench Verified 100 (stratified subset of the 500), Terminal-Bench 4.0 all 66, tau2-bench full `base` split (`[VERIFY]` exact count at M0; ~280 expected).
 

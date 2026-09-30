@@ -293,6 +293,57 @@ test('switching the backend from the panel re-resolves the client, not just the 
   });
 });
 
+test('switching the backend off from the panel leaves the session with no client at all', async () => {
+  // The mirror of the test above, for the Off choice. `provider=none` could always be written by hand, so the
+  // parser accepting it proves nothing about the thing that matters: whether the running session *loses its
+  // client*. A save that set `config.s1.provider = 'none'` and kept the client built at activation would report
+  // `mode: none` while the same cloud backend kept answering every relevance window — the exact shape of the
+  // Laya gap this suite already pins twice (a value that is written, echoed, and never applied).
+  const h = harness();
+  await withEmptyHomeAsync(async () => {
+    apply(h.ctx, { enabled: true, s1: { provider: 'jev', apiKey: 'sk-live-SWITCHEDOFF-0123456789' }, laya: { enabled: false } });
+
+    const read = () =>
+      JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
+        s1?: { provider?: string; configuredProvider?: string; mode?: string; baseUrl?: string; key?: string };
+        tuning?: { effective?: { provider?: string } };
+      };
+
+    const before = read();
+    assert.equal(before.s1?.provider, 'jev', 'the profile starts on the cloud backend');
+    assert.equal(before.s1?.mode, 'cloud');
+    assert.equal(before.s1?.baseUrl, 'https://api.typesafe.ai');
+
+    // Exactly what the Off radio's Save sends, through the same parser the PUT route uses.
+    const saved = h.commands.get('s1-tune')?.({ rawInput: 'provider=none' });
+    assert.equal(commandKind(saved), 'success', commandText(saved));
+    assert.match(commandText(saved), /provider=none/, 'the answer names the state it switched to');
+
+    const after = read();
+    assert.equal(after.s1?.configuredProvider, 'none', 'the config asks for no backend');
+    assert.equal(after.s1?.provider, 'none', 'and the session resolved to no backend, not to the demoted cloud one');
+    assert.equal(after.s1?.mode, 'none');
+    assert.equal(after.s1?.baseUrl, undefined, 'no endpoint is resolved, so there is no client to build from one');
+    assert.equal(after.s1?.key, '(none)', 'and no credential is carried into a session that makes no calls');
+    assert.equal(after.tuning?.effective?.provider, 'none', 'and /s1 reports the value the save applied');
+
+    // The client itself, not a string about it: `s1-ping` is the one command that reaches for the live `client`
+    // and errors when there is none. That variable is the same one `relevance`'s delegate reads, so "no client"
+    // here is "the relevance path answers no weights" there (a missing client is `undefined` from the delegate,
+    // which the scorer reads as "score lexically" rather than as an empty answer).
+    const ping = await h.commands.get('s1-ping')?.({});
+    assert.equal(commandKind(ping), 'error', 'there is no client to probe');
+    assert.match(commandText(ping), /no System-1 backend is active/);
+
+    // Persisted, because the panel's only durable store is this file: a switch that lives in memory until the host
+    // exits is an Off that the next start contradicts — and the four-cell run restarts between cells.
+    const file = JSON.parse(readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tuning.json'), 'utf8')) as {
+      provider?: string;
+    };
+    assert.equal(file.provider, 'none');
+  });
+});
+
 test('a stored provider is applied at activation and re-resolved, so a switch survives the restart', async () => {
   // The read half of the same switch. `readTuningFile` dropping this field would be invisible from the panel: the
   // radio would show the backend the user picked, the file would hold it, and the next start would come up on the

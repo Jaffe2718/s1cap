@@ -2,12 +2,17 @@
 
 Cell presets live in `cells/`; runners land with M2 (`docs/AGENT_BRIEF.md` §9).
 
-| Cell | TAS ordering | S1 governance (selection + plan gate) |
+| Cell | `tas.on` + `xFirst` | S1 governance (selection + plan gate) |
 |---|---|---|
-| C1 baseline | off | off (native compaction only) |
-| C2 | **on** | off |
-| C3 | off | **on** |
-| C4 full | **on** | **on** |
+| C1 baseline | off / off | off (native compaction only) |
+| C2 | **on / on** | off |
+| C3 | off / off | **on** |
+| C4 full | **on / on** | **on** |
+
+`tas.on` and `xFirst` are independent switches that this table's presets happen to move together — `tas.on` decides
+whether the state proxy T exists at all (the trace-as-state mechanism from paper T), while `xFirst` decides whether
+the current task x sits before or after the recalled block — so one column records both here, and neither name alone
+tells you where x goes.
 
 Benchmarks (all automated scoring): SWE-bench Verified (100/cell), Terminal-Bench 4.0 (66/cell),
 τ²-bench (full base split). Model `deepseek-flash`, temperature 0.
