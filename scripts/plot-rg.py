@@ -1,17 +1,23 @@
 #!/usr/bin/env python
 """
-Draw one session's association graph.
+Draw one session's association graph as a connectivity matrix.
 
-The graph is small in the only unit that matters here - `recall.window = w` counts **segments**, not tokens, so a
-session of a few hundred segments is a few hundred nodes - which means the whole thing can be looked at instead of
-inferred from counters. That is the point of this script: the counters said `scoredPairs: 18528` while the block
-was being filled from the recency window, and only a picture of which nodes carry edges shows why.
+The graph is small in the unit that matters - `recall.window = w` counts **segments**, not tokens, so a session
+is a few hundred nodes - which means the whole thing can be looked at instead of inferred from counters. The
+matrix is the right shape for the question that matters: *which segment is connected to which*, and in
+particular whether the connections have structure or are a constant pointing at one part of the session.
 
-Three facts are drawn together because they are the same fact at different resolutions:
+Both axes are the graph's append order, so an edge between segment i and segment j is a dot at (i, j) and
+(i, j) mirrored. Because a segment can only be scored against segments that came before it, every edge lies in
+the upper triangle: a band that runs parallel to the diagonal means local, recent connection, and a band that
+runs straight up from one early position means every later segment was measured against that same early part
+of the session no matter what it said. Those two patterns look nothing alike here, which is why this is drawn
+as a matrix and not as a graph layout.
 
-  * which segment kinds exist, and where in the append order they sit (top panel);
-  * which edges came from the System-1 backend and which from the lexical fallback (top panel, colour);
-  * which segments have no edges at all (bottom panel, and hollow markers above).
+Colour is who produced the edge: the System-1 backend or the lexical fallback. The kind of each segment is
+shown as a strip along both axes, and the BFS anchors - the last user segment of each turn, which is where
+recall starts - are drawn as red lines when they have no edges at all, because a BFS from an isolated node can
+never return a candidate.
 
 Usage:
   python scripts/plot-rg.py <snapshot.json> [out.png]
@@ -25,7 +31,9 @@ from collections import Counter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 KIND_ORDER = ["systemPinned", "user", "assistant", "trace", "toolCall", "toolResult"]
 KIND_COLOUR = {
@@ -36,129 +44,132 @@ KIND_COLOUR = {
     "toolCall": "#ff7f0e",
     "toolResult": "#8c564b",
 }
-S1_COLOUR = "#d62728"
-LEXICAL_COLOUR = "#bbbbbb"
+S1_RGB = np.array([0.84, 0.15, 0.16])      # red: scored by the System-1 backend
+LEX_RGB = np.array([0.55, 0.55, 0.55])     # grey: the lexical fallback
 
 
-def load(path):
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
+def hex_to_rgb(value):
+    value = value.lstrip("#")
+    return np.array([int(value[i:i + 2], 16) / 255 for i in (0, 2, 4)])
 
 
 def main():
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
     path = sys.argv[1]
-    out = sys.argv[2] if len(sys.argv) > 2 else "rg.png"
-    snap = load(path)
+    out = sys.argv[2] if len(sys.argv) > 2 else "rg-matrix.png"
+    with open(path, encoding="utf-8") as handle:
+        snap = json.load(handle)
 
     order = snap["order"]
     segments = {s["id"]: s for s in snap["segments"]}
     edges = snap.get("edges", [])
+    n = len(order)
+    position = {sid: i for i, sid in enumerate(order)}
+    kind_of = [(segments.get(sid) or {}).get("kind", "trace") for sid in order]
 
-    # Position in the append order is the x axis; the kind is the lane. Both are facts about the session, not a
-    # layout choice, so nothing is hidden by where a node lands.
-    lanes = {kind: i for i, kind in enumerate(KIND_ORDER)}
-    pos = {}
-    for i, sid in enumerate(order):
-        seg = segments.get(sid)
-        kind = seg["kind"] if seg else "trace"
-        pos[sid] = (i, lanes.get(kind, len(KIND_ORDER)))
+    # Two passes so the System-1 edges win where a pair carries both: the lexical pass is drawn first and is
+    # almost always the one that would otherwise hide the measurement.
+    canvas = np.ones((n, n, 3))
+    for e in edges:
+        if e.get("source") == "s1-noul":
+            continue
+        i, j = position.get(e["from"]), position.get(e["to"])
+        if i is None or j is None:
+            continue
+        w = float(e.get("w") or 0.0)
+        shade = LEX_RGB * (1.0 - 0.45 * max(0.0, min(1.0, w)))
+        canvas[i, j] = shade
+        canvas[j, i] = shade
+    for e in edges:
+        if e.get("source") != "s1-noul":
+            continue
+        i, j = position.get(e["from"]), position.get(e["to"])
+        if i is None or j is None:
+            continue
+        w = float(e.get("w") or 0.0)
+        canvas[i, j] = S1_RGB * (1.0 - 0.35 * max(0.0, min(1.0, w)))
+        canvas[j, i] = canvas[i, j]
 
     degree = Counter()
     for e in edges:
         degree[e["from"]] += 1
         degree[e["to"]] += 1
+    users = [i for i, k in enumerate(kind_of) if k == "user"]
+    dead_anchors = [i for i in users if degree[order[i]] == 0]
 
-    fig, (ax, ax2) = plt.subplots(
-        2, 1, figsize=(16, 9), height_ratios=[3, 1], constrained_layout=True
-    )
+    fig = plt.figure(figsize=(15, 11))
+    # The strip owns the title: putting it on the matrix put the first line underneath the strip, which is how a
+    # picture whose whole point is three numbers ends up showing none of them.
+    ax = fig.add_axes([0.09, 0.07, 0.66, 0.70])
+    ax_top = fig.add_axes([0.09, 0.79, 0.66, 0.015])
+    ax_left = fig.add_axes([0.065, 0.07, 0.015, 0.70])
 
-    # --- edges first, so nodes sit on top of them ---
-    drawn_s1 = drawn_lex = 0
-    for e in edges:
-        a, b = pos.get(e["from"]), pos.get(e["to"])
-        if a is None or b is None:
-            continue
-        is_s1 = e.get("source") == "s1-noul"
-        ax.plot(
-            [a[0], b[0]], [a[1], b[1]],
-            color=S1_COLOUR if is_s1 else LEXICAL_COLOUR,
-            lw=0.9 if is_s1 else 0.4,
-            alpha=0.35 if is_s1 else 0.10,
-            zorder=1,
-        )
-        drawn_s1 += is_s1
-        drawn_lex += not is_s1
-
-    # --- nodes ---
-    for sid, (x, y) in pos.items():
-        seg = segments.get(sid) or {}
-        kind = seg.get("kind", "trace")
-        colour = KIND_COLOUR.get(kind, "#333333")
-        isolated = degree[sid] == 0
-        ax.scatter(
-            [x], [y],
-            s=max(12, min(220, (seg.get("tokens") or 1) * 0.35)),
-            facecolors="none" if isolated else colour,
-            edgecolors="black" if isolated else colour,
-            linewidths=1.1 if isolated else 0.0,
-            alpha=0.95,
-            zorder=3,
+    ax.imshow(canvas, interpolation="nearest", origin="upper", extent=(-0.5, n - 0.5, n - 0.5, -0.5))
+    ax.set_xlabel("segment index in the append order  (newer ->)")
+    ax.set_ylabel("segment index in the append order  (newer ->)")
+    # Every twentieth index, because the batch cap that decides which candidates are actually asked is twenty.
+    for tick in range(0, n, 20):
+        ax.axhline(tick, color="black", lw=0.3, alpha=0.25)
+        ax.axvline(tick, color="black", lw=0.3, alpha=0.25)
+    for i in dead_anchors:
+        ax.axhline(i, color="red", lw=1.1, alpha=0.9)
+        ax.axvline(i, color="red", lw=1.1, alpha=0.9)
+        ax.annotate(
+            f"  anchor {i}: 0 edges",
+            (n - 0.5, i), xytext=(-4, 4), textcoords="offset points",
+            ha="right", va="bottom", fontsize=8, color="red",
         )
 
-    # --- the BFS anchors: recall starts from the last user segment ---
-    users = [sid for sid in order if (segments.get(sid) or {}).get("kind") == "user"]
-    for sid in users:
-        x, y = pos[sid]
-        ax.scatter([x], [y], s=260, facecolors="none", edgecolors="black", linewidths=1.4, zorder=4)
-        if degree[sid] == 0:
-            ax.scatter([x], [y], s=520, facecolors="none", edgecolors="red", linewidths=1.8, zorder=5)
-            ax.annotate(
-                f"anchor with 0 edges\n(BFS starts here -> 0 candidates)",
-                (x, y), textcoords="offset points", xytext=(0, -34),
-                ha="center", fontsize=8, color="red",
-            )
-
-    ax.set_yticks(range(len(KIND_ORDER)))
-    ax.set_yticklabels(KIND_ORDER)
-    ax.set_xlabel("position in the graph's append order  (one point per context segment)")
-    ax.set_title(
-        f"association graph  -  {len(order)} segments, {len(edges)} edges  "
-        f"({drawn_s1} from System-1, {drawn_lex} lexical)   "
-        f"scoring cursor at {snap.get('scored')}, scoredPairs {snap.get('scoredPairs')}"
+    strip = np.array([hex_to_rgb(KIND_COLOUR.get(k, "#333333")) for k in kind_of]).reshape(1, n, 3)
+    ax_top.imshow(strip, aspect="auto", interpolation="nearest", extent=(-0.5, n - 0.5, 0, 1))
+    ax_top.set_axis_off()
+    ax_top.set_title(
+        f"connectivity matrix  -  {n} segments, {len(edges)} edges "
+        f"({sum(1 for e in edges if e.get('source') == 's1-noul')} System-1, "
+        f"{sum(1 for e in edges if e.get('source') != 's1-noul')} lexical)  -  "
+        f"cursor {snap.get('scored')}, scoredPairs {snap.get('scoredPairs')}\n"
+        f"both axes are the append order; every edge sits above the diagonal, because a segment is scored "
+        f"only against earlier ones\n"
+        f"a band parallel to the diagonal is local connection; a band running straight up from one early index "
+        f"is every later segment measured against that same part",
+        fontsize=9, pad=8,
     )
-    ax.grid(axis="x", alpha=0.15)
-    ax.legend(
-        handles=[
-            Line2D([], [], color=S1_COLOUR, lw=2, label="edge scored by the System-1 backend (s1-noul)"),
-            Line2D([], [], color=LEXICAL_COLOUR, lw=2, label="edge from the lexical fallback"),
-            Line2D([], [], marker="o", color="w", markerfacecolor="#1f77b4", markersize=8, label="segment (colour = kind, size = tokens)"),
-            Line2D([], [], marker="o", color="w", markerfacecolor="none", markeredgecolor="black", markersize=8, label="segment with no edges"),
-            Line2D([], [], marker="o", color="w", markerfacecolor="none", markeredgecolor="red", markersize=11, label="BFS anchor with no edges"),
-        ],
-        loc="upper left", fontsize=8, framealpha=0.9,
-    )
+    ax_left.imshow(strip.reshape(n, 1, 3), aspect="auto", interpolation="nearest", extent=(0, 1, n - 0.5, -0.5))
+    ax_left.set_axis_off()
 
-    # --- degree against position: the picture behind "later anchors are isolated" ---
-    xs = [pos[sid][0] for sid in order]
-    degs = [degree[sid] for sid in order]
-    ax2.scatter(xs, degs, s=14, color="#1f77b4", alpha=0.7)
-    ax2.axhline(0, color="red", lw=0.8)
-    ax2.set_xlabel("position in the append order")
-    ax2.set_ylabel("edges at the segment")
-    ax2.set_title("how connected each segment is - zero means BFS from it can never return a candidate", fontsize=9)
-    ax2.grid(alpha=0.2)
+    legend = [
+        Line2D([], [], color=S1_RGB, lw=4, label="edge scored by the System-1 backend (s1-noul)"),
+        Line2D([], [], color=LEX_RGB, lw=4, label="edge from the lexical fallback"),
+        Line2D([], [], color="red", lw=1.4, label=f"BFS anchor with no edges ({len(dead_anchors)} of {len(users)} user segments)"),
+    ] + [
+        Patch(facecolor=KIND_COLOUR[k], label=k) for k in KIND_ORDER if k in set(kind_of)
+    ]
+    ax.legend(handles=legend, loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8, framealpha=0.95)
 
-    fig.savefig(out, dpi=140)
+    fig.savefig(out, dpi=150)
     print(f"wrote {out}")
 
-    kinds = Counter((segments.get(sid) or {}).get("kind", "?") for sid in order)
-    zero = Counter((segments.get(sid) or {}).get("kind", "?") for sid in order if degree[sid] == 0)
-    print("segments by kind    :", dict(kinds))
-    print("zero-edge by kind   :", dict(zero))
-    print("edges by source     :", dict(Counter(e.get("source") for e in edges)))
-    print("BFS anchors (user)  :", [(sid[:8], degree[sid]) for sid in users])
+    # The numbers behind the picture, including the one the picture is for: how far back the System-1 edges
+    # reach. A median in the hundreds while the recent end is covered only by lexical edges is the signature of
+    # a batch that covers the wrong end of the window.
+    s1_dist = sorted(
+        abs(position[e["from"]] - position[e["to"]]) for e in edges if e.get("source") == "s1-noul"
+    )
+    lex_dist = sorted(
+        abs(position[e["from"]] - position[e["to"]]) for e in edges if e.get("source") != "s1-noul"
+    )
+    print("segments by kind  :", dict(Counter(kind_of)))
+    print("zero-edge by kind :", dict(Counter(k for k, sid in zip(kind_of, order) if degree[sid] == 0)))
+    print("edges by source   :", dict(Counter(e.get("source") for e in edges)))
+    print("user anchors      :", [(i, degree[order[i]]) for i in users])
+    for name, dist in (("s1-noul", s1_dist), ("lexical", lex_dist)):
+        if dist:
+            print(
+                f"{name:>8} distance back: min={dist[0]} median={dist[len(dist) // 2]} max={dist[-1]} "
+                f"<=20: {sum(1 for d in dist if d <= 20)}  >100: {sum(1 for d in dist if d > 100)}"
+            )
+    print("fill ratio        :", f"{len(edges) / (n * (n - 1) / 2):.4f} of the upper triangle")
 
 
 if __name__ == "__main__":
