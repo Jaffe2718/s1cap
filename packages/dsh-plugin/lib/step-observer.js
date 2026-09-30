@@ -11,110 +11,110 @@
  * events go into a bounded queue and are folded into the graph on a later tick.
  */
 import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
-import type { AssemblyPolicy, TelemetryEvent, UpkeepQueueStats } from '@s1cap/core';
+                                                                                    
 
-export interface StepObserverOptions {
-  policy: AssemblyPolicy;
-  emit(event: TelemetryEvent): void;
-  now(): number;
-  /** model context window in tokens (harness token meter when available, else the configured default) */
-  contextWindow: number;
-  reserveOutputTokens: number;
-  fixedOverheadTokens: number;
-  lambdaMs: number;
-  /** how far the graph may lag the session, in turns (policy: rgMaintenance.maxLagTurns) */
-  maxLagTurns?: number;
-  /**
-   * One S1 call per new segment, scoring the whole window at once. Present only when a backend is configured;
-   * its absence is what falls the graph back to lexical scoring, so observation mode stays free and offline.
-   */
-  scoreBatch?: (
-    current: Segment,
-    candidates: readonly Segment[],
-  ) => readonly number[] | Promise<readonly number[]>;
-  /**
-   * The advisory plan gate. Optional, and its return value is only recorded: the observer has no way to feed an
-   * order back into the prompt, which is the property that makes "never vetoes stop" true by construction.
-   */
-  planGate?: {
-    consider(text: string, sessionId: string, step: number): Promise<unknown>;
-  };
-  sessionId?: string;
-  onWarn?(message: string): void;
-  onObserved?(summary: string): void;
-  /** diagnostic sink; the plugin writes it to the tape file */
-  onProbe?(line: Record<string, unknown>): void;
-  /** M1 N3: record one tape line per call (opt-in; a tape contains session content) */
-  onTape?(step: number, messages: readonly unknown[], systemPrompt: string | undefined): void;
-  /** schedule one deferred upkeep tick; injected so tests can drive it by hand */
-  schedule?(tick: () => void): void;
-}
+                                      
+                         
+                                    
+                
+                                                                                                         
+                        
+                              
+                              
+                   
+                                                                                            
+                       
+     
+                                                                                                              
+                                                                                                             
+     
+                
+                     
+                                   
+                                                      
+     
+                                                                                                                
+                                                                                                           
+     
+              
+                                                                              
+    
+                     
+                                 
+                                     
+                                                               
+                                                
+                                                                                       
+                                                                                              
+                                                                                  
+                                    
+ 
 
-export interface StepObserverStats {
-  /** pre-step calls seen */
-  steps: number;
-  /** calls that produced a record */
-  observed: number;
-  /** calls skipped because the payload carried no message list */
-  skipped: number;
-  /** calls whose messages produced no segment, so there was nothing to assemble (see EmptyStepObservation) */
-  empty: number;
-  /** session events that carried conversation content and were folded into the graph */
-  upkeepEvents: number;
-  /** session events that carried no conversation (lifecycle notices) */
-  upkeepEmpty: number;
-  /** segments produced by upkeep, which is where the live history actually comes from */
-  upkeepSegments: number;
-  /** pairs scored by upkeep, across every new session segment */
-  upkeepScoredPairs: number;
-  /** observation failures (reported, never thrown) */
-  errors: number;
-  /** tokens the full history would have sent that the selected view did not */
-  lastWouldSaveTokens: number;
-  lastSelected: number;
-  lastCandidates: number;
-  lastSegments: number;
-  lastObserveMs: number;
-  sessionId: string;
-  /** tokens of the rendered system prompt currently pinned (0 while none has been seen) */
-  systemPromptTokens: number;
-  /** diagnostic lines emitted (probe mode) */
-  probes: number;
-  unknownPartTypes: string[];
-  unknownRoles: string[];
-  graphSegments: number;
-  graphEdges: number;
-  upkeep: UpkeepQueueStats;
-}
+                                    
+                            
+                
+                                     
+                   
+                                                                  
+                  
+                                                                                                              
+                
+                                                                                        
+                       
+                                                                        
+                      
+                                                                                         
+                         
+                                                                 
+                            
+                                                      
+                 
+                                                                               
+                              
+                       
+                         
+                       
+                        
+                    
+                                                                                           
+                             
+                                              
+                 
+                             
+                         
+                        
+                     
+                           
+ 
 
-export interface StepObserver {
-  /**
-   * `agent/pre-step`: observe one LLM call, change nothing.
-   *
-   * Returns a promise because scoring a new segment may be one System-1 call. The caller in `index.ts` awaits
-   * it inside its own try/catch, so a rejected scorer still costs the record and never the step.
-   */
-  observe(payload: unknown): Promise<void>;
-  /** `session/event`: capture the system prompt and queue the event for asynchronous upkeep */
-  noteSessionEvent(event: unknown): void;
-  /** N1: the rendered system prompt, read from the harness registry (see system-prompt.ts) */
-  setSystemPrompt(text: string, tokens?: number): void;
-  /** one bounded diagnostic line (written to the tape), used to read harness shapes we do not know yet */
-  probe(line: Record<string, unknown>): void;
-  /** drain deferred upkeep now (tests, shutdown) */
-  flushUpkeep(): number;
-  stats(): StepObserverStats;
-}
+                               
+     
+                                                            
+    
+                                                                                                              
+                                                                                                 
+     
+                                           
+                                                                                               
+                                         
+                                                                                              
+                                                       
+                                                                                                          
+                                             
+                                                    
+                        
+                             
+ 
 
-function readMessages(payload: unknown): readonly unknown[] | undefined {
+function readMessages(payload         )                                 {
   if (typeof payload !== 'object' || payload === null) return undefined;
-  const messages = (payload as { messages?: unknown }).messages;
+  const messages = (payload                          ).messages;
   return Array.isArray(messages) ? messages : undefined;
 }
 
-function readStep(payload: unknown): number {
+function readStep(payload         )         {
   if (typeof payload !== 'object' || payload === null) return 0;
-  const step = (payload as { step?: unknown }).step;
+  const step = (payload                      ).step;
   return typeof step === 'number' && Number.isFinite(step) ? step : 0;
 }
 
@@ -122,33 +122,33 @@ function readStep(payload: unknown): number {
  * Opportunistic session id: the payload carries `agent`, and a session exposes an id. Read defensively — an
  * absent id only costs correlation in the control-plane log, never correctness.
  */
-function readSessionId(payload: unknown, fallback: string): string {
+function readSessionId(payload         , fallback        )         {
   if (typeof payload !== 'object' || payload === null) return fallback;
-  const agent = (payload as { agent?: unknown }).agent;
+  const agent = (payload                       ).agent;
   if (typeof agent !== 'object' || agent === null) return fallback;
-  const session = (agent as { session?: unknown }).session;
+  const session = (agent                         ).session;
   if (typeof session !== 'object' || session === null) return fallback;
-  const id = (session as { id?: unknown }).id;
+  const id = (session                    ).id;
   return typeof id === 'string' && id !== '' ? id : fallback;
 }
 
 /** The session event's own type, e.g. `turn/end`. Absent for a payload that is not a session event. */
-function readEventType(event: unknown): string | undefined {
+function readEventType(event         )                     {
   if (typeof event !== 'object' || event === null) return undefined;
-  const type = (event as { type?: unknown }).type;
+  const type = (event                      ).type;
   return typeof type === 'string' && type !== '' ? type : undefined;
 }
 
-export function createStepObserver(opts: StepObserverOptions): StepObserver {
+export function createStepObserver(opts                     )               {
   const graph = new AssociationGraph();
   // T's one-entry memo, alive for as long as the observer is. The observer is created once per activation and
   // outlives a session, so the memo is also correct across sessions: the anchor id is a segment id, and a new
   // session's task has a new one.
   const proxyCache = { id: '', text: '' };
-  let systemPrompt: string | undefined;
+  let systemPrompt                    ;
   let systemPromptTokens = 0;
   let scheduled = false;
-  const stats: StepObserverStats = {
+  const stats                    = {
     steps: 0,
     observed: 0,
     skipped: 0,
@@ -186,17 +186,17 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   let announcedShapes = false;
   let eventProbes = 0;
   /** session-event types already probed; one shape line each, so the budget lands on distinct shapes */
-  const probedTypes = new Set<string>();
+  const probedTypes = new Set        ();
 
   const schedule =
     opts.schedule ??
-    ((tick: () => void): void => {
+    ((tick            )       => {
       const timer = setTimeout(tick, 0);
       // never hold the process open just to drain a queue
-      if (typeof (timer as { unref?: () => void }).unref === 'function') (timer as { unref: () => void }).unref();
+      if (typeof (timer                          ).unref === 'function') (timer                         ).unref();
     });
 
-  const queue = createUpkeepQueue<unknown>({
+  const queue = createUpkeepQueue         ({
     maxLagTurns: opts.maxLagTurns ?? 2,
     onWarn: (message) => opts.onWarn?.(message),
     onEvent: async (event) => {
@@ -229,7 +229,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       // Upkeep is where most pairs are scored now, so it is also where most S1 calls happen. It stays off the
       // critical path: the queue already defers this to a timer, and a failure here must cost the edges, not
       // the session - so a backend that is down degrades to no edges for that segment rather than throwing.
-      let scored: { scoredPairs: number; edges: number } = { scoredPairs: 0, edges: 0 };
+      let scored                                         = { scoredPairs: 0, edges: 0 };
       try {
         scored = await graph.scoreNew({
           windowN: opts.policy.recall.window,
@@ -269,7 +269,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     },
   });
 
-  function tick(): void {
+  function tick()       {
     scheduled = false;
     // The queue is synchronous in shape (bounded drain, counted failures) and its handler may be async. The
     // handler's own promise is caught inside the queue, so nothing escapes this timer.
@@ -277,7 +277,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   }
 
   return {
-    async observe(payload: unknown): Promise<void> {
+    async observe(payload         )                {
       stats.steps += 1;
       const messages = readMessages(payload);
       if (messages === undefined) {
@@ -354,7 +354,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       }
     },
 
-    noteSessionEvent(event: unknown): void {
+    noteSessionEvent(event         )       {
       try {
         const prompt = extractSystemPrompt(event);
         if (prompt !== undefined && prompt !== systemPrompt) {
@@ -380,15 +380,15 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           // so the harness message is not at the top level and a reader looking for `message` finds nothing at
           // all. Probing one level in is what turns "the stream carries no content" into "the reader is looking
           // in the wrong place", and the two look identical from every counter.
-          const record = typeof event === 'object' && event !== null ? (event as { data?: unknown }) : undefined;
+          const record = typeof event === 'object' && event !== null ? (event                      ) : undefined;
           const data = record?.data;
           const shape =
             typeof event === 'object' && event !== null
               ? {
                   type: eventType,
-                  keys: Object.keys(event as object).slice(0, 14),
+                  keys: Object.keys(event          ).slice(0, 14),
                   ...(typeof data === 'object' && data !== null
-                    ? { dataKeys: Object.keys(data as object).slice(0, 14) }
+                    ? { dataKeys: Object.keys(data          ).slice(0, 14) }
                     : { dataType: typeof data }),
                 }
               : { type: typeof event };
@@ -415,12 +415,12 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       }
     },
 
-    probe(line: Record<string, unknown>): void {
+    probe(line                         )       {
       stats.probes += 1;
       opts.onProbe?.(line);
     },
 
-    setSystemPrompt(text: string, tokens?: number): void {
+    setSystemPrompt(text        , tokens         )       {
       const trimmed = text.trim();
       if (trimmed === '' || trimmed === systemPrompt) return;
       systemPrompt = trimmed;
@@ -429,11 +429,11 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       opts.onWarn?.(`[s1cap] system prompt pinned: ${systemPromptTokens} tokens`);
     },
 
-    flushUpkeep(): number {
+    flushUpkeep()         {
       return queue.drain();
     },
 
-    stats(): StepObserverStats {
+    stats()                    {
       const graphStats = graph.stats();
       return {
         ...stats,

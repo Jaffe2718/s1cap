@@ -1142,7 +1142,7 @@ plausible-looking number rather than an error.
 | Session-event stream is the pool | done | live `scoredPairs` 0→1→3→6→10→15, one assembly per step |
 | Bounded recall + budget | done | `selected=1 recalled=7 tail=21` on a live step |
 | Weights + decay | done | same records; `window-curve.mjs` shows max pairs/step == w exactly |
-| S1 Assoc backend (relevance) | done | stub backend counted 17 `score` questions from live sessions |
+| S1 Assoc backend (noul relevance) | done | stub backend counted 910 `noul` questions and 0 `score` from live sessions; real recalls with `cand=22, bfs=4` |
 | **Plan gate** (candidates → choice → advisory order) | done | live `plan_gate` record: `order=[p1,p2,p3]`, 1 `choice` question |
 | State proxy `T` | done | live `blocks.stateProxy = 41`, **byte-stable across every step of a task** |
 | Two layouts (`xFirst`) | done | one run, both arms: head 740 / tail-after-cut 0 vs head 700 |
@@ -1173,30 +1173,48 @@ identifier from inside the object literal that defines it — a `ReferenceError`
 
 ### Open problems, in the order they matter
 
-1. **`tool/call` and `tool/result` shapes are still inferred, not measured.** The probe budget (one per type,
-   eight types) ran out before them. They are read as `data = {turn, step, callId, name, arguments}` and
-   `data = {turn, step, message}`, so tool segments work if that holds — but it is a reading of the source, and
-   every other shape in this list turned out to differ from the source reading. **Next round: run a session with
-   tool calls and read the two probe lines.**
-2. **The figure says `noul relevance`; the implementation asks `score` questions.** `s1-relevance.ts` currently
-   asks an ordered 4-level `score` question per candidate, which gives a graded weight and works, but it is not
-   what the figure specifies. Either the figure changes or the question type does — decide, do not leave both.
-3. **Relevance has never run against a real System-1 backend.** All live verification used
-   `scripts/stub-s1-backend.mjs`, a local stub that answers from token overlap. That is enough to prove the
-   plumbing (calls made, answers read, weights normalized, edges created), and nothing about quality. The Laya
-   checkpoint has not been started once.
-4. **`xFirst` is not a cell dimension.** `cellPolicy()` sets C1–C4 from `tas.on`/`tier1`/`planGate.on` and leaves
-   `xFirst` at its default for all four, so the ablation cannot currently show the position intervention on its
-   own. It needs to be a cell knob (or a fifth cell) before any table is reported.
-5. **Cost accounting is not wired.** `summarizeTask`, `llmCallCost` and the `llm_call` / `s1_call` telemetry
+Closed since first written (kept here because each was a wrong-contract class of bug, and the classes recur):
+
+- ~~tool shapes unmeasured~~ **measured**: a live session with three tool calls probed
+  `tool/call -> data = {turn, step, callId, name, arguments}` and `tool/result -> data = {turn, step, message}` —
+  exactly what the adapter reads ✓, and tool segments now grow the tail in every live assembly.
+- ~~`noul` vs `score`~~ **resolved toward the figure**: relevance now asks one `noul` question per candidate
+  ("does retrieving this help the current segment?", P(true) = the edge weight), with the true-side mass of a raw
+  distribution accepted. Live proof: the stub counted **910 `noul` questions and 0 `score`**, and the graph
+  produced real recalls (`cand=22, bfs=4` on one step). A test now pins `type === 'noul'` on every question, so
+  the box cannot drift back to another answer shape unnoticed.
+- ~~`xFirst` not a cell dimension~~ **it is now**: `cellPolicy()` sets `xFirst = false` for C1/C3 (chronological)
+  and `true` for C2/C4, and `authority.test.ts` pins the axis — the layout is the thing that differs between the
+  rows a table would compare, so a preset that left it constant made the position intervention unmeasurable.
+
+Open, in order:
+
+1. **Relevance has never run against a real System-1 backend.** All live verification used the stub
+   (`scripts/stub-s1-backend.mjs`), which answers from token overlap. The plumbing is proven — calls, parsing,
+   weights, edges, recall — and nothing about quality. The Laya checkpoint has not been started once.
+2. **In short sessions the recall floor throws away everything S1 selected.** All five live assemblies carried
+   `fallback: recency-window`, including ones where the graph found 22 candidates at BFS depth 4:
+   `minRecalledShare = 0.25` demanded a quarter of the recall budget filled, the sparse graph answer lost, and
+   the recency window refilled the block. The intervention is computed and then discarded — which makes C3/C4
+   behave like the baseline in exactly the sessions that are easiest to run. Before any table: measure the
+   fallback ratio on long sessions, and tune `r`/`minRecalledShare` against it. The record distinguishes
+   `candidates` (graph) from `selected` (final layout), but **not** how many the graph itself kept — add
+   `graphSelected` if the ratio turns out to matter.
+3. **A leftover tuning file silently overrode the ablation cell.** Found the hard way: a `tuning.json` written by
+   an earlier panel test (`window=1200, xFirst=false`) overrode C4's preset for an entire verification session —
+   the run was not what its cell says it was, and no counter said so. Activation now logs every knob the tuning
+   file changes with old→new and the note *"delete the tuning file for a cell-pure run"*; the stale file is gone.
+   Experiment rule: **cell runs start by deleting the tuning file**, and the wiring record's `xFirst`/`recall`
+   fields are checked against the cell before a session is trusted.
+4. **Cost accounting is not wired.** `summarizeTask`, `llmCallCost` and the `llm_call` / `s1_call` telemetry
    events exist and nothing emits them, so no record carries what a round cost. The pieces are there; the call
    sites are not.
-6. **The `sessionJsonl` sink is declared in config and written by nothing.** Either implement it or remove it
+5. **The `sessionJsonl` sink is declared in config and written by nothing.** Either implement it or remove it
    from `TelemetryConfig` — a declared sink that stays empty reads as a broken feature.
-7. **The plan gate only sees markdown lists.** When the model records a plan through the todo tool instead of
+6. **The plan gate only sees markdown lists.** When the model records a plan through the todo tool instead of
    writing `1. …` lines (observed live), the gate correctly skips, and its coverage is therefore narrower than
    "the model's plans". Worth reading the todo call as a second plan source.
-8. **`pinned` is still a fixed 700 tokens of harness prompt.** The system prompt is captured and pinned, but no
+7. **`pinned` is still a fixed 700 tokens of harness prompt.** The system prompt is captured and pinned, but no
    attempt has been made to keep volatile content out of it (item 4a's leftover half).
 
 ### Verification aid added this round

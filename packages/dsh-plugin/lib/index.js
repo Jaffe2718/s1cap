@@ -809,10 +809,37 @@ function applyInner(ctx               , raw                             )       
       if (fromFile.relevanceThreshold !== undefined) appliedTuning.relevanceThreshold = fromFile.relevanceThreshold;
       if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
       if (fromFile.xFirst !== undefined) appliedTuning.xFirst = fromFile.xFirst;
+      // The cell preset values before the volatile layer touches them. A tuning file written during one live test
+      // silently overrode the cell it was not part of: C4 ran with xFirst=false and window=1200 for an entire
+      // verification session - and nothing in any counter said so. The override itself is right (the panel owns
+      // these knobs), but a *silent* one deforms an ablation run invisibly, which is this project's dominant
+      // failure mode. Say it out loud at activation, and tell the reader how to get a cell-pure run.
+      const cellBefore = {
+        depth: config.recall.depth,
+        relevanceThreshold: config.recall.relevanceThreshold,
+        window: config.recall.window,
+        xFirst: config.xFirst,
+      };
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.relevanceThreshold !== undefined) config.recall.relevanceThreshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
       if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
+      for (const knob of ['depth', 'relevanceThreshold', 'window', 'xFirst']         ) {
+        const after =
+          knob === 'depth'
+            ? config.recall.depth
+            : knob === 'relevanceThreshold'
+              ? config.recall.relevanceThreshold
+              : knob === 'window'
+                ? config.recall.window
+                : config.xFirst;
+        if (after !== cellBefore[knob]) {
+          ctx.logger?.warn?.(
+            `[s1cap] tuning overrides the running cell: ${knob} ${String(cellBefore[knob])} -> ${String(after)} ` +
+              `(delete the tuning file for a cell-pure run)`,
+          );
+        }
+      }
       probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.relevanceThreshold, window: config.recall.window, xFirst: config.xFirst } }) + '\n');
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
