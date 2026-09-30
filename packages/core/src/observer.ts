@@ -123,7 +123,20 @@ export async function observeStep(
   });
 
   // segmentEvent applies the I2 gate (provenance.ts): a control-plane record can never become a segment.
-  const segments: Segment[] = events.flatMap((ev) => segmentEvent(ev));
+  //
+  // One more gate here, and it is the important one. A block S1CAP delivered is appended to the session log by
+  // the harness, so it comes back through the session-event stream as an ordinary user message. Letting it in
+  // would put S1CAP's own output into the graph, and from there into three places at once: the recall
+  // candidates (so relevance re-selects a summary of the conversation as the most relevant thing in it), the
+  // verbatim tail (so we re-present our own text as if it were a recent turn), and `fullTokens` — which is the
+  // denominator of `wouldSaveTokens`. The last is the one that makes the headline number self-referential: the
+  // tokens "saved" would be measured against a baseline S1CAP itself inflated. The method is about which of the
+  // harness's own context is in the prompt and in what order, so its own text does not belong in that accounting.
+  //
+  // The host keeps its copy in the log and builds the request from the log, so the model still reads what was
+  // delivered; what stops is S1CAP measuring, recalling or re-delivering it.
+  const ingestable = events.filter((ev) => !isS1capInjected(ev.id));
+  const segments: Segment[] = ingestable.flatMap((ev) => segmentEvent(ev));
   input.graph.addSegments(segments);
   // recall.window = w: only segments that arrived since the previous step are scored, each against
   // the most recent w segments. Segments outside the window keep their edges and stay reachable. The result is
@@ -197,13 +210,12 @@ export async function observeStep(
   const tail = tailCount > 0 ? pool.slice(pool.length - tailCount) : [];
   const history = pool
     .slice(0, pool.length - tailCount)
-    // Our own delivered blocks are excluded from the recall candidates, and only from there. The harness appended
-    // them to the session log, so the model reads them as part of the transcript whatever we do; what must stop
-    // is relevance re-selecting them, because a block that summarizes the conversation is among the most relevant
-    // things in it. A live run measured the recursion: one injection's headers read `## state proxy T | ##
-    // recalled · user · s1cap-895b6ae1 | …`, and by the last step a single message carried 30 recalled blocks,
-    // most of them our own previous output. Excluding them here covers both the S1 selection and the recency
-    // fallback, since the assembler draws candidates from `history` in both cases.
+    // Our own delivered blocks are excluded from the recall candidates as well. The ingestion gate above is
+    // where this normally happens; this line is the second lock on the same door, and it is here because the
+    // graph is also filled by replay and by upkeep, neither of which goes through that one statement. A block
+    // that summarizes the conversation is among the most relevant things in it, so re-selecting it is not a
+    // cosmetic problem. Excluding here covers both the S1 selection and the recency fallback, since the
+    // assembler draws candidates from `history` in both cases.
     .filter((s) => !isS1capInjected(s.id));
   // One-entry memo of the last built T. `perTask` is the default policy precisely so this can be a single slot:
   // within a task T does not change, and when the task changes the anchor id changes with it.

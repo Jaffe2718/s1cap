@@ -199,3 +199,43 @@ test('the session-content stream is fed the RawEvents that entered the graph, an
   assert.deepEqual(h.session.map((e) => e.seq), [3, 4, 5, 6], 'host log sequence, in order');
   assert.ok(!h.session.some((e) => e.kind === 'systemPinned'), 'lifecycle/system notices are not conversation');
 });
+
+/**
+ * S1CAP's own delivered blocks stop at ingestion, and the session file still records them.
+ *
+ * The delivered block is appended to the session log by the harness, so it comes back on this stream as an
+ * ordinary user message on the next event. Letting it become a segment would put S1CAP's own text into the
+ * graph, and from there into the recall candidates, the verbatim tail, and `fullTokens` — the denominator of
+ * `wouldSaveTokens`, which would make the headline saving self-referential. The session file is a different
+ * thing: it is a faithful record of what the session said, so the block belongs there even while it is not
+ * something S1CAP measures. Those two statements are the whole test, and the tension between them is why it
+ * exists.
+ */
+test('a delivered context block never becomes a segment, but the session file still records it', async () => {
+  const h = harness({ withSession: true });
+  const events = sessionEvents();
+  // Exactly what the harness logs when a delivered block is appended: our marker id, a user message.
+  const delivered = {
+    type: 'user/message',
+    data: {
+      id: 's1cap-895b6ae1',
+      role: 'user',
+      content: [{ type: 'text', text: '# context assembled for this step\n## state proxy T\n…' }],
+    },
+  };
+  for (const event of [...events, delivered]) h.observer.noteSessionEvent(event);
+  h.ticks.forEach((tick) => tick());
+  await settle();
+
+  // Not measured: no segment, so no tokens in the baseline and nothing for relevance to select.
+  const stats = h.observer.stats();
+  assert.equal(stats.upkeepSegments, 4, 'four content segments, the delivered block excluded');
+  assert.equal(stats.upkeepSelfDropped, 1, 'and the drop is reported, not silent');
+  assert.equal(stats.graphSegments, 4, 'the graph holds the session, not our own addition to it');
+  // Still recorded: the session file describes the session, not S1CAP's view of it.
+  assert.ok(
+    h.session.some((e) => e.id === 's1cap-895b6ae1'),
+    `the delivered block is in the session file: ${JSON.stringify(h.session.map((e) => e.id))}`,
+  );
+  assert.equal(h.session.length, 5, 'four content events plus the delivered block');
+});

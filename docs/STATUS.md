@@ -1172,6 +1172,33 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   `segmenter.ts`, the id prefix shared with the delivery module): the graph stays a faithful record of the session
   and the tail stays verbatim, because the harness put the block in the log and the request is built from the log.
   **Not yet re-verified live** — the measurement above is from the run that found the bug.
+- **The rule behind that fix, stated once so it stops being rediscovered.** *S1CAP manages which of the harness's
+  own context is in the prompt; S1CAP's own output is never part of that accounting.* Two obligations, and they
+  are different things that are easy to conflate:
+  - **S1 calls never enter the conversation.** Already true and measured: scoring goes to the S1 backend's own
+    endpoint, `s1_call` records go to `control.jsonl`, and `ControlPlaneLog.emit` throws on a session segment
+    (provenance.ts). Nothing to do.
+  - **S1CAP's delivered block must not become a segment.** This was violated. The block is appended to the
+    session log by the harness, comes back as an ordinary user message, and from there entered the recall
+    candidates (so relevance re-selected a summary of the conversation), the verbatim tail (so we re-presented
+    our own text as a recent turn), and `fullTokens` — **the denominator of `wouldSaveTokens`**, so the headline
+    "tokens saved" was being measured against a baseline S1CAP itself inflated. That is self-referential, and it
+    is the number the whole method is judged on.
+  - The gate is at ingestion, on **both** paths: `observeStep` for the step payload, and the upkeep flush in
+    `step-observer.ts` for the session-event stream, which is the one production actually takes (the first
+    version of this fix had only the payload path, and a test caught it). The session-content file still records
+    the block: that file is a faithful record of the session, not a view of what S1CAP chose to measure. Drops
+    are counted in `upkeepSelfDropped` rather than applied silently, because a filter nobody can see is a filter
+    nobody can debug.
+- **Deliberately not done here, and open:** the delivery mechanism still authors a block of S1CAP prose
+  (`# context assembled for this step …`). That is a design choice made when the only measured channel was the
+  pre-step splice, and under the rule above it is the wrong shape: the claim is about *existing* context and its
+  order, not about adding a new message. The alternative worth probing is the host's own context channel
+  (`systemPrompt.assemble` → `assembly.contexts` → `renderContextSections` → `runtimeContext.project`), which is
+  rendered per request instead of appended to the transcript. **Not verified**: a search for a plugin-side
+  context-registration API returned nothing, and `dsh-system-prompt` exports only the render/join functions. Until
+  that probe is done, delivery stays an insertion, and the block's framing text is the part that most needs
+  removing.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
   remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
   index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a

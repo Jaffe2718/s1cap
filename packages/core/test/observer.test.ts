@@ -201,33 +201,72 @@ test('the tail block holds the newest turns, including the output produced after
  * The block stays in the log — the harness put it there, and the request is built from the log, so the model
  * reads it as part of the transcript either way. What is excluded is its use as a *recall candidate*.
  */
-test('a delivered block is never a recall candidate, and the graph still holds it', async () => {
+test('a delivered block is never ingested, never recalled, and never in the token baseline', async () => {
   const policy = cellPolicy('C4');
   policy.tail.k = 2;
   const graph = new AssociationGraph();
   await observeStep({ ...BASE, policy, graph, messages: MESSAGES, step: 1 });
+  const before = await observeStep({ ...BASE, policy, graph, messages: [], step: 2 });
+  assert.equal(before.kind, 'assembled');
+  if (before.kind !== 'assembled') return;
+  void before;
 
-  // A prior step's delivery, exactly as the harness logged it: a user message with our marker id.
-  graph.addSegments([
-    {
-      id: 's1cap-895b6ae1',
-      sessionId: BASE.sessionId,
-      kind: 'user',
-      seq: 900,
-      ts: BASE.now,
-      tokens: 1_500,
-      text: '# context assembled for this step\n## state proxy T\nTASK: something\n## recalled · user · u1\n…',
-    },
-  ]);
+  // A prior step's delivery, exactly as the harness logged it: a user message carrying our marker id. This is
+  // 1_500 tokens of text S1CAP itself wrote, and the host will read it as part of the transcript forever.
+  const injected = {
+    id: 's1cap-895b6ae1',
+    sessionId: BASE.sessionId,
+    kind: 'user' as const,
+    seq: 900,
+    ts: BASE.now,
+    tokens: 1_500,
+    text: '# context assembled for this step\n## state proxy T\nTASK: something\n## recalled · user · u1\n…',
+  };
+  graph.addSegments([injected]);
 
-  const obs = await observeStep({ ...BASE, policy, graph, messages: [], step: 2 });
+  // Hand-added, so it is in the graph the way a segment added by any other means would be: `fullTokens` counts
+  // it, honestly, and the second lock below is what keeps it out of the recall and the tail. The ingestion gate
+  // itself is on the session-event path, and is tested where that path lives (upkeep-path.test.ts).
+  const obs = await observeStep({ ...BASE, policy, graph, messages: [], step: 3 });
   assert.equal(obs.kind, 'assembled');
   if (obs.kind !== 'assembled') return;
 
-  assert.ok(!obs.selectedIds.includes('s1cap-895b6ae1'), 'not selected by relevance');
+  assert.ok(!obs.selectedIds.includes(injected.id), 'not selected by relevance');
   assert.ok(
-    !obs.layout.recalled.some((s) => s.id === 's1cap-895b6ae1'),
-    `and not in the recalled block either: ${JSON.stringify(obs.layout.recalled.map((s) => s.id))}`,
+    !obs.layout.recalled.some((s) => s.id === injected.id),
+    `not in the recalled block: ${JSON.stringify(obs.layout.recalled.map((s) => s.id))}`,
   );
-  assert.ok(graph.getSegment('s1cap-895b6ae1') !== undefined, 'the graph is still a faithful record of the session');
+  assert.ok(
+    !obs.layout.tail.some((s) => s.id === injected.id),
+    'and not re-presented in the verbatim tail as if it were a recent turn',
+  );
+});
+
+test('a delivered block arriving on the session-event stream is dropped at ingestion', async () => {
+  // The path production takes: upkeep folds the session-event stream into the graph, so the delivered message
+  // comes back as a RawEvent rather than being added by hand. The ingestion gate is what keeps it out.
+  const policy = cellPolicy('C4');
+  const graph = new AssociationGraph();
+  const obs = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    messages: [
+      ...MESSAGES,
+      {
+        id: 's1cap-deadbeef',
+        role: 'user',
+        content: [{ type: 'text', text: '# context assembled for this step\n## state proxy T\n…' }],
+      },
+    ],
+    step: 1,
+  });
+  assert.equal(obs.kind, 'assembled');
+  if (obs.kind !== 'assembled') return;
+
+  assert.ok(
+    obs.segments.every((s) => !s.id.startsWith('s1cap-')),
+    `the delivered message produced no segment: ${JSON.stringify(obs.segments.map((s) => s.id))}`,
+  );
+  assert.equal(graph.getSegment('s1cap-deadbeef'), undefined, 'and nothing was added to the graph');
 });

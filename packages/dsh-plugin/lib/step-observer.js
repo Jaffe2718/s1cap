@@ -11,7 +11,14 @@
  * events go into a bounded queue and are folded into the graph on a later tick.
  */
 import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
-                                                                                                               
+             
+                 
+           
+                  
+                 
+                   
+                     
+import { isS1capInjected } from '@s1cap/core';
 
                                       
                          
@@ -73,6 +80,14 @@ import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQ
                       
                                                                                          
                          
+     
+                                                                                       
+    
+                                                                                                               
+                                                                                                                 
+                                                        
+     
+                            
                                                                  
                             
                                                       
@@ -177,6 +192,7 @@ export function createStepObserver(opts                     )               {
     upkeepEvents: 0,
     upkeepEmpty: 0,
     upkeepSegments: 0,
+    upkeepSelfDropped: 0,
     upkeepScoredPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
@@ -234,7 +250,21 @@ export function createStepObserver(opts                     )               {
         stats.upkeepEmpty += 1;
         return;
       }
-      const segments = raw.flatMap((ev) => segmentEvent(ev));
+      // The ingestion gate, on the path production actually takes.
+      //
+      // A context block S1CAP delivered is appended to the session log by the harness, so it arrives here as an
+      // ordinary user message on the very next event. It must not become a segment: that would put S1CAP's own
+      // text into the graph, and from there into the recall candidates (relevance would re-select a summary of
+      // the conversation), into the verbatim tail, and into `fullTokens` — the denominator of
+      // `wouldSaveTokens`, which would make the headline saving self-referential. The method manages which of
+      // the harness's own context is in the prompt; its own output is not part of that accounting.
+      //
+      // The host keeps its copy in the log and builds the request from the log, so the model still reads what
+      // was delivered. The session-content stream below is still fed these events, because that file is a
+      // faithful record of the session and not a view of what S1CAP chose to measure.
+      const ingestable = raw.filter((ev) => !isS1capInjected(ev.id));
+      stats.upkeepSelfDropped += raw.length - ingestable.length;
+      const segments = ingestable.flatMap((ev) => segmentEvent(ev));
       graph.addSegments(segments);
       // The session-content stream, written from the same RawEvents that just entered the graph, so the file and
       // the graph can never disagree about what the session said. A throw here costs the stream line, not the
