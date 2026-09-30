@@ -18,6 +18,8 @@ export interface DiscoveryDeps {
   run(command: string, args: string[]): Promise<RunResult>;
   platform?: string;
   env?: Record<string, string | undefined>;
+  /** the running executable, used to find the Python runtime DSH ships beside it */
+  execPath?: string;
 }
 
 export interface CondaEnvEntry {
@@ -27,7 +29,7 @@ export interface CondaEnvEntry {
 
 export interface PythonCandidate {
   path: string;
-  source: 'config' | 'extra' | 'env' | 'conda-env' | 'conda-base' | 'path' | 'py-launcher';
+  source: 'config' | 'extra' | 'dsh-runtime' | 'env' | 'conda-env' | 'conda-base' | 'path' | 'py-launcher';
   label?: string;
 }
 
@@ -115,6 +117,38 @@ function dedupe(candidates: PythonCandidate[], platform: string): PythonCandidat
   return out;
 }
 
+/**
+ * The Python runtime DSH ships, if this build has one.
+ *
+ * Measured on the current build: CPython 3.12.14 with `pip` and `venv` at
+ * `resources/runtime/primary-runtime/dependencies/python`, and **not writable** — an install into it raises
+ * `UnauthorizedAccessException`. That combination makes it a base to build a venv from, never a target, which is
+ * why `setup.ts` exists.
+ *
+ * It is a candidate rather than a default, for one reason that matters more than convenience: the settings panel's
+ * `pythonPath` field is required, because a backend that silently picked an interpreter would make a run
+ * unreproducible. What this adds is that the field can be *pre-filled with a path that exists on this machine*
+ * instead of one the user has to go and find. The path is derived from the running executable rather than
+ * hard-coded, so it follows the installation it came from.
+ */
+export function dshBundledPython(execPath: string, platform: string): string | undefined {
+  const sep = platform === 'win32' ? '\\' : '/';
+  // Matched on `dependencies`, not on `dependencies/python`: the running executable lives *inside* the bundled
+  // tree (`dependencies/node/bin/node`), so a marker naming the python subdirectory never appears in it and the
+  // first version of this function never found anything.
+  const marker = `${sep}resources${sep}runtime${sep}primary-runtime${sep}dependencies`;
+  const at = execPath.indexOf(marker);
+  if (at < 0) return undefined;
+  // `at + 1` keeps the separator: the marker starts *with* it, so slicing to `at` would produce
+  // `…DeepSeek Harnessresources\…`, which is the kind of path that fails only at exec time.
+  const root = execPath.slice(0, at + 1);
+  const tail =
+    platform === 'win32'
+      ? 'resources\\runtime\\primary-runtime\\dependencies\\python\\python.exe'
+      : 'resources/runtime/primary-runtime/dependencies/python/bin/python';
+  return `${root}${tail}`;
+}
+
 /** Build the ordered candidate list: explicit config, env vars, conda envs, PATH, launcher. */
 export async function collectCandidates(cfg: LayaConfig, deps: DiscoveryDeps): Promise<PythonCandidate[]> {
   const platform = deps.platform ?? process.platform;
@@ -123,6 +157,8 @@ export async function collectCandidates(cfg: LayaConfig, deps: DiscoveryDeps): P
 
   if (cfg.pythonPath) out.push({ path: cfg.pythonPath, source: 'config' });
   for (const extra of cfg.extraCandidates ?? []) out.push({ path: extra, source: 'extra' });
+  const bundled = dshBundledPython(deps.execPath ?? process.execPath, platform);
+  if (bundled) out.push({ path: bundled, source: 'dsh-runtime', label: 'DSH bundled' });
   const fromEnv = env.S1CAP_PYTHON ?? env.PYTHON;
   if (fromEnv) out.push({ path: fromEnv, source: 'env' });
 

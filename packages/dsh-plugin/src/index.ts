@@ -1315,6 +1315,10 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           try {
             const method = (req.method ?? 'GET').toUpperCase();
             if (method === 'GET') {
+              // The panel needs the effective knobs to fill itself; the system check needs the live counters, and
+              // it cannot get them from the instance log — this plugin's logger does not reach that file, which
+              // is exactly what the first version of the check assumed. One route, both readers, and no second
+              // surface invented for the sake of a test.
               sendJson(res, 200, {
                 ok: true,
                 stored: { ...readTuningFile(), ...appliedTuning },
@@ -1323,6 +1327,16 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
                   relevanceThreshold: config.recall.relevanceThreshold,
                   window: config.recall.window,
                   xFirst: config.xFirst,
+                },
+                status: {
+                  cell: config.cell,
+                  tas: config.tas.on,
+                  tier1: config.recall.tier1,
+                  planGate: config.planGate.on,
+                  deliver: config.deliver,
+                  s1: { provider: backend.provider, mode: backend.mode, baseUrl: backend.baseUrl },
+                  observation: observer ? { ...observer.stats(), mode: resolved.observation } : null,
+                  streams: { controlRecords, sessionLines, s1CallRecords },
                 },
               });
               return;
