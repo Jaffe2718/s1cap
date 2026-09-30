@@ -18,10 +18,11 @@
  * a run that already happened, which is when it is most useful.
  *
  * Usage:
- *   node scripts/system-check.mjs --log <instance.log> [--data <dir>] [--cell C4] [--expect-s1 N]
+ *   node scripts/system-check.mjs --base-url http://127.0.0.1:19487 [--token T]
+ *                                 [--log <instance.log>] [--data <dir>] [--cell C4] [--expect-s1 N]
  *                                 [--allow-fallback]
  *
- * Defaults: --log %TEMP%\dsh-web.log, --data ~/.dsh/.s1cap. Exit code 1 if any invariant fails.
+ * Defaults: --data ~/.dsh/.s1cap, --base-url none (then the log is used). Exit code 1 if any invariant fails.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -38,7 +39,11 @@ const LOG = arg('log', join(process.env.TEMP ?? '.', 'dsh-web.log'));
 const DATA = arg('data', join(homedir(), '.dsh', '.s1cap'));
 const EXPECT_CELL = arg('cell', '');
 const EXPECT_S1 = arg('expect-s1', '');
+const BASE_URL = arg('base-url', '');
+const TOKEN = arg('token', '');
 const ALLOW_FALLBACK = has('allow-fallback');
+/** The plugin's own route: the panel reads it, and so does this check. */
+const STATUS_ROUTE = '/s1cap-7340';
 
 /** Conversation kinds the adapter may produce. Anything else in the session file is a leak. */
 const CONVERSATION_KINDS = new Set(['user', 'assistant', 'trace', 'toolCall', 'toolResult', 'systemPinned']);
@@ -60,55 +65,6 @@ function readJsonl(path) {
   return { lines, missing: false };
 }
 
-/**
- * Pull the last `/s1` status JSON out of the instance log.
- *
- * The command logs its payload with `JSON.stringify(status, null, 2)`, so the object spans lines. Matching braces
- * from the marker is the honest way to find its end — slicing to the next line would truncate it, and a truncated
- * parse is how a check quietly starts asserting on half a payload.
- */
-function lastStatus(logText) {
-  const marker = '[s1cap] {';
-  let found = null;
-  let from = 0;
-  for (;;) {
-    const at = logText.indexOf(marker, from);
-    if (at < 0) break;
-    const start = at + '[s1cap] '.length;
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let i = start; i < logText.length; i += 1) {
-      const ch = logText[i];
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (ch === '\\') {
-        escaped = true;
-        continue;
-      }
-      if (ch === '"') inString = !inString;
-      if (inString) continue;
-      if (ch === '{') depth += 1;
-      else if (ch === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          try {
-            found = JSON.parse(logText.slice(start, i + 1));
-          } catch {
-            // keep looking: a malformed payload is itself worth reporting, not worth throwing on
-          }
-          from = i + 1;
-          break;
-        }
-      }
-    }
-    if (from === 0) break;
-  }
-  return found;
-}
-
 const results = [];
 function check(name, ok, detail) {
   results.push({ name, ok, detail });
@@ -119,7 +75,34 @@ function check(name, ok, detail) {
 const session = readJsonl(join(DATA, 'session.jsonl'));
 const control = readJsonl(join(DATA, 'control.jsonl'));
 const logText = existsSync(LOG) ? readFileSync(LOG, 'utf8') : '';
-const status = lastStatus(logText);
+
+/**
+ * The live status, from the plugin's own route.
+ *
+ * The first version of this check read it from the instance log, and the first run of it proved that wrong: a
+ * complete session — 33 conversation lines, 16 control records — and **zero** `[s1cap]` lines in the log, because
+ * this plugin's logger does not reach that file at all. Reading a channel that does not exist is how a check ends
+ * up asserting on nothing, so the route is the channel: it is already registered for the panel, and it answers
+ * with the same counters `/s1` prints.
+ */
+async function fetchStatus() {
+  if (BASE_URL === '') return null;
+  const url = `${BASE_URL.replace(/\/$/, '')}${STATUS_ROUTE}${TOKEN === '' ? '' : `?token=${encodeURIComponent(TOKEN)}`}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error(`system-check: ${STATUS_ROUTE} answered ${res.status} — the instance may have moved, or want auth.`);
+      return null;
+    }
+    const body = await res.json();
+    return body?.status ?? null;
+  } catch (err) {
+    console.error(`system-check: ${url} unreachable (${String(err)})`);
+    return null;
+  }
+}
+
+const status = await fetchStatus();
 
 if (session.missing || control.missing) {
   console.error(`system-check: no evidence in ${DATA} (session ${session.missing ? 'missing' : 'ok'}, control ${control.missing ? 'missing' : 'ok'})`);
@@ -127,7 +110,11 @@ if (session.missing || control.missing) {
   process.exit(2);
 }
 if (status === null) {
-  console.error(`system-check: no /s1 status payload in ${LOG}. Run /s1 in the session under test, or pass --log.`);
+  // Note the apostrophe: an unescaped one inside a single-quoted string closes it early, and the resulting
+  // SyntaxError names neither the quote nor the line that follows the real mistake.
+  const hint =
+    BASE_URL === '' ? ` — pass --base-url http://127.0.0.1:<port> (and --token) to read the ${STATUS_ROUTE} route` : '';
+  console.error(`system-check: no live status${hint}.`);
   process.exit(2);
 }
 
@@ -175,7 +162,7 @@ check(
   'I3 ingestion gate: delivered blocks are in the log but not in the graph',
   selfDropped !== null && selfDropped === injected.length,
   `log holds ${injected.length} s1cap- messages; upkeep dropped ${String(selfDropped)} at ingestion${
-    selfDropped === null ? ' (no /s1 counter — an older build?)' : selfDropped === injected.length ? ' (equal)' : ' (MISMATCH)'
+    selfDropped === null ? ' (no counter in the status — an older build?)' : selfDropped === injected.length ? ' (equal)' : ' (MISMATCH)'
   }`,
 );
 
@@ -186,7 +173,7 @@ const controlReported = status?.streams?.controlRecords ?? null;
 check(
   'I4 evidence belongs to this run',
   reported === session.lines.length && controlReported === control.lines.length,
-  `/s1 reported ${String(reported)} session and ${String(controlReported)} control records; files hold ${
+  `the plugin reported ${String(reported)} session and ${String(controlReported)} control records; files hold ${
     session.lines.length
   } and ${control.lines.length}. A mismatch means evidence from an earlier run is still in the directory.`,
 );
@@ -208,10 +195,11 @@ check(
 
 const cell = status?.cell ?? '(none)';
 const cellOk = EXPECT_CELL === '' || cell === EXPECT_CELL;
+// The route reports these flat, which is the shape the panel reads them in.
 const knobs = [
-  ['tas.on', status?.tas?.on],
-  ['recall.tier1', status?.recall?.tier1],
-  ['planGate.on', status?.planGate?.on],
+  ['tas', status?.tas],
+  ['tier1', status?.tier1],
+  ['planGate', status?.planGate],
   ['xFirst', status?.xFirst],
   ['deliver', status?.deliver],
 ].filter(([, v]) => v !== undefined);
