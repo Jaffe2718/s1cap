@@ -1422,14 +1422,18 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
    urandom: a name that cannot be derived from the previous round's prompt, and therefore cannot be aimed at.
    Open a round with `node scripts/new-test-run.mjs --create`, which prints the directory and **the messages to
    send, in order, into one session**: the salt appears exactly once, in the first message, which is what gives
-   the round its directory, and the later turns edit the same file in place. The messages come from
-   `scripts/round-tasks.json` and are substituted rather than retyped, because a mistyped salt sends the answer
-   somewhere the round is not watching. That fixture is ASCII-escaped (`\uXXXX`): the stimuli are Chinese and no
-   repository file may contain Chinese, so the escapes are how the exact recorded code points stay exact. The
-   **workspace itself is not reconfigured** — the session's workspace is part of what the experiment observes, so
-   narrowing it per round would change the thing under study. What the salt does *not* do is hide the other
-   rounds: they are still inside the workspace, so move a finished round's directory out once its evidence is
-   collected. The artifacts from before this rule live in `260930164900/` (a timestamp, from when the rule was a
+   the round its directory, and the later turns edit the same file in place. The stimuli are LeetCode 121 → 122 →
+   123 (best time to buy and sell stock, one transaction → unlimited → at most two). That family is chosen for
+   the *continuity*: all three share one DP skeleton, so the third turn genuinely benefits from the first two and
+   the relevance path has something real to score - and the answers are short, because a round that spends
+   fifteen minutes rendering a 27 KB HTML animation measures the model's stamina rather than the mechanism. The
+   messages come from `scripts/round-tasks.json` and are substituted rather than retyped, because a mistyped salt
+   sends the answer somewhere the round is not watching. That fixture is ASCII-escaped (`\uXXXX`): the stimuli are
+   Chinese and no repository file may contain Chinese, so the escapes are how the exact recorded code points stay
+   exact. The **workspace itself is not reconfigured** — the session's workspace is part of what the experiment
+   observes, so narrowing it per round would change the thing under study. What the salt does *not* do is hide the
+   other rounds: they are still inside the workspace, so move a finished round's directory out once its evidence
+   is collected. The artifacts from before this rule live in `260930164900/` (a timestamp, from when the rule was a
    timestamp).
 
 ## 5. Verify everything right now
