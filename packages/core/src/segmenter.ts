@@ -38,6 +38,29 @@ export interface RawEvent {
   taskTag?: string;
 }
 
+/**
+ * The id prefix a delivered context block carries, and the test for it.
+ *
+ * This exists because a delivered block is appended to the session log by the harness, the segmenter turns it
+ * into an ordinary user segment like any other, and relevance then selects it as one of the most relevant
+ * things in the conversation — because it is a summary of the conversation. A live C4 run showed exactly that:
+ * the headers of one injection read `## state proxy T | ## recalled · user · s1cap-895b6ae1 | ## state proxy T |
+ * ## recalled · trace · …`, the `s1cap-895b6ae1` being the *previous* injection, and by the last step of the run
+ * one message carried 30 recalled blocks. The context was mostly S1CAP's own earlier output, which is not a
+ * measurement of anything.
+ *
+ * The block has to stay in the log — the harness put it there and the request is built from the log, so the model
+ * sees it as part of the transcript either way. What must stop is S1CAP *re-selecting* it and re-injecting its
+ * text, so the exclusion is applied where the recall candidates are built, not where segments are ingested: the
+ * graph stays a faithful record of the session, and the tail stays verbatim.
+ */
+export const S1CAP_INJECTED_ID_PREFIX = 's1cap-';
+
+/** true for a segment that is one of our own delivered context blocks. */
+export function isS1capInjected(id: string): boolean {
+  return id.startsWith(S1CAP_INJECTED_ID_PREFIX);
+}
+
 export interface SegmenterOptions {
   chunkTokens?: number;
   overlapTokens?: number;

@@ -58,8 +58,9 @@
  *   states, and every counter in this project used to report the first while the experiments needed the second.
  */
 
-/** A segment as far as delivery is concerned: id and text for rendering, chunkOf for chunk parents. */
-                                     
+import { S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
+
+/** A segment as far as delivery is concerned: id and text for rendering, chunkOf for chunk parents. */                                     
              
                
                
@@ -128,6 +129,10 @@ function isRecord(value         )                                   {
  * The same blocks in the same order must produce the same id on later steps, because that is what the
  * "already delivered" check compares. It is derived from the rendered text, so it changes exactly when the
  * content the model would see changes — including when a block is added or dropped, which is the point.
+ *
+ * The prefix is the core's marker, not a local convention: `isS1capInjected` uses it to keep these blocks out of
+ * the recall candidates, and a digest whose prefix drifted from that marker would make the recursion
+ * unfixable from here — the exact failure a live run measured, where one injection recalled the previous one.
  */
 function payloadIdFor(text        )         {
   // FNV-1a, 32-bit, hex. Not a security primitive: a digest whose only job is to notice "same text as last
@@ -137,7 +142,7 @@ function payloadIdFor(text        )         {
     hash ^= text.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  return `s1cap-${hash.toString(16).padStart(8, '0')}`;
+  return `${S1CAP_INJECTED_ID_PREFIX}${hash.toString(16).padStart(8, '0')}`;
 }
 
 function textOf(message         )         {

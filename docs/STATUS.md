@@ -1145,11 +1145,33 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   any, so at a turn-opening step the pool is a single user message and there is nothing to select. The comment
   there argues the graph is a superset so using it "never loses a segment the payload carried" — the direction is
   backwards: using the payload is what loses the graph's history, and that is the history the model needs.
-- **Still open:** (1) the window fix above, which is what makes recall non-empty on a step that calls the model;
-  (2) `minRecalledShare` fired on **9 of 9** steps, so every S1 selection in that run was replaced by a recency
-  window before delivery ever saw it; (3) `dsh-agent-instructions` also calls `agent.inbox.remove(id)` for its own
+- **Still open:** (1) `minRecalledShare` fired on **9 of 9** steps, so every S1 selection in that run was replaced by
+  a recency window before delivery ever saw it — and the `blocks.recalled` tokens in the table above are that
+  recency window, not an S1 selection; (2) `dsh-agent-instructions` also calls `agent.inbox.remove(id)` for its own
   prior message — S1CAP dedupes by payload text instead, measured as working (4 injections, no repeats) but not
   yet measured across a turn where the selection changes back and forth.
+- **The window fix, verified live.** With `window = graph.orderedSegments()`, the steps that call the model now have
+  history to select from. Same run shape, same 9 assemblies, and the delivery changed as predicted:
+
+  | step | `blocks.recalled` | `selected` | `candidates` | `messagesBefore` | delivered | blocks |
+  |---|---|---|---|---|---|---|
+  | #0 | 0 | 0 | 0 | 1 | yes | stateProxy |
+  | #2 | 1121 | 8 | 10 | 1 | yes | stateProxy + 8 recalled |
+  | #5 | 3742 | 20 | 17 | 1 | yes | stateProxy + 20 recalled |
+  | #8 | 5590 | 30 | 18 | 1 | yes | stateProxy + 30 recalled |
+
+  4 of 9 steps delivered, **3 of them carrying recalled blocks** (0 of 4 before the fix). The injections are in the
+  session log with real segment kinds in their headers: `## recalled · user · s1cap-895b6ae1`, `## recalled · trace ·
+  bd29175c…`, `## recalled · toolCall · call_00_ET_sPq8liVDqSw7plNiCLre7435`.
+- **The defect that run exposed: S1CAP was recalling its own delivered blocks.** That `s1cap-895b6ae1` in the
+  header list above is the *previous* injection, appended to the log by the harness, segmented as an ordinary user
+  message, and selected as one of the most relevant things in the conversation — because it is a summary of the
+  conversation. The state proxy appeared twice in the same message for the same reason, and by the last step a
+  single message carried 30 recalled blocks. A context that is mostly our own earlier output measures nothing.
+  Fixed by excluding our own blocks where the recall candidates are built (`observeStep`, `isS1capInjected` in
+  `segmenter.ts`, the id prefix shared with the delivery module): the graph stays a faithful record of the session
+  and the tail stays verbatim, because the harness put the block in the log and the request is built from the log.
+  **Not yet re-verified live** — the measurement above is from the run that found the bug.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
   remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
   index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a

@@ -187,3 +187,47 @@ test('the tail block holds the newest turns, including the output produced after
   assert.ok(obs.selectedIds.length >= 0);
   assert.ok(!obs.selectedIds.includes('u2'), 'the anchor is not also a tail turn');
 });
+
+/**
+ * S1CAP must not recall its own delivered blocks.
+ *
+ * A delivered block is appended to the session log by the harness and comes back through the session-event
+ * stream, where it is an ordinary user segment. Being a summary of the conversation, it is also among the most
+ * relevant things in it, so a live run measured the recursion directly: one injection's headers read
+ * `## state proxy T | ## recalled · user · s1cap-895b6ae1 | ## state proxy T | …`, and by the last step a
+ * single message carried 30 recalled blocks, most of them our own earlier output. A context made of our own
+ * output is not a measurement of anything.
+ *
+ * The block stays in the log — the harness put it there, and the request is built from the log, so the model
+ * reads it as part of the transcript either way. What is excluded is its use as a *recall candidate*.
+ */
+test('a delivered block is never a recall candidate, and the graph still holds it', async () => {
+  const policy = cellPolicy('C4');
+  policy.tail.k = 2;
+  const graph = new AssociationGraph();
+  await observeStep({ ...BASE, policy, graph, messages: MESSAGES, step: 1 });
+
+  // A prior step's delivery, exactly as the harness logged it: a user message with our marker id.
+  graph.addSegments([
+    {
+      id: 's1cap-895b6ae1',
+      sessionId: BASE.sessionId,
+      kind: 'user',
+      seq: 900,
+      ts: BASE.now,
+      tokens: 1_500,
+      text: '# context assembled for this step\n## state proxy T\nTASK: something\n## recalled · user · u1\n…',
+    },
+  ]);
+
+  const obs = await observeStep({ ...BASE, policy, graph, messages: [], step: 2 });
+  assert.equal(obs.kind, 'assembled');
+  if (obs.kind !== 'assembled') return;
+
+  assert.ok(!obs.selectedIds.includes('s1cap-895b6ae1'), 'not selected by relevance');
+  assert.ok(
+    !obs.layout.recalled.some((s) => s.id === 's1cap-895b6ae1'),
+    `and not in the recalled block either: ${JSON.stringify(obs.layout.recalled.map((s) => s.id))}`,
+  );
+  assert.ok(graph.getSegment('s1cap-895b6ae1') !== undefined, 'the graph is still a faithful record of the session');
+});

@@ -13,7 +13,7 @@
  */
 import type { AssemblyLayout, AssemblyPolicy, Segment } from './types.ts';
 import { AssociationGraph } from './assoc-graph.ts';
-import { segmentEvent, estimateTokens } from './segmenter.ts';
+import { segmentEvent, estimateTokens, isS1capInjected } from './segmenter.ts';
 import { assemble, totalTokens } from './assembler.ts';
 import { adaptMessages } from './harness-adapter.ts';
 import type { AdapterReport } from './harness-adapter.ts';
@@ -195,7 +195,16 @@ export async function observeStep(
   // the selector's: with x last they sit immediately before it, with x first immediately after it.
   const tailCount = Math.max(0, Math.min(input.policy.tail.k, pool.length));
   const tail = tailCount > 0 ? pool.slice(pool.length - tailCount) : [];
-  const history = pool.slice(0, pool.length - tailCount);
+  const history = pool
+    .slice(0, pool.length - tailCount)
+    // Our own delivered blocks are excluded from the recall candidates, and only from there. The harness appended
+    // them to the session log, so the model reads them as part of the transcript whatever we do; what must stop
+    // is relevance re-selecting them, because a block that summarizes the conversation is among the most relevant
+    // things in it. A live run measured the recursion: one injection's headers read `## state proxy T | ##
+    // recalled · user · s1cap-895b6ae1 | …`, and by the last step a single message carried 30 recalled blocks,
+    // most of them our own previous output. Excluding them here covers both the S1 selection and the recency
+    // fallback, since the assembler draws candidates from `history` in both cases.
+    .filter((s) => !isS1capInjected(s.id));
   // One-entry memo of the last built T. `perTask` is the default policy precisely so this can be a single slot:
   // within a task T does not change, and when the task changes the anchor id changes with it.
   const proxyCache = input.proxyCache ?? { id: '', text: '' };
