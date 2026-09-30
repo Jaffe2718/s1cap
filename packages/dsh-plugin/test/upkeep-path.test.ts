@@ -20,13 +20,15 @@ interface Harness {
   seenByGate: string[];
   scored: unknown[];
   records: unknown[];
+  session: { id: string; kind: string; seq: number }[];
 }
 
-function harness(opts: { withGate?: boolean; withScorer?: boolean } = {}): Harness {
+function harness(opts: { withGate?: boolean; withScorer?: boolean; withSession?: boolean } = {}): Harness {
   const ticks: (() => void)[] = [];
   const seenByGate: string[] = [];
   const scored: unknown[] = [];
   const records: unknown[] = [];
+  const session: { id: string; kind: string; seq: number }[] = [];
   const observer = createStepObserver({
     policy: defaultPolicy(),
     emit: (event) => records.push(event),
@@ -37,6 +39,13 @@ function harness(opts: { withGate?: boolean; withScorer?: boolean } = {}): Harne
     lambdaMs: 36 * 60 * 60 * 1000,
     maxLagTurns: 2,
     schedule: (tick) => ticks.push(tick),
+    ...(opts.withSession === true
+      ? {
+          onSessionEvent: (event) => {
+            session.push({ id: event.id, kind: event.kind, seq: event.seq });
+          },
+        }
+      : {}),
     ...(opts.withGate === true
       ? {
           planGate: {
@@ -56,7 +65,7 @@ function harness(opts: { withGate?: boolean; withScorer?: boolean } = {}): Harne
         }
       : {}),
   });
-  return { observer, ticks, seenByGate, scored, records };
+  return { observer, ticks, seenByGate, scored, records, session };
 }
 
 /** Wait for the queue's async handler to settle; the flush itself is synchronous. */
@@ -172,4 +181,21 @@ test('a batch scorer is called for the window once there is a previous segment t
   const stats = h.observer.stats();
   assert.ok(stats.upkeepScoredPairs > 0, 'and the pairs are counted');
   assert.ok(stats.graphEdges > 0, 'a weight above the threshold produced an edge');
+});
+
+test('the session-content stream is fed the RawEvents that entered the graph, and only those', async () => {
+  const h = harness({ withSession: true });
+  for (const event of sessionEvents()) h.observer.noteSessionEvent(event);
+  h.ticks.forEach((tick) => tick());
+  await settle();
+
+  // The whole point of the session stream is that it is a record of what was actually said, written from the same
+  // adapted events the graph consumed. A declared-but-unwritten sink was the old gap; if this array is empty the
+  // wiring regressed. Four content events, no lifecycle events.
+  assert.equal(h.session.length, 4, `expected four session lines, got ${h.session.length}`);
+  const ids = h.session.map((e) => e.id).sort();
+  assert.deepEqual(ids, ['a1', 'c1', 'r1', 'u1'], 'the user msg, assistant msg, tool call and tool result');
+  // seq comes from the envelope, so the file is replayable in the host's own order, not the plugin's arrival order.
+  assert.deepEqual(h.session.map((e) => e.seq), [3, 4, 5, 6], 'host log sequence, in order');
+  assert.ok(!h.session.some((e) => e.kind === 'systemPinned'), 'lifecycle/system notices are not conversation');
 });

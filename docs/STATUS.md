@@ -340,6 +340,9 @@ verified, it says so instead of guessing.
     half must be plain JavaScript built with `React.createElement` — JSX is not erasable syntax, so Node's
     type stripper cannot process it and this repository ships no bundler.
 - [ ] **N5** `llm_call` telemetry so cost and cache-hit rate become real numbers
+      (`s1_call` side **done and live**: 15 records against 15 backend calls, questions tie out at 108;
+      `usage` contract **measured**: `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens,
+      totalTokens}`. Left: the cache/input semantics, the call site, and `wallMs`/`approvalWaitMs`.)
 - [ ] **N6** The actual context rewrite (`decision.messages`), feature-flagged per ablation cell
 
 ### N4 evidence (round 18)
@@ -1062,9 +1065,17 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   `packages/core/src/telemetry.ts`.
 - **Steps:** subscribe to the call boundary that carries usage; map it onto `LlmCallEvent`
   (`cacheHitTokens` / `cacheMissTokens` / `outputTokens` / `wallMs` / `approvalWaitMs`); write through the
-  session-side sink; expose totals in `/s1`.
-- **Acceptance:** after a real round `session.jsonl` has one `llm_call` record per model call whose token
-  counts match the harness's own accounting, and `/s1` shows a plausible cost.
+  control-plane sink; expose totals in `/s1`.
+- **Acceptance:** after a real round `control.jsonl` has one `llm_call` record per model call whose token
+  counts match the harness's own accounting, and `/s1` shows a plausible cost. (Corrected: this line used to say
+  `session.jsonl`. That was written while the session sink was unwritten, and it contradicts the two-stream rule
+  now in force — `session.jsonl` carries conversation `RawEvent`s, `llm_call` is a `TelemetryEvent` and belongs in
+  the control-plane log, which is the only sink that accepts it.)
+- **Status:** the `usage` shape is measured from a live probe of `assistant/message`:
+  `data.usage = {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens}`. The System-1 half
+  (`s1_call`) is already live and tied out against the stub. The remaining work is the semantics of the three
+  cache/input fields and the call site; `wallMs` and `approvalWaitMs` additionally need the pre-step/`agent`
+  boundary, so expect this to take one more live round rather than a guess.
 - **Traps:** never let a telemetry write change the call; keep the two files separate (I3/I4);
   `netLatencyMs` excludes approval waits by definition.
 
@@ -1186,6 +1197,11 @@ Closed since first written (kept here because each was a wrong-contract class of
 - ~~`xFirst` not a cell dimension~~ **it is now**: `cellPolicy()` sets `xFirst = false` for C1/C3 (chronological)
   and `true` for C2/C4, and `authority.test.ts` pins the axis — the layout is the thing that differs between the
   rows a table would compare, so a preset that left it constant made the position intervention unmeasurable.
+- ~~`sessionJsonl` written by nothing~~ **it is now written**: the upkeep lane hands every adapted `RawEvent` to
+  a session sink, so the file holds the same events the graph consumed (11 lines in the verification run: 2 user,
+  3 trace, 3 toolCall, 3 toolResult, all with unique ids and ascending host `seq`). Written from the lane rather
+  than a second adapter pass, so the file and the graph cannot drift apart, and I4 still holds: content goes here,
+  control records go to the other file, and the config keeps rejecting identical paths.
 
 Open, in order:
 
@@ -1206,9 +1222,15 @@ Open, in order:
    file changes with old→new and the note *"delete the tuning file for a cell-pure run"*; the stale file is gone.
    Experiment rule: **cell runs start by deleting the tuning file**, and the wiring record's `xFirst`/`recall`
    fields are checked against the cell before a session is trusted.
-4. **Cost accounting is not wired.** `summarizeTask`, `llmCallCost` and the `llm_call` / `s1_call` telemetry
-   events exist and nothing emits them, so no record carries what a round cost. The pieces are there; the call
-   sites are not.
+4. **`llm_call` is still unwired — the contract is now measured, so the only thing left is the call site.**
+   The System-1 half of cost accounting is done: every successful backend call emits an `s1_call` record
+   (`role` = assoc/decide, `kind` = noul/choice, questions, input/output tokens, ms, provider), and a live run
+   tied out exactly — 15 `s1_call` records against the stub's 15 `decideCalls`, and the question totals agree
+   at 108. The LLM half needs the host's `usage`, whose shape is now measured rather than guessed: a live probe
+   of `assistant/message` reports `data.usage = {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens,
+   totalTokens}`. What is still missing is the *semantics* (does `inputTokens` include the cache fields?), so the
+   right next step is a one-shot probe of the actual values or the packaged DSH usage type, then emit `llm_call`
+   from the same upkeep lane. Guessing the mapping would put wrong numbers in the one record the cost tables read.
 5. **The `sessionJsonl` sink is declared in config and written by nothing.** Either implement it or remove it
    from `TelemetryConfig` — a declared sink that stays empty reads as a broken feature.
 6. **The plan gate only sees markdown lists.** When the model records a plan through the todo tool instead of

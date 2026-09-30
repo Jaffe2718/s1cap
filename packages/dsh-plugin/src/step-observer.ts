@@ -11,7 +11,7 @@
  * events go into a bounded queue and are folded into the graph on a later tick.
  */
 import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
-import type { AssemblyPolicy, TelemetryEvent, UpkeepQueueStats } from '@s1cap/core';
+import type { AssemblyPolicy, RawEvent, TelemetryEvent, UpkeepQueueStats } from '@s1cap/core';
 
 export interface StepObserverOptions {
   policy: AssemblyPolicy;
@@ -46,6 +46,14 @@ export interface StepObserverOptions {
   onProbe?(line: Record<string, unknown>): void;
   /** M1 N3: record one tape line per call (opt-in; a tape contains session content) */
   onTape?(step: number, messages: readonly unknown[], systemPrompt: string | undefined): void;
+  /**
+   * The session-content stream (`telemetry.sessionJsonl`): one line per adapted RawEvent. Declared in config but
+   * written by nothing was a real gap - a named sink that stays empty reads as a broken feature, and this is the
+   * stream the experiment replay is meant to consume. Content only: the control-plane log is a different file,
+   * and the two may never merge (I4). Fired from upkeep, where the live conversation actually enters the graph,
+   * so the same RawEvent that becomes a segment is the one written here - the two never diverge.
+   */
+  onSessionEvent?(event: RawEvent): void;
   /** schedule one deferred upkeep tick; injected so tests can drive it by hand */
   schedule?(tick: () => void): void;
 }
@@ -226,6 +234,19 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       }
       const segments = raw.flatMap((ev) => segmentEvent(ev));
       graph.addSegments(segments);
+      // The session-content stream, written from the same RawEvents that just entered the graph, so the file and
+      // the graph can never disagree about what the session said. A throw here costs the stream line, not the
+      // segment or the round - the same containment every other optional surface gets.
+      if (opts.onSessionEvent !== undefined) {
+        for (const ev of raw) {
+          try {
+            opts.onSessionEvent(ev);
+          } catch (err) {
+            stats.errors += 1;
+            opts.onWarn?.(`[s1cap] session stream write failed (ignored): ${String(err)}`);
+          }
+        }
+      }
       // Upkeep is where most pairs are scored now, so it is also where most S1 calls happen. It stays off the
       // critical path: the queue already defers this to a timer, and a failure here must cost the edges, not
       // the session - so a backend that is down degrades to no edges for that segment rather than throwing.
@@ -382,13 +403,24 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           // in the wrong place", and the two look identical from every counter.
           const record = typeof event === 'object' && event !== null ? (event as { data?: unknown }) : undefined;
           const data = record?.data;
+          // For an assistant message, also probe the nested `data.usage` shape: `llm_call` needs promptTokens,
+          // cacheHit/cacheMiss and output token fields, and the field names are the host's contract, not ours.
+          // Measuring them is the only honest next step for cost accounting; until a live probe reports the
+          // keys, `llm_call` stays unwired rather than filled with guessed field names.
+          const usage =
+            typeof data === 'object' && data !== null ? (data as { usage?: unknown }).usage : undefined;
           const shape =
             typeof event === 'object' && event !== null
               ? {
                   type: eventType,
                   keys: Object.keys(event as object).slice(0, 14),
                   ...(typeof data === 'object' && data !== null
-                    ? { dataKeys: Object.keys(data as object).slice(0, 14) }
+                    ? {
+                        dataKeys: Object.keys(data as object).slice(0, 14),
+                        ...(typeof usage === 'object' && usage !== null
+                          ? { usageKeys: Object.keys(usage as object).slice(0, 14) }
+                          : {}),
+                      }
                     : { dataType: typeof data }),
                 }
               : { type: typeof event };

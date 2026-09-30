@@ -116,3 +116,22 @@ test('an empty window costs nothing', async () => {
   assert.deepEqual(weights, []);
   assert.equal(called, 0, 'no candidates means no call at all');
 });
+
+test('the reported cost is the measured cost: usage and latency reach stats()', async () => {
+  // The `s1_call` cost record reads these stats. If the client returns real token counts and a real duration,
+  // stats() must carry them, or the per-call line would report zero spend for calls that cost something.
+  // A call's cost is decided by the backend's usage and the client's timer, not by anything estimated here.
+  const relevance = createS1Relevance({
+    decide: async () => ({
+      answers: { h0: { type: 'noul', noul: 0.8 }, h1: { type: 'noul', noul: 0.2 } },
+      usage: { input_tokens: 1400, output_tokens: 2 },
+      ms: 37,
+    }),
+  });
+  await relevance(current, candidates);
+  const stats = relevance.stats();
+  assert.equal(stats.calls, 1, 'one call');
+  assert.equal(stats.questions, 2, 'two questions');
+  assert.equal(stats.inputTokens, 1400, 'backend-reported input tokens, not a guess');
+  assert.equal(stats.outputTokens, 2, 'output tokens likewise');
+});

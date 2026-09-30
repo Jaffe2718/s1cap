@@ -17,8 +17,8 @@
  * that can `import laya`, launches `laya-serve` and health-checks `/v1/models`.
  * Context-lifecycle hooks stay skeletons until M1.
  */
-                                                                           
-import { defaultPolicy, validatePolicy } from '@s1cap/core';
+                                                                                        
+import { defaultPolicy, validatePolicy, TELEMETRY_SCHEMA_VERSION } from '@s1cap/core';
                                                                       
 import {
   LayaServer,
@@ -593,6 +593,16 @@ function applyInner(ctx               , raw                             )       
    */
   let relevance                                                  ;
   let planGate                                               ;
+  /**
+   * Sink counters, closure-level so `/s1` can read them. This project's dominant failure is a component that is
+   * constructed and wired but never actually fed - the block-scoped `sink`/`sessionSink` live inside the
+   * observation branch and the status command cannot reach them, so the only way to tell "the session stream is
+   * written" from "the session stream is declared" is a counter hoisted to where the command can print it. These
+   * are incremented at the emit site, not at construction.
+   */
+  let controlRecords = 0;
+  let sessionLines = 0;
+  let s1CallRecords = 0;
   /** one assemble() per session; awaited by the first pre-step call (a short round can exit before a fire-and-forget promise settles)
  */
   let priming                           ;
@@ -690,7 +700,49 @@ function applyInner(ctx               , raw                             )       
       path: resolveTelemetryPath(resolved.telemetry.controlJsonl),
       onError: (message) => ctx.logger?.warn?.(`[s1cap] control sink: ${message}`),
     });
-    const controlLog = new ControlPlaneLog((line) => sink.write(line));
+    const controlLog = new ControlPlaneLog((line) => {
+      sink.write(line);
+      controlRecords += 1;
+    });
+    // The session-content stream, the other file the two-stream config names. It is a separate sink object with
+    // its own path because I4 forbids content and control records from ever sharing a file; resolvePluginConfig
+    // already rejects identical paths. Declared-but-unwritten was the gap: a field pointing at a file no code
+    // touched. Every adapted session event is written here as one JSONL line, and a broken sink costs a line,
+    // never a round - the same containment the control sink uses.
+    const sessionSink = createControlSink({
+      path: resolveTelemetryPath(resolved.telemetry.sessionJsonl),
+      onError: (message) => ctx.logger?.warn?.(`[s1cap] session sink: ${message}`),
+    });
+    // The `s1_call` cost record. Everything it carries is measured, not estimated: the client times the call
+    // itself and normalizes `usage`, so ms and token counts are what the call actually cost. Emitted once per
+    // successful backend call — a call that throws costs nothing and records nothing, matching the failure
+    // policy everywhere else. A sink that throws must never take the scoring round down with it, so the emit
+    // is wrapped; the telemetry is the thing under study, but it is still only a passenger in the harness.
+    const recordS1Call = (
+      role                     ,
+      kind                     ,
+      questions        ,
+      result                                                                                          ,
+    )       => {
+      try {
+        controlLog.emit({
+          type: 's1_call',
+          schema: TELEMETRY_SCHEMA_VERSION,
+          ts: Date.now(),
+          provider: config.s1.provider,
+          role,
+          kind,
+          questions,
+          inputTokens: result.usage?.input_tokens ?? 0,
+          outputTokens: result.usage?.output_tokens ?? 0,
+          ms: result.ms ?? 0,
+          ...(result.model !== undefined ? { routedModel: result.model } : {}),
+        });
+        s1CallRecords += 1;
+      } catch (err) {
+        ctx.logger?.warn?.(`[s1cap] s1_call record rejected: ${String(err)}`);
+      }
+    };
     // One System-1 call per new segment, scoring the whole window. Absent when no backend is configured, and
     // that absence is the point: the graph then scores lexically, which is what keeps observation mode free,
     // offline and deterministic. A configured backend that fails answers `undefined` and degrades the same way.
@@ -698,7 +750,11 @@ function applyInner(ctx               , raw                             )       
       client === undefined
         ? undefined
         : createS1Relevance({
-            decide: (state, questions) => client.decide(state, questions),
+            decide: async (state, questions) => {
+              const result = await client.decide(state, questions);
+              recordS1Call('assoc', 'noul', Object.keys(questions).length, result);
+              return result;
+            },
             questionsPerCall: config.s1.questionsPerCall,
             onWarn: (message) => ctx.logger?.warn?.(message),
           });
@@ -715,7 +771,11 @@ function applyInner(ctx               , raw                             )       
         ? undefined
         : createPlanGate(
             { policy: config, emit: (event) => controlLog.emit(event), onWarn: (m) => ctx.logger?.warn?.(m) },
-            (state, questions) => client.decide(state, questions),
+            async (state, questions) => {
+              const result = await client.decide(state, questions);
+              recordS1Call('decide', 'choice', Object.keys(questions).length, result);
+              return result;
+            },
           );
     observer = createStepObserver({
       policy: config,
@@ -728,6 +788,10 @@ function applyInner(ctx               , raw                             )       
           // I4 in reverse: a session segment must never reach the control-plane log.
           ctx.logger?.warn?.(`[s1cap] control record rejected: ${String(err)}`);
         }
+      },
+      onSessionEvent: (event) => {
+        sessionSink.write(JSON.stringify(event) + '\n');
+        sessionLines += 1;
       },
       now: () => Date.now(),
       contextWindow: CONTEXT_WINDOW_DEFAULT,
@@ -983,6 +1047,17 @@ function applyInner(ctx               , raw                             )       
             ? { mode: resolved.observation, sink: resolved.telemetry.controlJsonl, ...observer.stats() }
             : { mode: resolved.observation, steps: 0, observed: 0, skipped: 0, errors: 0 },
           telemetry: resolved.telemetry,
+          // Live sink counters. `controlRecords` and `sessionLines` are the only proof that the two content/
+          // control streams are actually being written rather than just declared, and `s1CallRecords` is what
+          // makes the System-1 spend visible per call (role, kind, tokens, ms). "configured and constructed but
+          // never called" is this project's recurring bug; these three numbers are what says it did not recur.
+          streams: {
+            controlRecords,
+            sessionLines,
+            s1CallRecords,
+            sessionPath: resolveTelemetryPath(resolved.telemetry.sessionJsonl),
+            controlPath: resolveTelemetryPath(resolved.telemetry.controlJsonl),
+          },
           configIssues: {
             errors: resolved.policy.errors.concat(resolved.laya.errors           ).map((i) => `${i.path}: ${i.message}`),
             warnings: resolved.policy.warnings.concat(resolved.laya.warnings           ).map((i) => `${i.path}: ${i.message}`),
