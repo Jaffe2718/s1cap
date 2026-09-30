@@ -18,6 +18,7 @@ interface Harness {
   observer: StepObserver;
   ticks: (() => void)[];
   seenByGate: string[];
+  seenTodos: { content: string; status: string }[][];
   scored: unknown[];
   records: unknown[];
   session: { id: string; kind: string; seq: number }[];
@@ -26,6 +27,7 @@ interface Harness {
 function harness(opts: { withGate?: boolean; withScorer?: boolean; withSession?: boolean } = {}): Harness {
   const ticks: (() => void)[] = [];
   const seenByGate: string[] = [];
+  const seenTodos: { content: string; status: string }[][] = [];
   const scored: unknown[] = [];
   const records: unknown[] = [];
   const session: { id: string; kind: string; seq: number }[] = [];
@@ -53,6 +55,10 @@ function harness(opts: { withGate?: boolean; withScorer?: boolean; withSession?:
               seenByGate.push(text);
               return undefined;
             },
+            considerTodos: async (todos: { content: string; status: string }[]) => {
+              seenTodos.push(todos);
+              return undefined;
+            },
           },
         }
       : {}),
@@ -65,7 +71,7 @@ function harness(opts: { withGate?: boolean; withScorer?: boolean; withSession?:
         }
       : {}),
   });
-  return { observer, ticks, seenByGate, scored, records, session };
+  return { observer, ticks, seenByGate, seenTodos, scored, records, session };
 }
 
 /** Wait for the queue's async handler to settle; the flush itself is synchronous. */
@@ -211,6 +217,36 @@ test('the session-content stream is fed the RawEvents that entered the graph, an
  * something S1CAP measures. Those two statements are the whole test, and the tension between them is why it
  * exists.
  */
+test('a plan written with the todo tool reaches the gate, although it carries no message', async () => {
+  // The wiring, not the parser (that is pinned in plan-gate.test.ts). `todo/write` adapts to nothing — it is a
+  // lifecycle event — so it hits the `raw.length === 0` early return, and asking the gate after that return is
+  // exactly how a tool-planning model ends up with an empty decision column and counters that all look healthy.
+  const h = harness({ withGate: true });
+  h.observer.noteSessionEvent({
+    type: 'todo/write',
+    data: {
+      todos: [
+        { content: 'read the failing test', status: 'pending' },
+        { content: 'patch the assertion', status: 'in_progress' },
+        { content: 'write a numbered plan in prose instead', status: 'pending' },
+      ],
+    },
+  });
+  h.ticks.forEach((tick) => tick());
+  await settle();
+
+  assert.equal(h.seenTodos.length, 1, 'the gate was asked once');
+  assert.deepEqual(
+    h.seenTodos[0]?.map((t) => t.content),
+    ['read the failing test', 'patch the assertion', 'write a numbered plan in prose instead'],
+    'every item, in the order the host logged it',
+  );
+  assert.equal(h.seenByGate.length, 0, 'and it did not also arrive as an assistant message');
+  const stats = h.observer.stats();
+  assert.equal(stats.upkeepEmpty, 1, 'it is still a lifecycle event as far as upkeep counting is concerned');
+  assert.equal(stats.errors, 0);
+});
+
 test('a delivered context block never becomes a segment, but the session file still records it', async () => {
   const h = harness({ withSession: true });
   const events = sessionEvents();

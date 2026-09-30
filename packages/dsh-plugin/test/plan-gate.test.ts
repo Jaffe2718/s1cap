@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPlanGate, extractPlans } from '../src/plan-gate-runtime.ts';
+import { createPlanGate, extractPlans, extractTodoEvent, extractTodos } from '../src/plan-gate-runtime.ts';
 import type { PlanGateOptions, PlanGateStats } from '../src/plan-gate-runtime.ts';
 
 const POLICY = {
@@ -17,7 +17,15 @@ const POLICY = {
 
 function harness(answer?: { probabilities: Record<string, number>; confidence: number }) {
   const events: unknown[] = [];
-  const stats: PlanGateStats = { inspected: 0, withPlans: 0, calls: 0, abstained: 0, skipped: 0 };
+  const stats: PlanGateStats = {
+    inspected: 0,
+    withPlans: 0,
+    calls: 0,
+    abstained: 0,
+    skipped: 0,
+    todoEvents: 0,
+    todoWithPlans: 0,
+  };
   const opts: PlanGateOptions = { policy: POLICY, emit: (e) => events.push(e) };
   let calls = 0;
   const gate = createPlanGate(opts, async () => {
@@ -27,6 +35,81 @@ function harness(answer?: { probabilities: Record<string, number>; confidence: n
   });
   return { gate, events, callsRef: () => calls };
 }
+
+test('a plan the model wrote with the todo tool is gated too', async () => {
+  // The defect this closes: plans were only ever read from prose the model typed, so a run whose model plans with
+  // the host's todo tool produced `inspected: 0` and an empty decision column while the model was plainly
+  // planning. The event shape is the host's own (`todo/write` carrying `TodoItem[]`), and the gate is the same one
+  // — same question, same normalization, same abstain rule — because comparing two different gates under one
+  // column would measure the difference between them.
+  const todoWrite = {
+    type: 'todo/write',
+    data: {
+      todos: [
+        { content: 'read the failing test', status: 'pending' },
+        { content: 'patch the assertion', status: 'in_progress' },
+        { content: 'run the suite', status: 'pending' },
+      ],
+    },
+  };
+  const todos = extractTodoEvent(todoWrite);
+  assert.ok(todos !== undefined, 'the event is read');
+  assert.equal(todos?.length, 3);
+
+  const { gate, events, callsRef } = harness({ probabilities: { p1: 0.2, p2: 0.9, p3: 0.4 }, confidence: 0.8 });
+  const decision = await gate.considerTodos(todos ?? [], 'S', 7);
+  assert.equal(callsRef(), 1, 'one System-1 choice call, same as the prose path');
+  assert.deepEqual(decision?.order, ['p2', 'p3', 'p1'], 'the tool-written order is what gets reordered');
+  assert.equal(events.length, 1, 'and one control-plane record, so the decision is in the log either way');
+  const stats = gate.stats();
+  assert.equal(stats.todoEvents, 1, 'todo-written plans are counted apart from inspected messages');
+  assert.equal(stats.todoWithPlans, 1);
+  assert.equal(stats.inspected, 0, 'a todo event is not an assistant message and is not counted as one');
+});
+
+test('a completed step is not a candidate, and the host order is kept as the baseline', async () => {
+  // A step the model already finished is not one it is choosing between. And the order the host logged is the
+  // model's own order, which is exactly the baseline the gate is measured against: re-sorting it here would
+  // destroy the thing being compared.
+  const plans = extractTodos([
+    { content: 'read the failing test', status: 'completed' },
+    { content: 'patch the assertion', status: 'in_progress' },
+    { content: '  run the suite  ', status: 'pending' },
+  ]);
+  assert.deepEqual(
+    plans.map((p) => p.id),
+    ['p1', 'p2'],
+    'ids are assigned after the completed step is dropped, so they stay contiguous',
+  );
+  assert.equal(plans[1]?.summary, 'run the suite', 'and the summary is trimmed');
+  assert.deepEqual(extractTodos([{ content: '   ', status: 'pending' }]), [], 'a blank step is not a candidate');
+  // One candidate is a list of one, not a decision. Extraction does not apply that rule — the gate does, where
+  // the System-1 call lives, so both sources are held to it in the same place.
+  const { gate, callsRef } = harness({ probabilities: { p1: 0.9 }, confidence: 0.9 });
+  const decision = await gate.considerTodos([{ content: 'only one', status: 'pending' }], 'S', 1);
+  assert.equal(decision ?? null, null, 'one step is not a decision');
+  assert.equal(callsRef(), 0, 'and no System-1 call is spent to learn there was nothing to decide');
+});
+
+test('an unreadable todo event costs one event, not a session', () => {
+  // The stream is `unknown` at the boundary. Every one of these is a shape S1CAP declines to guess at, and all
+  // of them have to end the same way: no plan read, no decision, and no exception.
+  assert.equal(extractTodoEvent({ type: 'user/message', data: { role: 'user' } }), undefined, 'not a todo event');
+  assert.equal(extractTodoEvent({ type: 'todo/write' }), undefined, 'no data');
+  assert.equal(extractTodoEvent({ type: 'todo/write', data: {} }), undefined, 'no todos field');
+  assert.equal(extractTodoEvent({ type: 'todo/write', data: { todos: 'nope' } }), undefined, 'todos is not an array');
+  assert.equal(extractTodoEvent(null), undefined);
+  assert.equal(extractTodoEvent('todo/write'), undefined);
+  assert.deepEqual(
+    extractTodoEvent({
+      type: 'todo/write',
+      // A host build that renames or widens a field: the readable items survive, the others are skipped, and the
+      // result is still a plan list rather than a crash or a silent half-order.
+      data: { todos: [{ content: 'keep me', status: 'pending' }, { summary: 'no content field' }, { content: 7 }] },
+    }),
+    [{ content: 'keep me', status: 'pending' }],
+  );
+});
 
 test('plans are read from the model\'s own step list, and prose is not mistaken for one', () => {
   const plans = extractPlans('My plan:\n1. read the failing test\n2. patch the assertion\n3. run the suite');

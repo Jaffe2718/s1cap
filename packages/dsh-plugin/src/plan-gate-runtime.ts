@@ -41,6 +41,16 @@ export interface PlanGate {
    * (an order over one item is not a decision), or no backend.
    */
   consider(text: string, sessionId: string, step: number): Promise<PlanGateDecision | undefined>;
+  /**
+   * The same gate over a plan the model wrote down through the host's todo tool instead of as text.
+   *
+   * The host logs those as `todo/write` session events carrying `TodoItem[]` (verified in the packaged type
+   * catalog), and they are the model's own plan list in exactly the sense `extractPlans` requires — written by
+   * the model, not invented by S1CAP. Without this the gate was blind to every model that plans with a tool, and
+   * it was blind silently: the event looked like ordinary content, the stats said `inspected`, and the decision
+   * column of the method figure stayed empty for those runs.
+   */
+  considerTodos(todos: readonly TodoItem[], sessionId: string, step: number): Promise<PlanGateDecision | undefined>;
   stats(): PlanGateStats;
 }
 
@@ -55,6 +65,68 @@ export interface PlanGateStats {
   abstained: number;
   /** messages that produced no decision at all */
   skipped: number;
+  /** `todo/write` events inspected, so a gate that is blind to tool-written plans is visible in the numbers */
+  todoEvents: number;
+  /** tool-written plan lists from which at least two pending steps were read */
+  todoWithPlans: number;
+}
+
+/**
+ * The host's todo item, as declared in its own type catalog:
+ * `{ content: string; status: 'pending' | 'in_progress' | 'completed' }`.
+ */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+/**
+ * Read the todos out of a `todo/write` session event, or `undefined` when this event is not one.
+ *
+ * Defensive on purpose. The shape is verified in the host's own type catalog, but the session-event stream is
+ * `unknown` at the boundary and a host build that renames the field must cost one event rather than a session:
+ * an item without a string `content` or an unrecognised `status` is skipped, everything else is passed through
+ * as the host logged it. A plan list S1CAP could not read is a missing decision, which is the same outcome as no
+ * plan at all, and it says so in the stats instead of pretending to have gated something.
+ */
+export function extractTodoEvent(event: unknown): TodoItem[] | undefined {
+  if (typeof event !== 'object' || event === null) return undefined;
+  const envelope = event as { type?: unknown; data?: unknown };
+  if (envelope.type !== 'todo/write') return undefined;
+  if (typeof envelope.data !== 'object' || envelope.data === null) return undefined;
+  const todos = (envelope.data as { todos?: unknown }).todos;
+  if (!Array.isArray(todos)) return undefined;
+  const read: TodoItem[] = [];
+  for (const todo of todos) {
+    if (typeof todo !== 'object' || todo === null) continue;
+    const { content, status } = todo as { content?: unknown; status?: unknown };
+    if (typeof content !== 'string') continue;
+    if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') continue;
+    read.push({ content, status });
+  }
+  return read.length > 0 ? read : undefined;
+}
+/**
+ * Read the model's plan out of a `todo/write` event.
+ *
+ * Pending and in-progress steps, in the order the host logged them, and completed ones dropped: a plan the model
+ * has already finished is not a step it is about to choose between, and including them would let the gate rank
+ * work that is already behind it. The host's order is the model's own order, which is what the gate is there to
+ * compare against — re-sorting the list here would destroy the baseline it is measured on.
+ */
+export function extractTodos(todos: readonly TodoItem[], maxPlans = MAX_PLANS): PlanCandidate[] {
+  const plans: PlanCandidate[] = [];
+  for (const todo of todos) {
+    if (todo.status === 'completed') continue;
+    const summary = todo.content.trim();
+    if (summary === '') continue;
+    plans.push({
+      id: `p${plans.length + 1}`,
+      summary: summary.length > MAX_SUMMARY_CHARS ? `${summary.slice(0, MAX_SUMMARY_CHARS)}...` : summary,
+    });
+    if (plans.length >= Math.max(1, Math.trunc(maxPlans))) break;
+  }
+  return plans;
 }
 
 /**
@@ -88,22 +160,39 @@ export function createPlanGate(
     usage?: { input_tokens: number; output_tokens: number };
   }>,
 ): PlanGate {
-  const stats: PlanGateStats = { inspected: 0, withPlans: 0, calls: 0, abstained: 0, skipped: 0 };
+  const stats: PlanGateStats = {
+    inspected: 0,
+    withPlans: 0,
+    calls: 0,
+    abstained: 0,
+    skipped: 0,
+    todoEvents: 0,
+    todoWithPlans: 0,
+  };
 
-  const consider = async (text: string, sessionId: string, step: number): Promise<PlanGateDecision | undefined> => {
+  /**
+   * Score a list of candidates, whoever wrote it down. Shared so the two sources cannot drift apart: the
+   * question, the normalization, the abstain rule and the emitted record are one decision, and a tool-written
+   * plan must be gated by the same gate as a text-written one or the ablation is comparing two different gates.
+   *
+   * `task` is what the model wrote in the same event, used as the question's context. For a todo list that is
+   * the todos themselves — the task is not stated in a `todo/write` event, and inventing one from the session
+   * would put text S1CAP composed into a System-1 question.
+   */
+  const scorePlans = async (
+    plans: PlanCandidate[],
+    task: string,
+  ): Promise<PlanGateDecision | undefined> => {
     if (!opts.policy.planGate.on || decide === undefined) {
       stats.skipped += 1;
       return undefined;
     }
-    stats.inspected += 1;
-    const plans = extractPlans(text, opts.policy.planGate.maxPlans);
     // One candidate is not an ordering decision; two is the smallest case where the gate can differ from the
     // model's own order at all.
     if (plans.length < 2) {
       stats.skipped += 1;
       return undefined;
     }
-    stats.withPlans += 1;
 
     const question = choice(
       'The task is to carry out these candidate plans. Which plan should be executed first? ' +
@@ -114,7 +203,7 @@ export function createPlanGate(
     let scores: PlanScore[];
     try {
       const result = await decide(
-        { task: text.slice(0, MAX_SUMMARY_CHARS * 2), plans: plans.map((p) => ({ id: p.id, summary: p.summary })) },
+        { task: task.slice(0, MAX_SUMMARY_CHARS * 2), plans: plans.map((p) => ({ id: p.id, summary: p.summary })) },
         { first: question },
       );
       stats.calls += 1;
@@ -162,5 +251,26 @@ export function createPlanGate(
     return decision;
   };
 
-  return { consider, stats: () => ({ ...stats }) };
+  const consider = async (text: string, sessionId: string, step: number): Promise<PlanGateDecision | undefined> => {
+    stats.inspected += 1;
+    const plans = extractPlans(text, opts.policy.planGate.maxPlans);
+    if (plans.length >= 2) stats.withPlans += 1;
+    return scorePlans(plans, text);
+  };
+
+  const considerTodos = async (
+    todos: readonly TodoItem[],
+    sessionId: string,
+    step: number,
+  ): Promise<PlanGateDecision | undefined> => {
+    stats.todoEvents += 1;
+    const plans = extractTodos(todos, opts.policy.planGate.maxPlans);
+    if (plans.length >= 2) stats.todoWithPlans += 1;
+    // The task context is the model's own words from the same event: the pending steps, in its order. No other
+    // text goes into the question, for the same reason nothing goes into the model's context.
+    const task = plans.map((p) => p.summary).join('; ');
+    return scorePlans(plans, task);
+  };
+
+  return { consider, considerTodos, stats: () => ({ ...stats }) };
 }

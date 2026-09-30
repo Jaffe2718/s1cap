@@ -1248,12 +1248,39 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   - The one thing the plugin *can* do to the order of what the model reads is decide the order **inside** the
     block it appends, and with only quoted turns that order is the order relevance returned them in.
   - A host-side position intervention would need a hook this DSH build does not expose (see the probe above).
-- **Laya: one choice, and a chosen Laya requires a typed interpreter path.** Jev or Laya, never both: a profile
-  that names two answers the same questions from different models, and the cells are defined by which one is
-  running. `singleBackendIssues` now reports a conflict when Laya is active and `laya.pythonPath` is empty, and
-  the message names the field, the surface, and the file (`… laya_py/env/python.exe`). A conflict is the right
-  severity: the session drops to `provider=none`, System-1 calls go through tier-0, `/s1` and the log say so, and
-  the harness keeps working. A *warning* would have let a run be quietly not-the-run.
+- **The plan gate was blind to every model that plans with a tool. Fixed, against a measured contract.**
+  The gate read candidates only from prose the model typed — a numbered or bulleted line in an assistant message —
+  and its own comment said so. The host logs tool-written plans as `todo/write` session events carrying
+  `TodoItem[]` (both verified in the host's own type catalog: `todo/write: { todos: TodoItem[] }`,
+  `TodoItem: { content: string; status: 'pending' | 'in_progress' | 'completed' }`). Those events carry no message,
+  so they adapt to nothing and hit the `raw.length === 0` early return in upkeep — which is exactly how a
+  tool-planning run produced `inspected: 0`, an empty decision column, and counters that all looked healthy.
+  The gate is now asked before that return, through the same code path as prose plans: same question, same
+  normalization, same abstain rule, because two different gates under one column would measure the difference
+  between them rather than the effect of the intervention.
+  - Completed steps are dropped (a finished step is not one the model is choosing between), and the host's order
+    is kept as-is, because that order *is* the model's own order — the baseline the gate is measured against.
+  - The question's task context is the todos themselves. A `todo/write` event does not state the task, and
+    composing one from the session would put S1CAP-written text into a System-1 question, which is the same rule
+    as for the model's context.
+  - `extractTodoEvent` is defensive at the `unknown` boundary: an item without a string `content` or an
+    unrecognised `status` is skipped, the rest pass through. A plan list that cannot be read is a missing
+    decision — the same outcome as no plan — and it says so in `todoEvents` / `todoWithPlans` rather than
+    pretending to have gated something.
+- **`llm_call` stays unemitted, by decision rather than by omission.** The event is declared in the frozen
+  schema and the cost model reads it, but nothing produces it, which this project treats as a defect, so the
+  reason is recorded here instead:
+  - Usage *is* available: `assistant/message` carries `usage?: TokenUsage`, and S1CAP already ingests that event.
+    `TokenUsage` is `{ inputTokens, outputTokens, totalTokens?, cacheReadTokens?, cacheWriteTokens?, reasoningTokens? }`.
+  - The declared `LlmCallEvent` wants `cacheHitTokens` / `cacheMissTokens`, which are **derived**, and deriving
+    them needs a fact that is not established: whether `inputTokens` already includes cache reads. Two plausible
+    readings give two different cost numbers, and a cost model is exactly where a plausible-but-wrong number is
+    most damaging.
+  - It also wants `netLatencyMs`, and the host reports no LLM-only timing. `step/start` to `assistant/message`
+    includes tool time and approval waits, so recording it under that name would be a lie about what was timed.
+  - Emitting the raw usage alone under the same event name would make a record that claims to be a costed call
+    and is not. The honest options are a separate additive event carrying `TokenUsage` verbatim, or nothing —
+    chosen when someone needs the number, not now, and not by writing zeros.
   - Discovery still reports a candidate interpreter — that is how the panel offers a value to paste — but a
     candidate is not a configuration, and auto-accepting one would make two machines with the same profile pick
     different interpreters.
@@ -1261,6 +1288,24 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
     plugin's Save route). What this side owes the panel is implemented: the requirement is enforced, it is
     readable from `/s1` (`configIssues.conflicts`), and `/s1 laya status` already prints `pythonPath`. The field
     itself has to be added on the panel side.
+- **Where the Laya weights live: not this repository, and not the DSH install either. Verified, not assumed.**
+  Probed the packaged source: `from_pretrained` and `HF_HOME` return **0 hits** across all of
+  `app.asar/dsh/node_modules/@deepseek-ai`, and no `laya` package exists on disk. Nothing ships a Laya runtime,
+  which is consistent with the requirement that the user supplies the Python environment — S1CAP only launches
+  `laya-serve` from an interpreter the user named, and the whole model side arrives with that environment.
+  - Consequence for the design: the weights are a property of the user's Laya installation, not of S1CAP, and
+    `LayaConfig.model` is **not** a weights path — it is the model id sent to `/v1/systemone`.
+  - `laya-serve` 0.3.21 takes no CLI flags, so the checkpoint must be resolved inside that environment: its own
+    config, an environment variable, or the package's default cache. **Which one is not established**, and
+    S1CAP must not invent the variable name — a guessed env var is how a launch silently uses the wrong
+    checkpoint.
+  - It matters more than it looks: `AGENT_BRIEF.md` records base checkpoints at near-chance on typed decisions
+    (0.362 vs 0.318 random) with only the fine-tune reaching 0.766, so a run whose checkpoint cannot be named is
+    a run whose System-1 answers are close to noise. "It started" is not "it scored".
+  - The mechanism for a pass-through already exists (`LayaConfig.env`, whose doc already names `HF_ENDPOINT`).
+    What is missing is a way for the panel to supply it: today the panel can set `pythonPath` and nothing else. A
+    weights field that does not also carry the *variable name* the user's Laya reads would be a guess, so the
+    pair (`weightsPath` + the env var name) is the shape to add — pending what that variable is called.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
   remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
   index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a

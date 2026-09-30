@@ -18,6 +18,7 @@ import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQ
                  
                    
                      
+import { extractTodoEvent } from './plan-gate-runtime.js';
 import { isS1capInjected } from '@s1cap/core';
 
                                       
@@ -248,6 +249,22 @@ export function createStepObserver(opts                     )               {
       if (raw.length === 0) {
         // Lifecycle events (step/start, turn/end, request/header, delivery notices) land here by design.
         stats.upkeepEmpty += 1;
+        // One exception, and it is a real one: `todo/write` is a lifecycle event by shape — it carries no message,
+        // so it adapts to nothing — but its `todos` are the model's own written plan, which is precisely what the
+        // gate scores. It is asked here, before this early return, because the alternative was a gate that only
+        // ever saw plans typed as prose and reported `inspected: 0` for a model that was planning with a tool all
+        // along. The decision stays advisory: the order is computed, recorded, and handed back.
+        if (opts.planGate !== undefined) {
+          const todos = extractTodoEvent(event);
+          if (todos !== undefined) {
+            try {
+              await opts.planGate.considerTodos(todos, stats.sessionId, stats.upkeepEvents);
+            } catch (err) {
+              stats.errors += 1;
+              opts.onWarn?.(`[s1cap] plan gate failed on a todo/write (ignored): ${String(err)}`);
+            }
+          }
+        }
         return;
       }
       // The ingestion gate, on the path production actually takes.
