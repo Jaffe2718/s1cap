@@ -109,6 +109,12 @@ export interface AssemblyEvent {
   windowN?: number;
   /** pair comparisons spent scoring the segments that arrived since the previous step: the S1 cost w bounds */
   scoredPairs?: number;
+  /**
+   * Of those pairs, the ones the System-1 backend actually answered. The difference is what the window paid for
+   * and did not receive - a timed-out batch, a backend that was down, a batch the question cap dropped. Recorded
+   * because `scoredPairs` alone was read as coverage and reported 18528 while 1796 pairs had been judged.
+   */
+  judgedPairs?: number;
   seq: number;
   candidates: number;
   selected: number;

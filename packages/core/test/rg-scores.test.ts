@@ -67,6 +67,32 @@ test('a different r is a different reading of the same run, not a second set of 
   assert.equal(calls, 1, 'sweeping r costs nothing, which is the point of keeping the probability');
 });
 
+test('a window the backend did not answer is still offered, and stops counting as judged', async () => {
+  // The distinction that a live session could not make: `scoredPairs` counts what the window offered, and it was
+  // read as coverage. The session reported 18528 offered pairs while 1796 had been judged and 1863 questions had
+  // timed out, and nothing in the record disagreed.
+  const graph = new AssociationGraph();
+  graph.addSegments([segment('a', 0), segment('b', 1), segment('c', 2)]);
+  let call = 0;
+  await graph.scoreNew({
+    windowN: 8,
+    threshold: 0.55,
+    scoreBatch: async (_current: Segment, candidates: readonly Segment[]) => {
+      call += 1;
+      return call === 1 ? candidates.map(() => 0.9) : undefined; // the second window gets no answer
+    },
+  });
+
+  const stats = graph.stats();
+  assert.equal(stats.scoredPairs, 3, 'both windows were offered');
+  assert.equal(stats.judgedPairs, 1, 'only the window the backend answered was judged');
+  assert.equal(
+    graph.scores().filter((pair) => pair.source === 'lexical').length,
+    2,
+    'and the unanswered two are recorded as fallback, so the gap cannot be mistaken for a backend result',
+  );
+});
+
 test('a snapshot carries the probabilities across a restart, and an older file still loads', async () => {
   const graph = new AssociationGraph();
   graph.addSegments([segment('a', 0), segment('b', 1)]);

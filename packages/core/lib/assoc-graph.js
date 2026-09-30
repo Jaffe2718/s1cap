@@ -85,6 +85,8 @@ export const RG_SNAPSHOT_SCHEMA = 2;
                                                                                                    
                  
                       
+                                                                                                       
+                       
  
 
 export class AssociationGraph {
@@ -95,6 +97,14 @@ export class AssociationGraph {
   #scored = 0;
   /** cumulative pair comparisons - the number recall.window is meant to bound */
   #scoredPairs = 0;
+  /**
+   * Pairs the backend actually answered, as opposed to pairs it was offered.
+   *
+   * `scoredPairs` counts offered pairs and has been read as "pairs that were scored" since it was written, which
+   * is how a live session reported 18528 scored pairs while 1796 had been judged and 1863 questions had timed
+   * out. Two numbers that can be subtracted are worth more than one that has to be trusted.
+   */
+  #judgedPairs = 0;
   #edges = new Map                         ();
   /** every scored pair, above and below the threshold, by `${from}->${to}`; see `ScoredPair` */
   #scores = new Map                    ();
@@ -147,11 +157,13 @@ export class AssociationGraph {
                                                                                 
    )   
                         
+                        
                   
     {
     const windowN = Math.max(1, Math.trunc(opts.windowN));
     const scorer = opts.score ?? lexicalScore;
     let scoredPairs = 0;
+    let judgedPairs = 0;
     let edges = 0;
     while (this.#scored < this.#order.length) {
       const id = this.#order[this.#scored]          ;
@@ -180,6 +192,10 @@ export class AssociationGraph {
         // segment, which is less accurate but never wrong by omission: a system with no System-1 still works.
         const batch = await opts.scoreBatch(current, candidates);
         byBackend = batch !== undefined;
+        // Offered versus judged, counted where the difference is decided: the backend answered this window, or the
+        // fallback did. `scoredPairs` cannot tell the two apart, and reading it as "judged" is what made a 9.7%
+        // coverage rate look like full coverage.
+        if (byBackend) judgedPairs += candidates.length;
         weights = batch === undefined ? candidates.map((other) => scorer(current, other)) : batch;
         if (weights.length !== candidates.length) {
           throw new Error(
@@ -216,7 +232,8 @@ export class AssociationGraph {
       }
     }
     this.#scoredPairs += scoredPairs;
-    return { scoredPairs, edges };
+    this.#judgedPairs += judgedPairs;
+    return { scoredPairs, judgedPairs, edges };
   }
   getSegment(id        )                      {
     return this.#segments.get(id);
@@ -314,8 +331,8 @@ export class AssociationGraph {
       .sort((a, b) => b.w - a.w);
   }
 
-    stats()                                                           {
-      return { segments: this.#segments.size, edges: this.#edges.size, scoredPairs: this.#scoredPairs };
+    stats()                                                                                {
+      return { segments: this.#segments.size, edges: this.#edges.size, scoredPairs: this.#scoredPairs, judgedPairs: this.#judgedPairs };
   }
 
   /**
@@ -334,6 +351,7 @@ export class AssociationGraph {
       scores: [...this.#scores.values()],
       scored: this.#scored,
       scoredPairs: this.#scoredPairs,
+      judgedPairs: this.#judgedPairs,
     };
   }
 
@@ -357,6 +375,7 @@ export class AssociationGraph {
     // Clamped, because a cursor larger than the order array would silently skip scoring forever.
     graph.#scored = Math.max(0, Math.min(graph.#order.length, Math.trunc(snap.scored ?? 0)));
     graph.#scoredPairs = Math.max(0, Math.trunc(snap.scoredPairs ?? 0));
+    graph.#judgedPairs = Math.max(0, Math.trunc(snap.judgedPairs ?? 0));
     return graph;
   }
 

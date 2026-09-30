@@ -284,6 +284,10 @@ export async function observeStep(
     // it arrives, so a per-call number would report only this step's own segment and hide every pair the
     // window actually cost. The graph is the single place that knows the running total.
     scoredPairs: graphStats.scoredPairs,
+    // And of those, the ones the backend actually answered. Read together, `scoredPairs - judgedPairs` is the
+    // number of pairs the window paid for and did not get, which is the only way a silent slide into lexical
+    // scoring shows up in a record that otherwise looks healthy.
+    judgedPairs: graphStats.judgedPairs,
     type: 'assembly',
     schema: TELEMETRY_SCHEMA_VERSION,
     ts: input.now,
