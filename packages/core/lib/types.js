@@ -252,18 +252,26 @@ export function cellPolicy(cell      )                 {
       p.tas.on = false;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
+      // The baseline is chronological, so x goes last. Leaving this at the default made C1 and C3 carry the
+      // position intervention the ablation is meant to isolate, so the one knob that distinguishes them from
+      // C2 and C4 was pinned to the same value in all four cells and the layout axis could not be read at all.
+      p.xFirst = false;
       break;
     case 'C2': // +TAS ordering only
       p.tas.on = true;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
+      p.xFirst = true;
       break;
     case 'C3': // +S1 governance only (selection + plan gate), chronological layout
       p.tas.on = false;
       p.recall.tier1 = 'embed';
       p.planGate.on = true;
+      p.xFirst = false;
       break;
     case 'C4':
+      // full method: TAS ordering, S1 governance, x-first layout
+      p.xFirst = true;
       break;
   }
   return p;
