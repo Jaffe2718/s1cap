@@ -135,7 +135,44 @@ export type TelemetryEvent =
   | S1CallEvent
   | ToolCallEvent
   | AssemblyEvent
-  | PlanGateEvent;
+  | PlanGateEvent
+  | ContextDeliveryEvent;
+
+/**
+ * What the model was actually shown, per step.
+ *
+ * This record exists because "assembled" and "delivered" are different states, and every counter in this project
+ * used to report the first while the experiment needed the second: a layout that is computed, recorded with its
+ * token counts, and never put in front of the model is a claim in a JSONL file. One record per `agent/pre-step`
+ * says which of the two happened, and why not when it did not.
+ */
+export interface ContextDeliveryEvent {
+  type: 'context_delivery';
+  schema: typeof TELEMETRY_SCHEMA_VERSION;
+  ts: number;
+  sessionId?: string;
+  /** the step this decision was for */
+  step?: number;
+  /** the cell, because whether delivery was even possible is a property of the cell */
+  cell: string;
+  /** true only when the returned decision carried a replacement message list */
+  delivered: boolean;
+  /** why, in words: a skip is a reported state, not a silent one */
+  reason: string;
+  /** messages the harness offered, and messages actually returned */
+  messagesBefore: number;
+  messagesAfter: number;
+  /** harness messages passed through verbatim (pinned prefix, tail, and the current turn) */
+  kept: number;
+  /** harness messages the delivered list does not contain */
+  dropped: number;
+  /** blocks we added (recalled segments and the state proxy) */
+  inserted: number;
+  /** how the tail was matched to the harness list: exact by id, or by position */
+  match: 'id' | 'position' | 'none';
+  /** the block order that was delivered, so the record says which layout the model saw */
+  order: string[];
+}
 
 /** Cost of one LLM call in USD. */
 export function llmCallCost(e: LlmCallEvent, prices: TokenPrices): number {

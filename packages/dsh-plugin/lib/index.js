@@ -17,7 +17,7 @@
  * that can `import laya`, launches `laya-serve` and health-checks `/v1/models`.
  * Context-lifecycle hooks stay skeletons until M1.
  */
-                                                                                        
+                                                                                                                         
 import { defaultPolicy, validatePolicy, TELEMETRY_SCHEMA_VERSION } from '@s1cap/core';
                                                                       
 import {
@@ -34,6 +34,7 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
                                                           
 import { ControlPlaneLog } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.js';
+import { deliverContext } from './context-delivery.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { primeSystemPrompt } from './system-prompt.js';
@@ -429,10 +430,32 @@ let probeOut                                      ;
 const earlySessionEvents            = [];
 const EARLY_EVENT_LIMIT = 16;
 
+                                 
+                          
+                                                                                                                  
+               
+                                                                                               
+                                                                                             
+                                    
+ 
+
 export function preStepMiddleware(
   ctx               ,
-  observer               ,
+  /**
+   * Delivery options, or a bare observer (the shape this function had before delivery existed). The legacy form
+   * is still accepted and means "observe and report, change nothing" — so an existing caller keeps its exact
+   * previous behaviour instead of silently gaining an intervention it never asked for.
+   */
+  optionsOrObserver                                ,
 )                                                                       {
+  const options                             =
+    optionsOrObserver === undefined
+      ? undefined
+      : 'observe' in optionsOrObserver
+        ? undefined
+        : optionsOrObserver;
+  const observer                           =
+    optionsOrObserver !== undefined && 'observe' in optionsOrObserver ? optionsOrObserver : options?.observer;
   return async (payload, next) => {
     if (primeOnce !== undefined) {
       // Prime lazily, on the first step: at activation time other plugins may not have provided the
@@ -448,14 +471,75 @@ export function preStepMiddleware(
       }
     }
     const decision = await next();
+    let observation                             ;
     try {
-      // M1 observation mode: segment, recall and assemble for real, record the result in the control
-      // plane, and return the decision completely untouched. `observe()` never throws.
-      await observer?.observe(payload);
+      // Segment, recall and assemble for real, and record the result in the control plane. `observe()` never
+      // throws, and neither does this catch: a failed observation costs the record, never the step.
+      observation = await observer?.observe(payload);
     } catch (err) {
       ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
     }
-    return decision;
+
+    // Context delivery - the step where an assembled layout becomes what the model is shown.
+    //
+    // The first three guards are the harness's own, read out of the packaged `dsh-agent` source rather than
+    // assumed: a rejected or aborted decision goes back exactly as it arrived, and a decision without messages
+    // has nothing to rewrite. Everything after them is ours, and every failure in it returns the untouched
+    // decision: the failure mode of the intervention is that it does not happen, never a broken round.
+    if (options === undefined || observation === undefined) return decision;
+    const record = decision                                                                          ;
+    const before = Array.isArray(record.messages) ? record.messages.length : 0;
+    const report = (delivered         , reason        , extra                          = {})       => {
+      try {
+        options.emit({
+          type: 'context_delivery',
+          schema: TELEMETRY_SCHEMA_VERSION,
+          ts: Date.now(),
+          ...(typeof observation?.event.sessionId === 'string' ? { sessionId: observation.event.sessionId } : {}),
+          cell: options.cell,
+          delivered,
+          reason,
+          messagesBefore: before,
+          messagesAfter: before,
+          kept: 0,
+          dropped: 0,
+          inserted: 0,
+          match: 'none',
+          order: observation?.layout.order ?? [],
+          ...extra,
+        }                  );
+      } catch (err) {
+        ctx.logger?.warn?.(`[s1cap] context_delivery record rejected: ${String(err)}`);
+      }
+    };
+    if (record.kind === 'reject' || record.signal?.aborted === true || !Array.isArray(record.messages)) {
+      report(
+        false,
+        record.kind === 'reject'
+          ? 'the step was rejected, so the decision passes through unchanged'
+          : record.signal?.aborted === true
+            ? 'the step was aborted, so the decision passes through unchanged'
+            : 'the decision carried no messages to rewrite',
+      );
+      return decision;
+    }
+    try {
+      const result = options.deliver(observation, decision                           );
+      if (result === null) {
+        report(false, 'nothing to insert, so the decision passes through unchanged', { order: observation.layout.order });
+        return decision;
+      }
+      report(true, `delivered ${result.length} messages in the order ${observation.layout.order.join(' > ')}`, {
+        messagesAfter: result.length,
+        order: observation.layout.order,
+      });
+      return { ...(decision                           ), messages: result };
+    } catch (err) {
+      // Worth a warning: it means the intervention silently did not happen for this step, which is the failure
+      // this whole file exists to make impossible to miss.
+      ctx.logger?.warn?.(`[s1cap] context delivery failed (decision passed through unchanged): ${String(err)}`);
+      return decision;
+    }
   };
 }
 
@@ -603,6 +687,12 @@ function applyInner(ctx               , raw                             )       
   let controlRecords = 0;
   let sessionLines = 0;
   let s1CallRecords = 0;
+  /**
+   * The control log, hoisted out of the observation branch. `preStepMiddleware` is registered after that block
+   * and has to write delivery records, and a block-scoped const would simply not be visible there — the same
+   * "constructed where it cannot be reached" shape this project keeps meeting.
+   */
+  let controlLogRef                             ;
   /** one assemble() per session; awaited by the first pre-step call (a short round can exit before a fire-and-forget promise settles)
  */
   let priming                           ;
@@ -704,6 +794,7 @@ function applyInner(ctx               , raw                             )       
       sink.write(line);
       controlRecords += 1;
     });
+    controlLogRef = controlLog;
     // The session-content stream, the other file the two-stream config names. It is a separate sink object with
     // its own path because I4 forbids content and control records from ever sharing a file; resolvePluginConfig
     // already rejects identical paths. Declared-but-unwritten was the gap: a field pointing at a file no code
@@ -942,7 +1033,36 @@ function applyInner(ctx               , raw                             )       
   // The only lifecycle hook we register, in the verified middleware shape. `agent/request-error`
   // is deliberately NOT registered: its contract is unverified, and an unverified hook is exactly
   // what took a round down before.
-  ctx.on('agent/pre-step', preStepMiddleware(ctx, observer, priming));
+  // The delivery path, wired once. `config.deliver` is the cell's own switch: the baseline cell (C1) leaves it
+  // off, and `deliverContext` then answers "not delivered" with the reason, so a cell that assembles a layout
+  // nobody receives says so in the control plane instead of looking identical to one that delivers.
+  const emitControl = (event                )       => {
+    try {
+      controlLogRef?.emit(event);
+    } catch (err) {
+      ctx.logger?.warn?.(`[s1cap] control record rejected: ${String(err)}`);
+    }
+  };
+  ctx.on(
+    'agent/pre-step',
+    preStepMiddleware(ctx, {
+      observer,
+      cell: config.cell,
+      emit: emitControl,
+      deliver: (built, decision) =>
+        deliverContext({
+          enabled: config.deliver,
+          order: built.layout.order,
+          ...(built.layout.stateProxy !== undefined ? { stateProxy: built.layout.stateProxy } : {}),
+          recalled: built.layout.recalled,
+          tail: built.layout.tail,
+          anchor: built.layout.anchor,
+          messages: Array.isArray((decision                          ).messages)
+            ? ((decision                           ).messages             )
+            : [],
+        }).messages,
+    }),
+  );
 
   // The `/s1` surface. Registration follows the verified Cordis shape:
   // is ctx.effect(() => ctx.commands.register({ name, description, input, handler })) - all verified

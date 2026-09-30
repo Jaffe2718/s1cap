@@ -11,7 +11,7 @@
  * events go into a bounded queue and are folded into the graph on a later tick.
  */
 import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
-                                                                                              
+                                                                                                               
 
                                       
                          
@@ -97,12 +97,14 @@ import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQ
 
                                
      
-                                                            
+                                                                             
     
                                                                                                               
-                                                                                                 
+                                                                                                              
+                                                                                                                 
+                                                                                                                
      
-                                           
+                                                                  
                                                                                                
                                          
                                                                                               
@@ -298,12 +300,19 @@ export function createStepObserver(opts                     )               {
   }
 
   return {
-    async observe(payload         )                {
+    /**
+     * Observe one step and return what it assembled, or `undefined` when there was nothing to assemble.
+     *
+     * The return value exists for context delivery: the caller needs the layout's segments, not just the
+     * token counts in the record, to be able to put the view in front of the model. It is `undefined` on the
+     * empty and failed paths, and neither of those throws.
+     */
+    async observe(payload         )                                       {
       stats.steps += 1;
       const messages = readMessages(payload);
       if (messages === undefined) {
         stats.skipped += 1;
-        return;
+        return undefined;
       }
       const started = opts.now();
       try {
@@ -339,7 +348,7 @@ export function createStepObserver(opts                     )               {
         if (observation.kind === 'empty') {
           stats.empty += 1;
           opts.onWarn?.(`[s1cap] step ${readStep(payload)} observed nothing: ${observation.reason}`);
-          return;
+          return undefined;
         }
         opts.emit(observation.event);
 
@@ -369,9 +378,11 @@ export function createStepObserver(opts                     )               {
               `roles: ${stats.unknownRoles.join(', ') || 'none'} (kept and reported, never dropped)`,
           );
         }
+        return observation;
       } catch (err) {
         stats.errors += 1;
         opts.onWarn?.(`observation failed (ignored): ${String(err)}`);
+        return undefined;
       }
     },
 

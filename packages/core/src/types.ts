@@ -119,6 +119,19 @@ export interface AssemblyPolicy {
    * smaller but the model's first read is the task rather than whatever was said last.
    */
   xFirst: boolean;
+  /**
+   * Does the assembled view actually reach the model?
+   *
+   * `false` is the honest default and the only safe one: with it off, `agent/pre-step` returns the harness's own
+   * decision untouched and the layout is recorded but not delivered. That was the state of this project until
+   * `context-delivery.ts` existed, and it is why the ablation cells had nothing to ablate — every cell produced a
+   * layout record and the model saw the full history in all of them.
+   *
+   * The baseline cell C1 keeps this off, which is what makes it a baseline: it is the only cell that lets the
+   * harness manage history natively. C2/C3/C4 turn it on, because "ordering only" and "S1 governance only" are
+   * claims about what the model is shown, and a delivered-nothing cell cannot support them.
+   */
+  deliver: boolean;
   planGate: {
     on: boolean;
     /** candidate plans m (<= 3) */
@@ -141,22 +154,25 @@ export interface AssemblyPolicy {
   };
 }
 
+/** The blocks of one model-view context, in the order they were laid out. */
+export interface AssemblyLayout {
+  pinned: Segment[];
+  /** serialized state proxy; undefined when TAS is off */
+  stateProxy?: string;
+  recalled: Segment[];
+  tail: Segment[];
+  /** current user input x — placed by `xFirst`, not always last */
+  anchor: Segment;
+  /**
+   * The actual block order this result was built in, so the layout is observable rather than implied by the
+   * order of the fields above. `['pinned', 'stateProxy', 'anchor', 'recalled', 'tail']` with xFirst, and
+   * `['pinned', 'stateProxy', 'recalled', 'tail', 'anchor']` without it.
+   */
+  order: string[];
+}
+
 export interface AssemblyResult {
-  layout: {
-    pinned: Segment[];
-    /** serialized state proxy; undefined when TAS is off */
-    stateProxy?: string;
-    recalled: Segment[];
-    tail: Segment[];
-    /** current user input x — placed by `xFirst`, not always last */
-    anchor: Segment;
-    /**
-     * The actual block order this result was built in, so the layout is observable rather than implied by the
-     * order of the fields above. `['pinned', 'stateProxy', 'anchor', 'recalled', 'tail']` with xFirst, and
-     * `['pinned', 'stateProxy', 'recalled', 'tail', 'anchor']` without it.
-     */
-    order: string[];
-  };
+  layout: AssemblyLayout;
   budget: {
     total: number;
     used: number;
@@ -238,6 +254,7 @@ export function defaultPolicy(): AssemblyPolicy {
     },
     tail: { k: 3 },
     xFirst: true,
+    deliver: false,
     planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
     s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', timeoutMs: 2500, questionsPerCall: 20 },
   };
@@ -252,6 +269,11 @@ export function cellPolicy(cell: Cell): AssemblyPolicy {
       p.tas.on = false;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
+      // The baseline is the one cell that does not take history management away from the harness: it delivers
+      // nothing, so what it measures is the harness doing what it would have done anyway. Every other cell
+      // delivers its assembled view, because "ordering only" and "S1 governance only" are statements about what
+      // the model is shown - a cell that assembles a layout nobody receives is not an ablation arm.
+      p.deliver = false;
       // The baseline is chronological, so x goes last. Leaving this at the default made C1 and C3 carry the
       // position intervention the ablation is meant to isolate, so the one knob that distinguishes them from
       // C2 and C4 was pinned to the same value in all four cells and the layout axis could not be read at all.
@@ -261,16 +283,19 @@ export function cellPolicy(cell: Cell): AssemblyPolicy {
       p.tas.on = true;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
+      p.deliver = true;
       p.xFirst = true;
       break;
     case 'C3': // +S1 governance only (selection + plan gate), chronological layout
       p.tas.on = false;
       p.recall.tier1 = 'embed';
       p.planGate.on = true;
+      p.deliver = true;
       p.xFirst = false;
       break;
     case 'C4':
       // full method: TAS ordering, S1 governance, x-first layout
+      p.deliver = true;
       p.xFirst = true;
       break;
   }

@@ -11,7 +11,7 @@
  * events go into a bounded queue and are folded into the graph on a later tick.
  */
 import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
-import type { AssemblyPolicy, RawEvent, TelemetryEvent, UpkeepQueueStats } from '@s1cap/core';
+import type { AssemblyPolicy, RawEvent, StepObservation, TelemetryEvent, UpkeepQueueStats } from '@s1cap/core';
 
 export interface StepObserverOptions {
   policy: AssemblyPolicy;
@@ -97,12 +97,14 @@ export interface StepObserverStats {
 
 export interface StepObserver {
   /**
-   * `agent/pre-step`: observe one LLM call, change nothing.
+   * `agent/pre-step`: observe one LLM call, and hand back what it assembled.
    *
    * Returns a promise because scoring a new segment may be one System-1 call. The caller in `index.ts` awaits
-   * it inside its own try/catch, so a rejected scorer still costs the record and never the step.
+   * it inside its own try/catch, so a rejected scorer still costs the record and never the step. The returned
+   * observation carries the layout, which is what lets the caller deliver the view instead of only recording it;
+   * `undefined` means there was nothing to assemble, and the caller then passes the decision through untouched.
    */
-  observe(payload: unknown): Promise<void>;
+  observe(payload: unknown): Promise<StepObservation | undefined>;
   /** `session/event`: capture the system prompt and queue the event for asynchronous upkeep */
   noteSessionEvent(event: unknown): void;
   /** N1: the rendered system prompt, read from the harness registry (see system-prompt.ts) */
@@ -298,12 +300,19 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   }
 
   return {
-    async observe(payload: unknown): Promise<void> {
+    /**
+     * Observe one step and return what it assembled, or `undefined` when there was nothing to assemble.
+     *
+     * The return value exists for context delivery: the caller needs the layout's segments, not just the
+     * token counts in the record, to be able to put the view in front of the model. It is `undefined` on the
+     * empty and failed paths, and neither of those throws.
+     */
+    async observe(payload: unknown): Promise<StepObservation | undefined> {
       stats.steps += 1;
       const messages = readMessages(payload);
       if (messages === undefined) {
         stats.skipped += 1;
-        return;
+        return undefined;
       }
       const started = opts.now();
       try {
@@ -339,7 +348,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         if (observation.kind === 'empty') {
           stats.empty += 1;
           opts.onWarn?.(`[s1cap] step ${readStep(payload)} observed nothing: ${observation.reason}`);
-          return;
+          return undefined;
         }
         opts.emit(observation.event);
 
@@ -369,9 +378,11 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
               `roles: ${stats.unknownRoles.join(', ') || 'none'} (kept and reported, never dropped)`,
           );
         }
+        return observation;
       } catch (err) {
         stats.errors += 1;
         opts.onWarn?.(`observation failed (ignored): ${String(err)}`);
+        return undefined;
       }
     },
 

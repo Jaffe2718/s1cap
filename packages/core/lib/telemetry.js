@@ -135,7 +135,44 @@ export const S1_PRICE_PER_M_INPUT = 0.042;
                
                  
                  
+                 
+                         
+
+/**
+ * What the model was actually shown, per step.
+ *
+ * This record exists because "assembled" and "delivered" are different states, and every counter in this project
+ * used to report the first while the experiment needed the second: a layout that is computed, recorded with its
+ * token counts, and never put in front of the model is a claim in a JSONL file. One record per `agent/pre-step`
+ * says which of the two happened, and why not when it did not.
+ */
+                                       
+                           
+                                          
+             
+                     
+                                       
+                
+                                                                                       
+               
+                                                                                
+                     
+                                                                    
+                 
+                                                                     
+                         
+                        
+                                                                                             
+               
+                                                             
                   
+                                                                
+                   
+                                                                                  
+                                    
+                                                                                          
+                  
+ 
 
 /** Cost of one LLM call in USD. */
 export function llmCallCost(e              , prices             )         {

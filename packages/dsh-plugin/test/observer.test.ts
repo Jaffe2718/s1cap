@@ -11,9 +11,10 @@ import { join } from 'node:path';
 
 import { defaultPolicy } from '@s1cap/core';
 import { apply, preStepMiddleware } from '../src/index.ts';
-import type { CommandSpec, PluginContext } from '../src/index.ts';
+import type { CommandSpec, PluginContext, PreStepOptions } from '../src/index.ts';
 import { commandPayload } from './command-contract.ts';
 import { createStepObserver } from '../src/step-observer.ts';
+import type { StepObserver } from '../src/step-observer.ts';
 
 const MESSAGES = [
   { id: 'sys', role: 'system', content: [{ type: 'text', text: 'You are a coding agent.' }], source: { kind: 'system-prompt' } },
@@ -67,10 +68,34 @@ function observerWith(records: unknown[], overrides: Partial<{ throws: boolean }
   });
 }
 
+/**
+ * Build a middleware the way `index.ts` does, with the delivery path included.
+ *
+ * The default `deliver` answers "nothing to insert", which is what a cell with no recalled block produces — so
+ * every test that is not about delivery keeps asserting the old, still-load-bearing property: the harness's own
+ * decision object comes back by identity.
+ */
+function preStep(observer: StepObserver, overrides: Partial<PreStepOptions> = {}): {
+  middleware: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>;
+  emitted: { type?: string; delivered?: boolean; reason?: string; messagesBefore?: number; messagesAfter?: number; order?: string[] }[];
+} {
+  const emitted: { type?: string; delivered?: boolean; reason?: string; messagesBefore?: number; messagesAfter?: number; order?: string[] }[] = [];
+  return {
+    emitted,
+    middleware: preStepMiddleware(harness().ctx, {
+      observer,
+      cell: 'C4',
+      emit: (event) => emitted.push(event as never),
+      deliver: () => null,
+      ...overrides,
+    }),
+  };
+}
+
 test('a pre-step call emits one assembly record and returns the harness decision untouched', async () => {
   const records: { type?: unknown }[] = [];
   const observer = observerWith(records);
-  const middleware = preStepMiddleware(harness().ctx, observer);
+  const { middleware, emitted } = preStep(observer);
   const decision = { kind: 'accept', messages: [{ kind: 'user' }] };
   let calls = 0;
 
@@ -84,6 +109,14 @@ test('a pre-step call emits one assembly record and returns the harness decision
   assert.equal(records.length, 1);
   assert.equal(records[0]?.type, 'assembly');
 
+  // The delivery record is the difference between "assembled" and "delivered", so it is written on every step,
+  // including the steps where nothing was delivered. A record that only appears on success is a record that
+  // cannot be used to prove the intervention ran.
+  const delivery = emitted.find((e) => e.type === 'context_delivery');
+  assert.ok(delivery !== undefined, 'a context_delivery record is written even when nothing was delivered');
+  assert.equal(delivery?.delivered, false, 'this test cell delivers nothing');
+  assert.ok(typeof delivery?.reason === 'string' && delivery.reason !== '', 'and says why, in words');
+
   const stats = observer.stats();
   assert.equal(stats.steps, 1);
   assert.equal(stats.observed, 1);
@@ -92,6 +125,66 @@ test('a pre-step call emits one assembly record and returns the harness decision
   assert.equal(stats.lastSegments, MESSAGES.length);
   assert.ok(stats.lastWouldSaveTokens >= 0);
   assert.deepEqual(stats.unknownRoles, [], 'the DSH role table covers every role in the fixture');
+});
+
+test('a step that produced nothing delivers nothing and still reports why', async () => {
+  const records: unknown[] = [];
+  const observer = observerWith(records);
+  const { middleware, emitted } = preStep(observer);
+
+  // No message list, so the observer has nothing to assemble: the delivery path must not run at all.
+  const decision = { kind: 'accept', messages: [{ id: 'x' }] };
+  const returned = await middleware({ step: 1 }, async () => decision);
+
+  assert.equal(returned, decision, 'identity preserved');
+  assert.equal(observer.stats().skipped, 1);
+  assert.equal(emitted.length, 0, 'with no assembly there is no delivery to report');
+});
+
+test('a delivery that returns a list replaces the messages, and a rejecting one changes nothing', async () => {
+  const records: unknown[] = [];
+  const observer = observerWith(records);
+  const decision = { kind: 'accept', messages: [{ id: 'sys', role: 'system' }, { id: 'u2', role: 'user' }] };
+
+  const delivered = preStep(observer, {
+    deliver: () => [{ id: 'sys', role: 'system' }, { id: 's1cap-recalled-h1', role: 'user' }],
+  });
+  const returned = await delivered.middleware({ messages: MESSAGES, step: 3 }, async () => decision);
+  assert.notEqual(returned, decision, 'a delivered step returns a new decision object');
+  assert.deepEqual(
+    (returned as { messages: unknown[] }).messages,
+    [{ id: 'sys', role: 'system' }, { id: 's1cap-recalled-h1', role: 'user' }],
+    'with exactly the list the delivery built',
+  );
+  const record = delivered.emitted.find((e) => e.type === 'context_delivery');
+  assert.equal(record?.delivered, true);
+  assert.equal(record?.messagesBefore, 2);
+  assert.equal(record?.messagesAfter, 2);
+
+  const rejecting = preStep(observer, {
+    deliver: () => {
+      throw new Error('delivery blew up');
+    },
+  });
+  const untouched = await rejecting.middleware({ messages: MESSAGES, step: 4 }, async () => decision);
+  assert.equal(untouched, decision, 'a throwing delivery costs the intervention, never the round');
+});
+
+test('a rejected or aborted step is never rewritten', async () => {
+  const records: unknown[] = [];
+  const observer = observerWith(records);
+  const { middleware, emitted } = preStep(observer, { deliver: () => [{ id: 'nope' }] });
+
+  const rejected = { kind: 'reject', messages: [{ id: 'u' }] };
+  assert.equal(await middleware({ messages: MESSAGES, step: 1 }, async () => rejected), rejected);
+
+  const aborted = { kind: 'accept', signal: { aborted: true }, messages: [{ id: 'u' }] };
+  assert.equal(await middleware({ messages: MESSAGES, step: 2 }, async () => aborted), aborted);
+
+  assert.equal(emitted.length, 2, 'both skips are reported');
+  assert.ok(emitted.every((e) => e.delivered === false));
+  assert.ok(emitted.some((e) => (e.reason ?? '').includes('rejected')));
+  assert.ok(emitted.some((e) => (e.reason ?? '').includes('aborted')));
 });
 
 test('a payload without a message list is skipped, not guessed at', async () => {
@@ -174,13 +267,20 @@ test('enabled + observation log writes the record to the configured sink, isolat
   await handler?.({ messages: MESSAGES, step: 2 }, async () => ({ kind: 'accept', messages: [] }));
 
   const lines = readFileSync(control, 'utf8').trim().split('\n');
-  assert.equal(lines.length, 2, 'one control-plane record per observed step');
-  const record = JSON.parse(lines[0] ?? '{}') as Record<string, unknown>;
-  assert.equal(record['type'], 'assembly');
+  // Two kinds of control record per step now: the assembly, and the delivery report that says whether the model
+  // was shown it. The delivery report is the reason this test's count changed, and it is the reason it matters:
+  // without it, "assembled" and "delivered" were indistinguishable in every log this project produced.
+  const records = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(records.filter((r) => r['type'] === 'assembly').length, 2, 'one assembly per observed step');
+  assert.equal(records.filter((r) => r['type'] === 'context_delivery').length, 2, 'one delivery report per step');
+  const record = records.find((r) => r['type'] === 'assembly') as Record<string, unknown>;
   assert.equal(record['schema'], 1);
   assert.equal(record['seq'], 0, 'the first observed step starts the observation sequence');
   assert.equal(typeof record['budgetUsed'], 'number');
-  assert.equal('kind' in record, false, 'a control-plane record carries `type`, never a session `kind`');
+  assert.ok(
+    records.every((r) => !('kind' in r)),
+    'a control-plane record carries `type`, never a session `kind`',
+  );
   assert.throws(() => readFileSync(session, 'utf8'), 'the session sink is untouched by observation');
 
   const status = commandPayload(h.commands.get('s1')?.({})) as {

@@ -11,82 +11,82 @@
  * messages — so a replay of the same step produces the same observation byte for byte
  * (`packages/core/test/observer.test.ts`).
  */
-import type { AssemblyLayout, AssemblyPolicy, Segment } from './types.ts';
-import { AssociationGraph } from './assoc-graph.ts';
-import { segmentEvent, estimateTokens } from './segmenter.ts';
-import { assemble, totalTokens } from './assembler.ts';
-import { adaptMessages } from './harness-adapter.ts';
-import type { AdapterReport } from './harness-adapter.ts';
-import { TELEMETRY_SCHEMA_VERSION } from './telemetry.ts';
-import { buildStateProxy } from './state-proxy.ts';
-import type { AssemblyEvent } from './telemetry.ts';
+                                                                          
+import { AssociationGraph } from './assoc-graph.js';
+import { segmentEvent, estimateTokens } from './segmenter.js';
+import { assemble, totalTokens } from './assembler.js';
+import { adaptMessages } from './harness-adapter.js';
+                                                          
+import { TELEMETRY_SCHEMA_VERSION } from './telemetry.js';
+import { buildStateProxy } from './state-proxy.js';
+                                                    
 
-export interface ObserveStepInput {
-  sessionId: string;
-  /** harness step number (1-based); recorded for correlation only */
-  step: number;
-  /** session-log sequence of the first message in `messages` */
-  seq: number;
-  /** harness message list as offered to this LLM call (DSH shape; see harness-adapter.ts) */
-  messages: readonly unknown[];
-  /**
-   * Rendered system prompt, when the caller has one. The `agent/pre-step` payload's `messages` array does
-   * not carry it — verified in a real round, where `blocks.pinned` came out 0 — so the harness's own
-   * system-prompt surface supplies it; `extractSystemPrompt()` reads it out of a session event.
-   */
-  systemPrompt?: string;
-  policy: AssemblyPolicy;
-  now: number;
-  /**
-   * Optional batch scorer, forwarded to the graph. Supplied when a System-1 backend is live, absent otherwise -
-   * the graph falls back to its lexical scorer, which is what keeps observation mode free and offline.
-   */
-  scoreBatch?: (
-    current: Segment,
-    candidates: readonly Segment[],
-  ) => readonly number[] | Promise<readonly number[]>;
-  /**
-   * One-entry memo for T, held by the caller so it survives across steps. It is passed in rather than created
-   * here because `observeStep` is a pure function of its input: a per-call proxy cache would rebuild T on every
-   * step, which is exactly the instability the block is placed to avoid.
-   */
-  proxyCache?: { id: string; text: string };
-  contextWindow: number;
-  reserveOutputTokens: number;
-  fixedOverheadTokens: number;
-  lambdaMs: number;
-  /**
-   * The graph maintained across steps. In observation mode the upkeep is a synchronous stand-in for the
-   * asynchronous lane: the graph is updated here, before assembly, so recall has something to recall.
-   * The async lane replaces this call site in M1's next sub-step; the assembler never notices.
-   */
-  graph: AssociationGraph;
-  reasoningPartTypes?: readonly string[];
-}
+                                   
+                    
+                                                                     
+               
+                                                                
+              
+                                                                                             
+                               
+     
+                                                                                                          
+                                                                                                     
+                                                                                                
+     
+                        
+                         
+              
+     
+                                                                                                                
+                                                                                                       
+     
+                
+                     
+                                   
+                                                      
+     
+                                                                                                              
+                                                                                                                
+                                                                         
+     
+                                            
+                        
+                              
+                              
+                   
+     
+                                                                                                        
+                                                                                                      
+                                                                                               
+     
+                          
+                                         
+ 
 
 /** a step that produced an assembly and a control-plane record */
-export interface StepObservation {
-  kind: 'assembled';
-  /** the control-plane record (frozen telemetry schema v1) */
-  event: AssemblyEvent;
-  /** what the segmenter produced, in order */
-  segments: Segment[];
-  /** the recalled block actually selected, in order (ids only, for replay comparison) */
-  selectedIds: string[];
-  /**
-   * The blocks themselves, in layout order. Present so a caller can *deliver* the view rather than only report
-   * it: until `context-delivery.ts` existed, the layout was reachable only as token counts in the record, and a
-   * layout the model never sees is a claim in a log file.
-   */
-  layout: AssemblyLayout;
-  fullTokens: number;
-  selectedTokens: number;
-  /** tokens the full history would have sent that the selected view does not */
-  wouldSaveTokens: number;
-  report: AdapterReport;
-  /** wall time the observation itself took, filled by the caller (0 when unknown) */
-  observeMs: number;
-}
+                                  
+                    
+                                                              
+                       
+                                              
+                      
+                                                                                         
+                        
+     
+                                                                                                               
+                                                                                                                
+                                                          
+     
+                         
+                     
+                         
+                                                                                
+                          
+                        
+                                                                                     
+                    
+ 
 
 /**
  * A step that produced no assembly at all.
@@ -98,23 +98,23 @@ export interface StepObservation {
  * observer's own guard. It looked like a working install: the plugin stayed inert, the harness was fine, and the
  * control-plane log kept exactly one record from the primer. Reporting the case is what makes it visible.
  */
-export interface EmptyStepObservation {
-  kind: 'empty';
-  /** why there is nothing to assemble, in words fit for a log line */
-  reason: string;
-  /** the number of messages that produced no segment */
-  messages: number;
-  /**
-   * Still present, and the reason it matters: the report names the roles and part types the adapter could not
-   * read. An empty step is usually a *shape* we do not understand yet, so dropping the report would throw away
-   * the only clue about which shape it was.
-   */
-  report: AdapterReport;
-}
+                                       
+                
+                                                                      
+                 
+                                                        
+                   
+     
+                                                                                                              
+                                                                                                               
+                                            
+     
+                        
+ 
 
 export async function observeStep(
-  input: ObserveStepInput,
-): Promise<StepObservation | EmptyStepObservation> {
+  input                  ,
+)                                                  {
   const { events, report } = adaptMessages(input.messages, {
     sessionId: input.sessionId,
     startSeq: input.seq,
@@ -123,7 +123,7 @@ export async function observeStep(
   });
 
   // segmentEvent applies the I2 gate (provenance.ts): a control-plane record can never become a segment.
-  const segments: Segment[] = events.flatMap((ev) => segmentEvent(ev));
+  const segments            = events.flatMap((ev) => segmentEvent(ev));
   input.graph.addSegments(segments);
   // recall.window = w: only segments that arrived since the previous step are scored, each against
   // the most recent w segments. Segments outside the window keep their edges and stay reachable. The result is
@@ -156,7 +156,7 @@ export async function observeStep(
   // conversation. So the window is this payload's segments when it has any, and the graph's own append order
   // otherwise. Both are the same thing in the steady state: the payload's segments are added to this same graph
   // immediately above, so the graph is a superset and using it never loses a segment the payload carried.
-  const window: Segment[] = segments.length > 0 ? segments : input.graph.orderedSegments();
+  const window            = segments.length > 0 ? segments : input.graph.orderedSegments();
   const windowAnchor = anchor >= 0 ? anchor : lastIndexWhere(window, (s) => s.kind === 'user');
   const current = windowAnchor >= 0 ? window[windowAnchor] : window[window.length - 1];
   if (current === undefined) {
@@ -231,7 +231,7 @@ export async function observeStep(
   const fullTokens = totalTokens(window);
   const selectedTokens = result.budget.used;
   const graphStats = input.graph.stats();
-  const event: AssemblyEvent = {
+  const event                = {
     windowN: input.policy.recall.window,
     // Cumulative, because the pairs are no longer all scored here: upkeep scores each new session segment as
     // it arrives, so a per-call number would report only this step's own segment and hide every pair the
@@ -271,7 +271,7 @@ export async function observeStep(
   };
 }
 
-function lastIndexWhere<T>(items: readonly T[], predicate: (item: T) => boolean): number {
+function lastIndexWhere   (items              , predicate                      )         {
   for (let i = items.length - 1; i >= 0; i -= 1) {
     const item = items[i];
     if (item !== undefined && predicate(item)) return i;
