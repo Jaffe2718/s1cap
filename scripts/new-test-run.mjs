@@ -23,12 +23,17 @@
  * them; the defence against that is that the task text names one directory, and the harness moves a finished
  * round's directory out of the workspace once its evidence has been collected.
  *
+ * The round's messages come from `scripts/round-tasks.json`, and the salt is substituted into them here rather
+ * than retyped: the first message names the directory, so a mistyped salt would send the answer somewhere the
+ * round is not watching. The fixture is ASCII-escaped (`\uXXXX`) because the experiment's stimuli are Chinese
+ * and no repository file may contain Chinese; decoding it yields the exact code points that were recorded.
+ *
  * Usage:
- *   node scripts/new-test-run.mjs                 # print this round's directory and task line
+ *   node scripts/new-test-run.mjs                 # print this round's directory and its messages
  *   node scripts/new-test-run.mjs --create        # also create it
  *   node scripts/new-test-run.mjs --root <dir>    # workspace to open the round in (default: the repo's parent)
  */
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +41,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
 const DEFAULT_ROOT = dirname(REPO);
+const TASKS = join(HERE, 'round-tasks.json');
 
 function readFlag(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -62,15 +68,23 @@ if (created) {
   mkdirSync(dir);
 }
 
+// One round is one conversation: the messages below are sent in order, into the same session, and the salt
+// appears exactly once - in the first one, which is what gives the round its directory.
+const turns = JSON.parse(readFileSync(TASKS, 'utf8')).turns.map((turn) => ({
+  turn: turn.turn,
+  text: String(turn.text).replaceAll('{salt}', name),
+}));
+
 process.stdout.write(
   [
     `workspace       : ${root}`,
     `round directory : ${dir}`,
     `state           : ${created ? 'created' : 'not created (pass --create)'}`,
     '',
-    'task line to send (names the directory, so the answer cannot land anywhere else):',
-    `  Write your answer as an .html file inside the directory "${name}/" in the current workspace, and write nothing outside it.`,
+    'messages to send, in this order, into one session:',
+    ...turns.map((t) => `  ${t.turn}. ${t.text}`),
     '',
-    'the round directory then holds that round\'s answer and nothing else, and no two rounds share a name.',
+    `every turn writes inside "${name}/"; the round directory then holds that round's answer and nothing else,`,
+    'and no two rounds share a name.',
   ].join('\n') + '\n',
 );

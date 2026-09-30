@@ -1420,12 +1420,17 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
    could read the previous round's answer instead of solving the task, and two rounds writing the same name
    replaced one another. The path is now `<workspace>/<salt>/<answer>.html`, where the salt is 48 bits of
    urandom: a name that cannot be derived from the previous round's prompt, and therefore cannot be aimed at.
-   Open a round with `node scripts/new-test-run.mjs --create`, which prints the directory and the task line that
-   names it. The **workspace itself is not reconfigured** — the session's workspace is part of what the
-   experiment observes, so narrowing it per round would change the thing under study. What the salt does *not*
-   do is hide the other rounds: they are still inside the workspace, so move a finished round's directory out
-   once its evidence is collected. The artifacts from before this rule live in `260930164900/` (a timestamp,
-   from when the rule was a timestamp).
+   Open a round with `node scripts/new-test-run.mjs --create`, which prints the directory and **the messages to
+   send, in order, into one session**: the salt appears exactly once, in the first message, which is what gives
+   the round its directory, and the later turns edit the same file in place. The messages come from
+   `scripts/round-tasks.json` and are substituted rather than retyped, because a mistyped salt sends the answer
+   somewhere the round is not watching. That fixture is ASCII-escaped (`\uXXXX`): the stimuli are Chinese and no
+   repository file may contain Chinese, so the escapes are how the exact recorded code points stay exact. The
+   **workspace itself is not reconfigured** — the session's workspace is part of what the experiment observes, so
+   narrowing it per round would change the thing under study. What the salt does *not* do is hide the other
+   rounds: they are still inside the workspace, so move a finished round's directory out once its evidence is
+   collected. The artifacts from before this rule live in `260930164900/` (a timestamp, from when the rule was a
+   timestamp).
 
 ## 5. Verify everything right now
 
