@@ -42,7 +42,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { primeSystemPrompt } from './system-prompt.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from './credentials.ts';
+import { TUNING_REF, parseEnvName, parsePath, parseTuning, parseTuningArgs, readCredential } from './credentials.ts';
 import type { Tuning } from './credentials.ts';
 import { createStepObserver } from './step-observer.ts';
 import type { StepObserver } from './step-observer.ts';
@@ -322,10 +322,16 @@ export class LayaRuntime {
    * Compact status for the command surface (docs/CONTROL_PLANE_LOGGING.md §5): the
    * backend's raw stdout/stderr stays a bounded diagnostic buffer and is never handed
    * to the agent as command output, so it cannot become a session segment.
+   *
+   * The last few lines ride along, and that is a change forced by a failed launch: the buffer held 50 lines and
+   * this function reported `logLines: 50`, so a start that died told the reader *how much* had been said and none
+   * of *what*. Diagnosing it meant reproducing the spawn outside the host to get the same text by hand. The bound
+   * is deliberate — this is a status line, not a log dump — and it is the tail, because that is where a Python
+   * traceback ends.
  */
-  summary(): Omit<LayaRuntimeState, 'logs'> & { logLines: number } {
+  summary(tailLines = 12): Omit<LayaRuntimeState, 'logs'> & { logLines: number; logTail: string[] } {
     const { logs, ...rest } = this.state();
-    return { ...rest, logLines: logs.length };
+    return { ...rest, logLines: logs.length, logTail: logs.slice(-tailLines) };
   }
 }
 
@@ -371,10 +377,10 @@ const TUNING_FILE = './.s1cap/tuning.json';
  */
 const TUNING_ROUTE = '/s1cap-7340';
 
-function readTuningFile(): Tuning {
+export function readTuningFile(): Tuning {
   try {
     const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
-    const parsed = JSON.parse(raw) as { depth?: unknown; relevanceThreshold?: unknown; window?: unknown; xFirst?: unknown };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
     const out: Tuning = {};
     if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth > 0) out.depth = parsed.depth;
     // A file written before the rename still carries the old key: read either, so an upgrade does not silently
@@ -387,6 +393,16 @@ function readTuningFile(): Tuning {
     // the in-memory copy, and the layout stayed on its default - a stored setting that looked saved everywhere
     // except in the prompt it was supposed to change.
     if (typeof parsed.xFirst === 'boolean') out.xFirst = parsed.xFirst;
+    // The Laya fields, read through the same validators the command line uses. A live run found the gap this
+    // closes: the panel wrote an interpreter path, the route echoed it back from the in-memory copy, and the
+    // session still came up `provider=none` for a missing path — the write half existed and the read half did
+    // not, which is the identical shape to the xFirst bug above and just as invisible from the outside.
+    const pythonPath = parsePath(typeof parsed.layaPythonPath === 'string' ? parsed.layaPythonPath : undefined);
+    if (pythonPath !== undefined) out.layaPythonPath = pythonPath;
+    const cacheDir = parsePath(typeof parsed.layaWeightsCacheDir === 'string' ? parsed.layaWeightsCacheDir : undefined);
+    if (cacheDir !== undefined) out.layaWeightsCacheDir = cacheDir;
+    const envVar = parseEnvName(typeof parsed.layaWeightsEnvVar === 'string' ? parsed.layaWeightsEnvVar : undefined);
+    if (envVar !== undefined) out.layaWeightsEnvVar = envVar;
     return out;
   } catch {
     return {};
@@ -670,19 +686,31 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // One S1 backend at a time (docs/AGENT_BRIEF.md §0.9). A conflict is reported and the session
   // degrades to observation mode rather than silently picking a governor.
   for (const conflict of resolved.conflicts) ctx.logger?.warn(`[s1cap] ${conflict}`);
-  const backend: ResolvedS1Backend = resolveS1Backend(
-    resolved.conflicts.length > 0 ? { ...config.s1, provider: 'none' } : config.s1,
-    layaConfig,
-  );
-  const client =
-    backend.mode !== 'none' && backend.baseUrl
-      ? new S1Client({
-          baseUrl: backend.baseUrl,
-          ...(backend.apiKey ? { apiKey: backend.apiKey } : {}),
-          ...(backend.model ? { model: backend.model } : {}),
-          timeoutMs: config.s1.timeoutMs,
-        })
-      : undefined;
+  // Re-resolvable, because the panel's Laya fields are read on the first step rather than at activation (the
+  // interpreter must be in place before the first observation, and the host may not have the credential service
+  // yet when it activates a plugin). A session that started with an empty path therefore *resolves* the conflict
+  // on step one — and with these as plain consts it kept the `none` backend it was built with, so the conflict
+  // cleared in `/s1` while the session still made no System-1 calls at all. A live run with the panel's value
+  // arriving on step one is what exposed it: conflicts none, calls zero.
+  const buildBackend = (): { backend: ResolvedS1Backend; client: S1Client | undefined } => {
+    const backend: ResolvedS1Backend = resolveS1Backend(
+      resolved.conflicts.length > 0 ? { ...config.s1, provider: 'none' } : config.s1,
+      layaConfig,
+    );
+    const client =
+      backend.mode !== 'none' && backend.baseUrl
+        ? new S1Client({
+            baseUrl: backend.baseUrl,
+            ...(backend.apiKey ? { apiKey: backend.apiKey } : {}),
+            ...(backend.model ? { model: backend.model } : {}),
+            timeoutMs: config.s1.timeoutMs,
+          })
+        : undefined;
+    return { backend, client };
+  };
+  const initial = buildBackend();
+  let backend: ResolvedS1Backend = initial.backend;
+  let client: S1Client | undefined = initial.client;
 
   ctx.logger?.info(
     `[s1cap] cell=${config.cell} tas=${String(config.tas.on)} tier1=${config.recall.tier1} planGate=${String(config.planGate.on)} laya=${String(layaConfig.enabled)}`,
@@ -1018,11 +1046,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       if (appliedTuning.relevanceThreshold !== undefined) config.recall.relevanceThreshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
       if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
-      // The panel's Laya fields land on the *live* config, not on the resolved one: the interpreter is needed to
-      // start the server, which happens before anything is resolved, and a value stored by the panel has to reach
-      // both the launcher and the conflict check. It is applied after `conflicts` were computed from the file, so
-      // the conflict a stored path resolves is re-checked below rather than assumed gone.
-      const layaConfig = laya.config as LayaConfig;
+      // The panel's Laya fields land on the *live* config object — the same one the launcher, the conflict check
+      // and the status route read. This line previously declared a local of the same name from
+      // `validateLayaConfig(...).config`, a normalised copy nothing else holds, so the panel's interpreter was
+      // written into a dead object: the route still reported an empty path, the conflict still fired, and a
+      // launch would have used no interpreter at all. A shadowed name is invisible from the outside, which is why
+      // the test for this reads the value back out of the `/s1` payload instead of trusting the assignment.
       if (appliedTuning.layaPythonPath !== undefined) layaConfig.pythonPath = appliedTuning.layaPythonPath;
       if (appliedTuning.layaWeightsCacheDir !== undefined) layaConfig.weightsCacheDir = appliedTuning.layaWeightsCacheDir;
       if (appliedTuning.layaWeightsEnvVar !== undefined) layaConfig.weightsEnvVar = appliedTuning.layaWeightsEnvVar;
@@ -1040,6 +1069,17 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
               `${was} conflict(s) before, ${after.length} after${after.length > 0 ? ` — ${after.join('; ')}` : ''}`,
           );
         }
+        // Re-resolve the backend, or clearing the conflict would be cosmetic: the client was built at activation
+        // from the conflicted config and would keep making no calls for the rest of the session.
+        const rebuilt = buildBackend();
+        if (rebuilt.backend.mode !== backend.mode || rebuilt.backend.baseUrl !== backend.baseUrl) {
+          ctx.logger?.info?.(
+            `[s1cap] System-1 backend re-resolved on the first step: ${describeS1Backend(backend)} -> ` +
+              `${describeS1Backend(rebuilt.backend)}`,
+          );
+        }
+        backend = rebuilt.backend;
+        client = rebuilt.client;
       }
       for (const knob of ['depth', 'relevanceThreshold', 'window', 'xFirst'] as const) {
         const after =
@@ -1140,20 +1180,41 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
    * answer with the effective triple. The `/s1-tune` command and the panel's Save button share it, so the command
    * line and the button cannot drift apart in what they accept or what they report.
  */
-  const applyTuning = (parsed: Tuning): { ok: boolean; reason?: string; effective?: Tuning; persisted?: boolean; persistError?: string } => {
+  const applyTuning = (parsed: Tuning): { ok: boolean; reason?: string; effective?: Tuning; persisted?: boolean; persistError?: string; layaApplied?: boolean } => {
+    const layaOnly =
+      parsed.layaPythonPath === undefined &&
+      parsed.layaWeightsCacheDir === undefined &&
+      parsed.layaWeightsEnvVar === undefined;
     if (
       parsed.depth === undefined &&
       parsed.relevanceThreshold === undefined &&
       parsed.window === undefined &&
-      parsed.xFirst === undefined
+      parsed.xFirst === undefined &&
+      layaOnly
     ) {
       return {
         ok: false,
         reason:
-          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, xFirst on/off',
+          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, xFirst on/off, or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
       };
     }
     appliedTuning = { ...appliedTuning, ...parsed };
+    // A panel value has to take effect now, not at the next start: the field the user just filled in is the one
+    // that decides whether System-1 calls happen at all, and a backend that waits for a restart to pick it up
+    // reports itself as broken for as long as the panel looks like it did nothing. The launcher reads the live
+    // config when it starts, and the conflicts are recomputed below so a path that resolves a conflict says so.
+    if (parsed.layaPythonPath !== undefined) layaConfig.pythonPath = parsed.layaPythonPath;
+    if (parsed.layaWeightsCacheDir !== undefined) layaConfig.weightsCacheDir = parsed.layaWeightsCacheDir;
+    if (parsed.layaWeightsEnvVar !== undefined) layaConfig.weightsEnvVar = parsed.layaWeightsEnvVar;
+    if (parsed.layaPythonPath !== undefined || parsed.layaWeightsCacheDir !== undefined || parsed.layaWeightsEnvVar !== undefined) {
+      const after = singleBackendIssues(config.s1, layaConfig);
+      resolved.conflicts = after;
+      ctx.logger?.info?.(
+        `[s1cap] laya settings applied from the panel: interpreter=${String(layaConfig.pythonPath ?? '(unset)')} ` +
+          `weights=${String(layaConfig.weightsCacheDir ?? '(default)')} var=${String(layaConfig.weightsEnvVar ?? '(default)')} ` +
+          `— ${after.length} conflict(s)${after.length > 0 ? `: ${after.join('; ')}` : ''}`,
+      );
+    }
     if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
     if (parsed.relevanceThreshold !== undefined) config.recall.relevanceThreshold = parsed.relevanceThreshold;
     if (parsed.window !== undefined) config.recall.window = parsed.window;
@@ -1178,15 +1239,26 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   registerCommands(ctx, [
     {
       name: 's1-tune',
-      description: 'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), xFirst on/off',
-      input: { hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "xFirst=off")' },
+      description:
+        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), xFirst on/off — and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
+      input: {
+        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "xFirst=off", or laya="D:/conda/envs/ml/python.exe")',
+      },
       handler: ({ rawInput }) => {
         const outcome = applyTuning(parseTuningArgs(rawInput));
         if (!outcome.ok) return commandError(outcome.reason ?? 'the tuning was refused');
         const eff = outcome.effective;
+        // A Laya-only save has no depth/threshold to report, and printing four defaults for it would tell the
+        // user the button did nothing.
+        const layaPart =
+          outcome.layaApplied === true
+            ? `laya interpreter=${String(layaConfig.pythonPath ?? '(unset)')} weights=${String(
+                layaConfig.weightsCacheDir ?? '(default)',
+              )} var=${String(layaConfig.weightsEnvVar ?? '(default)')}`
+            : `depth=${String(eff?.depth)} relevanceThreshold=${String(eff?.relevanceThreshold)} ` +
+              `window=${String(eff?.window)} xFirst=${eff?.xFirst === true ? 'on' : 'off'}`;
         return commandSuccess(
-          `depth=${String(eff?.depth)} relevanceThreshold=${String(eff?.relevanceThreshold)} ` +
-            `window=${String(eff?.window)} xFirst=${eff?.xFirst === true ? 'on' : 'off'}` +
+          layaPart +
             (outcome.persisted === true ? ' (persisted)' : ` (in effect, NOT persisted: ${outcome.persistError ?? 'unknown'})`),
         );
       },
@@ -1225,7 +1297,11 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
             timeoutMs: config.s1.timeoutMs,
             questionsPerCall: config.s1.questionsPerCall,
           },
-          laya: runtime.summary(),
+          // The interpreter is reported here and not only on the panel's route: "which python will this run
+          // use" is a question an operator asks at the command line, and `runtime.summary()` answers everything
+          // about the *server* and nothing about the environment it would be launched from. A run that fell
+          // back to a different interpreter, or to none, was invisible from `/s1` entirely.
+          laya: { ...runtime.summary(), pythonPath: layaConfig.pythonPath ?? null },
           // Each component reports its own counters, because "constructed" and "called" are different states and
           // only the counters can tell them apart. `relevance.calls` and `planGate.calls` are the two numbers
           // that say whether the System-1 path ran at all in this process.
@@ -1304,7 +1380,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           `laya ${state.status}${state.baseUrl ? ` at ${state.baseUrl}` : ''}` +
             `${state.pythonPath ? ` (python: ${state.pythonPath})` : ''}` +
             `${state.weights ? ` (checkpoints: ${state.weights.envVar}=${state.weights.cacheDir})` : ''}` +
-            `${state.error ? ` - ${state.error}` : ''}`,
+            `${state.error ? ` - ${state.error}` : ''}` +
+            // The tail only when the backend is not healthy: a running server has nothing to explain, and a dead
+            // one is exactly when "50 diagnostic lines buffered" is the least useful sentence in the world.
+            (state.status === 'ready' || state.logTail.length === 0
+              ? ''
+              : `\n${state.logTail.map((l) => `  | ${l}`).join('\n')}`),
         );
       },
     },

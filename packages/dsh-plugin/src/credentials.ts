@@ -169,7 +169,7 @@ export function parseTuning(value: string | undefined): Tuning {
  * whitespace, or a bare token with no separator — so a mistyped field falls back to the default instead of
  * becoming a launch-time failure with a message nobody reads.
  */
-function parsePath(value: string | undefined): string | undefined {
+export function parsePath(value: string | undefined): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = unquote(value).trim();
   if (trimmed === '') return undefined;
@@ -178,7 +178,7 @@ function parsePath(value: string | undefined): string | undefined {
 }
 
 /** A plausible environment-variable name: letters, digits and underscores, starting with a letter or underscore. */
-function parseEnvName(value: string | undefined): string | undefined {
+export function parseEnvName(value: string | undefined): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = unquote(value).trim();
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) ? trimmed : undefined;

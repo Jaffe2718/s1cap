@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { DEFAULT_TELEMETRY, apply, resolvePluginConfig } from '../src/index.ts';
+import { DEFAULT_TELEMETRY, apply, readTuningFile, resolvePluginConfig } from '../src/index.ts';
 import type { PluginContext } from '../src/index.ts';
 import { parseTuning, parseTuningArgs } from '../src/credentials.ts';
 import { commandPayload, commandKind, commandText } from './command-contract.ts';
@@ -36,6 +36,76 @@ function withEmptyHome<T>(body: () => T): T {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+/**
+ * The same, for a body that awaits.
+ *
+ * The synchronous version cannot be used with an async callback: it restores DSH_HOME in its `finally` as soon as
+ * `body()` hands back the pending promise, so everything the body awaited afterwards ran against the real
+ * ~/.dsh. The test that exposed it failed with "no interpreter", which is exactly the symptom a reader would
+ * misread as an implementation bug.
+ */
+async function withEmptyHomeAsync<T>(body: () => Promise<T>): Promise<T> {
+  const previous = process.env['DSH_HOME'];
+  const dir = mkdtempSync(join(tmpdir(), 's1cap-test-home-'));
+  process.env['DSH_HOME'] = dir;
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env['DSH_HOME'];
+    else process.env['DSH_HOME'] = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('the reader picks up every field the writer can store, Laya included', () => {
+  // The gap this closes was invisible from the outside and identical in shape to the xFirst one: the panel wrote
+  // an interpreter path, the route echoed it back out of the in-memory copy, and the session still started with
+  // `provider=none` and "fill in the interpreter path in the settings panel" — a file that existed, was readable,
+  // and was not being read. Testing the parser alone would never have found it; the reader is the half that broke.
+  const stored = withEmptyHome(() => {
+    const dir = join(process.env['DSH_HOME'] as string, '.s1cap');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'tuning.json'),
+      JSON.stringify({
+        depth: 4,
+        relevanceThreshold: 0.4,
+        window: 1600,
+        xFirst: false,
+        layaPythonPath: 'D:\\conda_store\\envs\\ml\\python.exe',
+        layaWeightsCacheDir: 'D:/hf-cache',
+        layaWeightsEnvVar: 'HF_HOME',
+      }),
+      'utf8',
+    );
+    return readTuningFile();
+  });
+
+  assert.equal(stored.depth, 4);
+  assert.equal(stored.relevanceThreshold, 0.4);
+  assert.equal(stored.window, 1600);
+  assert.equal(stored.xFirst, false, 'false is a value, not an absence');
+  assert.equal(stored.layaPythonPath, 'D:\\conda_store\\envs\\ml\\python.exe');
+  assert.equal(stored.layaWeightsCacheDir, 'D:/hf-cache');
+  assert.equal(stored.layaWeightsEnvVar, 'HF_HOME');
+
+  // The same validators the command line uses, so a hand-edited file cannot smuggle in a value the Save button
+  // would have refused: an unusable entry is dropped and the default stands.
+  const partial = withEmptyHome(() => {
+    const dir = join(process.env['DSH_HOME'] as string, '.s1cap');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'tuning.json'),
+      JSON.stringify({ layaPythonPath: 'python', layaWeightsEnvVar: 42, depth: 0 }),
+      'utf8',
+    );
+    return readTuningFile();
+  });
+  assert.equal(partial.layaPythonPath, undefined, 'a bare token is not a path');
+  assert.equal(partial.layaWeightsEnvVar, undefined, 'a number is not a variable name');
+  assert.equal(partial.depth, undefined, 'and the numeric rules still hold');
+});
 
 test('the layout switch survives both wire formats, and a typo never flips a layout', () => {
   // The credential string is the four-field form the host writes; the command line is what a human types.
@@ -95,6 +165,73 @@ const layaIdle = {
   port: 8008,
   pythonPath: 'D:/tools/laya_py/env/python.exe',
 };
+
+/** Let the effects `apply` scheduled run to completion. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 1));
+}
+
+test('an interpreter the panel stored reaches the live config, read back through /s1', async () => {
+  // Written this way on purpose: the bug it catches was a *shadowed variable* — the activation code assigned the
+  // panel's path to a local copy of the Laya config that nothing else holds, so the assignment "worked" and the
+  // session still had no interpreter, still reported the conflict, and would have launched nothing. A test that
+  // only checked the assignment would have passed. This one asks the same question the operator does: what does
+  // the plugin say it is going to use?
+  const h = harness();
+  await withEmptyHomeAsync(async () => {
+    const dir = join(process.env['DSH_HOME'] as string, '.s1cap');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'tuning.json'),
+      JSON.stringify({ layaPythonPath: 'D:\\conda_store\\envs\\ml\\python.exe', layaWeightsEnvVar: 'HF_HOME' }),
+      'utf8',
+    );
+    // `apply` takes the context first and the config second, and the config needs `enabled: true` — without it
+    // activation returns inert before any command is registered, which is what the first run of this test did.
+    await apply(h.ctx, {
+      enabled: true,
+      s1: { provider: 'laya-serve' },
+      laya: { ...layaIdle, pythonPath: '' },
+    });
+    // The panel's store is read by `primeOnce`, which runs on the first agent step and not at activation — that
+    // is deliberate (the knobs must be in place before the first observation), and it means a test that only
+    // activates is testing nothing about this path. One real step, through the host's waterfall.
+    const step = h.handlers.get('agent/pre-step');
+    assert.equal(typeof step, 'function', 'the pre-step hook must be registered');
+    await step?.({ agent: {}, messages: [], signal: {}, step: 1 }, async () => ({ kind: 'enter', messages: [] }));
+    await settle();
+  });
+
+  const payload = JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
+    laya?: { pythonPath?: string; weights?: { envVar?: string; cacheDir?: string }; state?: unknown };
+    s1?: { provider?: string; mode?: string; baseUrl?: string };
+    configIssues?: { conflicts?: string[] };
+  };
+  assert.equal(
+    payload.laya?.pythonPath,
+    'D:\\conda_store\\envs\\ml\\python.exe',
+    'the interpreter the panel stored is the one the plugin reports',
+  );
+  assert.equal(
+    (payload.laya as { weights?: { envVar?: string } } | undefined)?.weights?.envVar,
+    'HF_HOME',
+    'and the weights variable name the panel stored is the one the launcher will set',
+  );
+  assert.deepEqual(
+    (payload.configIssues?.conflicts ?? []).filter((c) => c.includes('pythonPath')),
+    [],
+    'and supplying it clears the conflict, rather than leaving a stored value that only exists in a file',
+  );
+
+  // And the cleared conflict has to be *load-bearing*. Before this, the conflict list emptied while the session
+  // kept the `provider=none` client it was built with at activation: `/s1` said the run was fine and the process
+  // made zero System-1 calls. The backend is therefore re-resolved on the first step, and this is the assertion
+  // that says so — the number a run is actually judged on.
+  const s1 = payload.s1 as { provider?: string; mode?: string; baseUrl?: string } | undefined;
+  assert.equal(s1?.provider, 'laya-serve', 'the re-resolved provider is the one configured, not the demoted one');
+  assert.notEqual(s1?.mode, 'none', 'and the session actually calls System-1 once the path is known');
+});
 
 test('defaults: C4 policy, provider jev, two distinct sinks, no conflicts', () => {
   const resolved = resolvePluginConfig(undefined);

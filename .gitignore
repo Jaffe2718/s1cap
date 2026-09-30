@@ -20,6 +20,11 @@ venv/
 *.gguf
 *.safetensors
 models/
+# The whole local data directory: checkpoint caches, launch logs, and the tuning file the panel writes.
+# Ignoring extensions was not enough for a Hugging Face cache: its layout is `config.json`, `rl_agent_config.json`
+# and one tokenizer file of tens of megabytes, none of which match the rules above, so the first real backend start
+# committed 252,198 lines of downloaded weights. The rule that survives the next cache layout is the directory.
+/.s1cap/
 
 # Telemetry & experiment outputs
 telemetry/
