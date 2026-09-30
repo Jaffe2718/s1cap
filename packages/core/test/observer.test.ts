@@ -242,6 +242,80 @@ test('a delivered block is never ingested, never recalled, and never in the toke
   );
 });
 
+// --- recallTree: the walk as it is written into the control-plane log ---
+
+/**
+ * The tree has to reach the record, not merely the assembler's result: `telemetry.controlJsonl` is written from
+ * `observation.event`. These two tests cover the chain `assemble()` -> `AssemblyResult.recallTree` -> `AssemblyEvent`
+ * for a walk that found something and for one that found nothing.
+ */
+test('the assembly record carries the recall walk as a nested tree of ids', async () => {
+  const policy = cellPolicy('C4');
+  policy.tail.k = 1; // a2 is a tail turn, so it cannot also be a recalled one - it is still in the tree
+  const graph = new AssociationGraph();
+  const at = BASE.now;
+  const s = (id: string, seq: number, kind: 'user' | 'assistant', text: string) => ({
+    id,
+    sessionId: BASE.sessionId,
+    kind,
+    seq,
+    ts: at,
+    tokens: 5,
+    text,
+  });
+  graph.addSegments([
+    s('a1', 1, 'assistant', 'the token check is at line 88 of auth.ts'),
+    s('a2', 2, 'assistant', 'the expiry comparison looks off by one second'),
+    s('u1', 3, 'user', 'fix the expiry path too'),
+  ]);
+  const link = (from: string, to: string, w: number) =>
+    graph.upsertEdge({ from, to, w, wTier1: w, source: 's1-noul', verifiedAt: at, provenance: 'test' });
+  link('u1', 'a1', 0.9);
+  link('a1', 'a2', 0.8);
+
+  // Seeded by hand and not scored on the step path, so the graph recall walks is exactly the one above.
+  const obs = await observeStep({ ...BASE, policy, graph, messages: [], step: 1, scoreOnStepPath: false });
+  assert.equal(obs.kind, 'assembled');
+  if (obs.kind !== 'assembled') return;
+
+  assert.equal(obs.layout.anchor.id, 'u1', 'the anchor is the last user segment, and the root of the tree');
+  assert.deepEqual(obs.event.recallTree, { u1: { a1: { a2: {} } } });
+  // The tree records what the selector found; the block records what the budget delivered. a2 is in the tail and
+  // therefore not in `recalled`, and dropping it from the tree for that reason would misreport the walk.
+  assert.deepEqual(obs.layout.recalled.map((seg) => seg.id), ['a1']);
+  assert.equal(obs.event.selected, 1);
+  assert.deepEqual(Object.keys(obs.event.recallTree ?? {}), ['u1'], 'keys are ids, at the root and below');
+  // The record is written as JSON, and `undefined` would vanish from the line: round-tripping is the check that
+  // the field survives the sink rather than only the object literal.
+  assert.deepEqual(JSON.parse(JSON.stringify(obs.event)).recallTree, { u1: { a1: { a2: {} } } });
+});
+
+test('a step whose recall found nothing records recallTree as {}, not as a missing field', async () => {
+  const policy = cellPolicy('C4');
+  const graph = new AssociationGraph();
+  graph.addSegments([
+    {
+      id: 'u1',
+      sessionId: BASE.sessionId,
+      kind: 'user' as const,
+      seq: 1,
+      ts: BASE.now,
+      tokens: 5,
+      text: 'fix the failing test',
+    },
+  ]);
+  // No edges at all, and no scoring on the step path, so the anchor has nothing to walk to.
+  const obs = await observeStep({ ...BASE, policy, graph, messages: [], step: 1, scoreOnStepPath: false });
+  assert.equal(obs.kind, 'assembled');
+  if (obs.kind !== 'assembled') return;
+
+  assert.equal(obs.event.candidates, 0, 'sanity: recall produced nothing');
+  assert.ok('recallTree' in obs.event, 'the field is written even when there is nothing in it');
+  assert.notEqual(obs.event.recallTree, undefined);
+  assert.deepEqual(obs.event.recallTree, {});
+  assert.deepEqual(JSON.parse(JSON.stringify(obs.event)).recallTree, {}, 'and it survives the JSONL serialisation');
+});
+
 // --- the bounded anchor wait (recall.anchorWaitMs): the hook, and its containment ---
 
 /**
@@ -254,7 +328,7 @@ test('observeStep offers the anchor id to beforeAssemble, and only after the anc
   const graph = new AssociationGraph();
   const seen: string[] = [];
   // The hook is called with the anchor's id *and* with the anchor already in the graph, which is what makes the
-  // plugin's `unscoredWithin(anchorId, w)` check meaningful rather than always empty.
+  // plugin's `unjudgedWithin(anchorId, w)` check meaningful rather than always empty.
   const observation = await observeStep({
     ...BASE,
     policy,

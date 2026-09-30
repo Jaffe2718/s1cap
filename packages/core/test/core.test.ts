@@ -179,6 +179,26 @@ test('recall: fanout keeps only the strongest k neighbours', () => {
   assert.deepEqual(hits.map((h) => h.id), ['a', 'b']);
 });
 
+test('recall: a heavier path raises the weight without re-parenting the hit', () => {
+  // `via` is the parent that *discovered* the hit, not the best predecessor seen so far. The two differ exactly
+  // here: `b -> a` is heavier than the edge that discovered `a`, and letting that rewrite `via` is what made a
+  // tree built from the hits merely tree-shaped - `a` would be re-parented under `b`, whose own parent is `a`.
+  const g = new AssociationGraph();
+  g.addSegments([seg('x', 0, 10, 'user'), seg('a', 1, 10), seg('b', 2, 10)]);
+  g.upsertEdge(edge('x', 'a', 0.5));
+  g.upsertEdge(edge('a', 'b', 0.8));
+  g.upsertEdge(edge('b', 'a', 0.9));
+
+  const hits = g.recall(['x'], { threshold: 0.4, depth: 3, fanout: 8, lambdaMs: 1e9, now: 1000 });
+  const a = hits.find((h) => h.id === 'a');
+  assert.ok(a !== undefined, `a must still be a hit: ${JSON.stringify(hits)}`);
+  assert.equal(a.via, 'x', 'the parent that discovered it, not the heaviest predecessor');
+  assert.equal(a.depth, 1, 'discovered at depth 1, and the depth is frozen with the parent');
+  assert.equal(a.w, 0.9, 'while the weight is still the heaviest path found, which is what ranking reads');
+  // Freezing the parent must not disturb the ranking: `a` leads on its weight, `b` follows.
+  assert.deepEqual(hits.map((h) => h.id), ['a', 'b']);
+});
+
 // -------------------------------------------------------------- assembler
 
 function buildAssemblerFixture(): {
@@ -463,6 +483,211 @@ test('assemble: a thin but real selection is delivered, not replaced', () => {
     history: [older, tiny],
   });
   assert.equal(floored.fallback, 'recency-window', 'the token-share floor still works when it is asked for');
+});
+
+test('assemble: fail-open fires on a pair the backend never judged, and only on that', async () => {
+  // Two fixtures that differ in provenance alone, and both weights are below the threshold, so neither produces an
+  // edge and recall returns nothing - the situation the fail-open rule exists for. What it must not do is stay
+  // silent: `scoreNew` writes the local fallback's score when the backend does not answer, so a rule that asked for
+  // "a score entry" treated an unanswered window as a judged one and left `unknownAdmitted` at zero through a round
+  // in which 191 of 281 `s1_call` records failed and 11 of 49 assemblies fell back to recency.
+  const build = async (backendAnswered: boolean) => {
+    const g = new AssociationGraph();
+    const pinned = [seg('pin', -1, 10, 'systemPinned')];
+    const current = { ...seg('x', 10, 20, 'user'), text: 'delta epsilon' };
+    const older = { ...seg('old', 1, 10), text: 'alpha beta gamma' };
+    g.addSegments([older, current]);
+    await g.scoreNew({
+      windowN: 8,
+      threshold: 0.55,
+      // `undefined` is the batch scorer's way of saying the backend did not answer this window.
+      scoreBatch: backendAnswered
+        ? async (_current, candidates) => candidates.map(() => 0.2)
+        : () => undefined,
+    });
+    const policy = defaultPolicy();
+    policy.recall.threshold = 0.55;
+    return assemble({
+      graph: g,
+      policy,
+      pinned,
+      tail: [],
+      current,
+      contextWindow: 4000,
+      reserveOutputTokens: 100,
+      fixedOverheadTokens: 100,
+      now: 1000,
+      lambdaMs: 1e9,
+      history: [older],
+    });
+  };
+
+  const unjudged = await build(false);
+  assert.equal(unjudged.recall.candidates, 0, 'sanity: no edge, so the walk found nothing');
+  assert.equal(unjudged.unknownAdmitted, 1, 'the pair the backend never judged is admitted, not read as irrelevant');
+  assert.deepEqual(unjudged.layout.recalled.map((s) => s.id), ['old']);
+  assert.equal(unjudged.fallback, undefined, 'so the step is not handed to the recency window');
+
+  const judged = await build(true);
+  assert.equal(judged.recall.candidates, 0, 'the same situation: a score below the threshold, so no edge');
+  assert.equal(judged.unknownAdmitted, undefined, 'but a judged pair is a reading, not an absence of one');
+  assert.equal(judged.fallback, 'recency-window', 'so this step does fall back, which is the guard working');
+});
+
+// ------------------------------------------------------- recall tree (walk record)
+
+/** Every id a recall tree carries, depth-first. Used to compare the tree's node set with recall's own output. */
+function treeIds(tree: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [id, child] of Object.entries(tree)) {
+    out.push(id, ...treeIds(child as Record<string, unknown>));
+  }
+  return out;
+}
+
+/** Assert every value in the tree is a child object: an id keyed to ids, never a weight, kind, depth or count. */
+function assertIdsOnly(tree: Record<string, unknown>, known: ReadonlySet<string>): void {
+  for (const [id, child] of Object.entries(tree)) {
+    assert.ok(known.has(id), `a segment id, got ${JSON.stringify(id)}`);
+    assert.ok(typeof child === 'object' && child !== null && !Array.isArray(child), `a child object at ${id}`);
+    assertIdsOnly(child as Record<string, unknown>, known);
+  }
+}
+
+test('assemble: recallTree is the nested walk, one root, a grandchild, and leaves', () => {
+  // The shape the owner specified: `{ <anchor>: { <child>: { <grandchild>: {} }, <child2>: {} } }`.
+  const g = new AssociationGraph();
+  const pinned = [seg('pin', -1, 10, 'systemPinned')];
+  const current = seg('x', 10, 20, 'user');
+  const a = seg('a', 1, 10);
+  const b = seg('b', 2, 10);
+  const c = seg('c', 3, 10);
+  g.addSegments([...pinned, current, a, b, c]);
+  // x -> a -> b (child with a grandchild) and x -> c (a second leaf child).
+  g.upsertEdge(edge('x', 'a', 0.9));
+  g.upsertEdge(edge('a', 'b', 0.8));
+  g.upsertEdge(edge('x', 'c', 0.7));
+
+  const policy = defaultPolicy();
+  policy.recall.threshold = 0.5;
+  const now = 1000;
+  const lambdaMs = 1e9;
+  const res = assemble({
+    graph: g,
+    policy,
+    pinned,
+    tail: [],
+    current,
+    contextWindow: 4000,
+    reserveOutputTokens: 100,
+    fixedOverheadTokens: 100,
+    now,
+    lambdaMs,
+    history: [a, b, c],
+  });
+
+  assert.deepEqual(res.recallTree, { x: { a: { b: {} }, c: {} } }, 'the tree recall actually walked');
+  assertIdsOnly(res.recallTree, new Set(['x', 'a', 'b', 'c']));
+  // The rule the owner was explicit about: the key stores the fragment id and nothing else, so the tree carries
+  // exactly one node per hit, plus the anchor that seeded the walk.
+  assert.equal(treeIds(res.recallTree).length, res.recall.candidates + 1);
+  assert.equal(res.recall.candidates, 3, 'and it agrees with the count of the walk');
+
+  // The node set is exactly what recall returned, plus the anchor - no node added, none dropped. Asserted against
+  // recall's own output rather than against the fixture, so a change to the walk moves both sides together.
+  const hits = g.recall([current.id], {
+    threshold: policy.recall.threshold,
+    depth: policy.recall.depth,
+    fanout: policy.recall.fanout,
+    lambdaMs,
+    now,
+  });
+  assert.deepEqual(
+    treeIds(res.recallTree).sort(),
+    [current.id, ...hits.map((h) => h.id)].sort(),
+    'the tree carries every hit recall returned and nothing else',
+  );
+});
+
+test('assemble: a walk that finds nothing writes recallTree {}, not undefined', () => {
+  const g = new AssociationGraph();
+  const pinned = [seg('pin', -1, 10, 'systemPinned')];
+  const current = seg('x', 10, 20, 'user');
+  const older = seg('old', 1, 10);
+  g.addSegments([...pinned, current, older]); // no edges: the anchor has nothing to walk to
+
+  const policy = defaultPolicy();
+  policy.recall.threshold = 0.5;
+  const res = assemble({
+    graph: g,
+    policy,
+    pinned,
+    tail: [],
+    current,
+    contextWindow: 4000,
+    reserveOutputTokens: 100,
+    fixedOverheadTokens: 100,
+    now: 1000,
+    lambdaMs: 1e9,
+    history: [older],
+  });
+
+  assert.equal(res.recall.candidates, 0, 'sanity: the walk found nothing');
+  assert.ok('recallTree' in res, 'the field is written even when there is nothing in it');
+  assert.notEqual(res.recallTree, undefined, '"recall found nothing" is not "not measured"');
+  assert.deepEqual(res.recallTree, {});
+  assert.equal(Object.keys(res.recallTree).length, 0, 'an empty object states it, and it is present');
+});
+
+test('assemble: a node reachable by two paths appears once, under the parent that reached it first', () => {
+  const build = () => {
+    const g = new AssociationGraph();
+    const pin = seg('pin', -1, 10, 'systemPinned');
+    const current = seg('x', 10, 20, 'user');
+    const history = [seg('a', 1, 10), seg('b', 2, 10), seg('c', 3, 10)];
+    g.addSegments([pin, current, ...history]);
+    return { g, pinned: [pin], current, history };
+  };
+  const run = (fx: ReturnType<typeof build>, policy: ReturnType<typeof defaultPolicy>) =>
+    assemble({
+      graph: fx.g,
+      policy,
+      pinned: fx.pinned,
+      tail: [],
+      current: fx.current,
+      contextWindow: 4000,
+      reserveOutputTokens: 100,
+      fixedOverheadTokens: 100,
+      now: 1000,
+      lambdaMs: 1e9,
+      history: fx.history,
+    });
+
+  // A diamond: x -> a -> c and x -> b -> c. c is reached twice and recorded once.
+  const policy = defaultPolicy();
+  policy.recall.threshold = 0.5;
+  const diamond = build();
+  diamond.g.upsertEdge(edge('x', 'a', 0.9));
+  diamond.g.upsertEdge(edge('x', 'b', 0.8));
+  diamond.g.upsertEdge(edge('a', 'c', 0.7));
+  diamond.g.upsertEdge(edge('b', 'c', 0.6));
+  const diamondRes = run(diamond, policy);
+  assert.deepEqual(diamondRes.recallTree, { x: { a: { c: {} }, b: {} } });
+  const diamondIds = treeIds(diamondRes.recallTree);
+  assert.equal(diamondIds.length, new Set(diamondIds).size, `each id once: ${JSON.stringify(diamondIds)}`);
+  assert.deepEqual([...diamondIds].sort(), ['a', 'b', 'c', 'x']);
+
+  // The cycle: `b -> a` is heavier than the edge that discovered `a`, so a's best predecessor is its own child.
+  // `via` is frozen at discovery, so the record stays the walk - `a` under `x`, `b` under `a` - where a rewrite
+  // would have produced `a: via b, b: via a`, which is not a tree and cannot be logged as one.
+  const cycle = build();
+  cycle.g.upsertEdge(edge('x', 'a', 0.5));
+  cycle.g.upsertEdge(edge('a', 'b', 0.8));
+  cycle.g.upsertEdge(edge('b', 'a', 0.9));
+  const cyclePolicy = defaultPolicy();
+  cyclePolicy.recall.threshold = 0.4;
+  cyclePolicy.recall.depth = 3;
+  assert.deepEqual(run(cycle, cyclePolicy).recallTree, { x: { a: { b: {} } } });
 });
 
 // --------------------------------------------------------------- plan gate

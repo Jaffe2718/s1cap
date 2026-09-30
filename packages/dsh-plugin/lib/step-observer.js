@@ -310,14 +310,14 @@ export function createStepObserver(opts                     )               {
   const sleep = opts.sleep ?? (()                => Promise.resolve());
 
   // The bounded anchor wait (`recall.anchorWaitMs`): at most one diagnostic line per step, and only when the wait
-  // gave up with pairs still unknown. The poll count is what makes a stuck wait legible - a line per poll would be
+  // gave up with pairs still unjudged. The poll count is what makes a stuck wait legible - a line per poll would be
   // hundreds of lines for one slow backend, and no line at all would leave `unknownAdmitted` in the record with
   // nothing explaining it.
   const reportAnchorWait = (probe                                         , waitMs        , polls        , unknown        )       => {
     probe({ schema: 0, kind: 'anchor-wait', ms: waitMs, polls, unknown });
     opts.onWarn?.(
       `[s1cap] anchor wait gave up after ${waitMs}ms (${polls} drain(s)): ` +
-        `${unknown} pair(s) inside the window still unscored; the fail-open rule admits them`,
+        `${unknown} pair(s) inside the window still unjudged; the fail-open rule admits them`,
     );
   };
 
@@ -327,10 +327,14 @@ export function createStepObserver(opts                     )               {
     // the step's own timing back rather than a small wait.
     if (!(waitMs > 0)) return;
     const graph = graphFor(sessionId);
-    // The common case, and the reason this is an exception path rather than a per-step cost: the anchor's row is
-    // already scored, so this check is one `indexOf` plus a map lookup per pair inside `w`. Returns without saying
-    // anything, because there is nothing to report.
-    const unknownBefore = graph.unscoredWithin(anchorId, opts.policy.recall.window).length;
+    // The common case, and the reason this is an exception path rather than a per-step cost: the anchor's row has
+    // already been judged by the backend, so this check is one `indexOf` plus a map lookup per pair inside `w`.
+    // Returns without saying anything, because there is nothing to report.
+    //
+    // It asks for a *judgement*, not for a row: a row written by the lexical fallback after a failed System-1 call
+    // is a row there is still something to wait for, and treating it as complete is how the wait would stand down
+    // through a round of backend failures with the fail-open rule none the wiser.
+    const unknownBefore = graph.unjudgedWithin(anchorId, opts.policy.recall.window).length;
     if (unknownBefore === 0) return;
     // Nothing queued and nothing in flight means there is no scoring call to wait for, so waiting could only be
     // answered by time passing. That is not a hypothetical saving: it is what a step should do in a session whose
@@ -356,12 +360,12 @@ export function createStepObserver(opts                     )               {
       queue.drain();
       polls += 1;
       // Re-read after the drain, because the row may have completed inside it.
-      unknown = graph.unscoredWithin(anchorId, opts.policy.recall.window).length;
+      unknown = graph.unjudgedWithin(anchorId, opts.policy.recall.window).length;
       if (unknown === 0) return;
       // The deadline is tested *before* the sleep, not after it, so that the row is re-read between the last sleep
       // and giving up. The first version tested it after the sleep and broke straight out of the loop, which made the
       // sleep the final act: work completed during it was thrown away and the diagnostic below reported a remainder
-      // that was already scored. Measured on a fixture whose drain completes the row, that turned a finished wait
+      // that was already judged. Measured on a fixture whose drain completes the row, that turned a finished wait
       // into a reported failure.
       if (polls >= maxPolls || opts.now() >= deadline) break;
       await sleep(50);

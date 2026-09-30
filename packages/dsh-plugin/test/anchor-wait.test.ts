@@ -5,7 +5,7 @@
  * Why this needs its own file. Scoring runs asynchronously in the upkeep queue, off the step's critical path, and a
  * measured System-1 relevance call takes a median of 15.3 s against the local backend. A step can therefore reach
  * assembly before the segment it recalls from has any scored edges, and BFS recall then returns nothing at all.
- * The wait is the cheaper first remedy; the fail-open rule in `assemble()` (`unscoredWithin` / `unknownAdmitted`) is
+ * The wait is the cheaper first remedy; the fail-open rule in `assemble()` (`unjudgedWithin` / `unknownAdmitted`) is
  * the backstop and is tested where it lives.
  *
  * The sleep is *injected* because the observer keeps no clock of its own (step-observer.ts): a caller that does not
@@ -26,8 +26,8 @@ const T0 = 1_790_000_000_000;
  * The single user turn the "no wait" fixture uses.
  *
  * It is the whole payload on purpose: with nothing in front of it, the user turn is the graph's first segment and
- * `unscoredWithin` - which only looks backwards - has nothing to report. The same payload with a system prompt in
- * front of it *does* wait, because that prompt is an unscored predecessor, which is what the other tests rely on.
+ * `unjudgedWithin` - which only looks backwards - has nothing to report. The same payload with a system prompt in
+ * front of it *does* wait, because that prompt is an unjudged predecessor, which is what the other tests rely on.
  */
 const LONE_TURN = [
   { id: 'u1', role: 'user', content: [{ type: 'text', text: 'Fix the failing test in auth.ts' }] },
@@ -62,7 +62,7 @@ function deferred(): { promise: Promise<readonly number[]>; resolve: (value: rea
  *
  * The graph is reached through `rgStore`, which is the only seam the observer offers for a graph the test can hold:
  * it is asked for the session's snapshot when the step begins and told about it whenever the step changes it. Taking
- * a *copy*, as this does, is enough to answer the wait's question - `scoreNew` and `unscoredWithin` read an order, a
+ * a *copy*, as this does, is enough to answer the wait's question - `scoreNew` and `unjudgedWithin` read an order, a
  * set of scores and a cursor, and the snapshot carries all three.
  */
 function harness(opts: {
@@ -128,7 +128,7 @@ function harness(opts: {
 
 test('a step whose anchor row is already complete does not wait at all', async () => {
   // The common case, and the reason the wait is an exception path rather than a per-step cost: the anchor is the
-  // graph's first segment and `unscoredWithin` only ever looks backwards, so there is nothing unknown to poll for.
+  // graph's first segment and `unjudgedWithin` only ever looks backwards, so there is nothing unknown to poll for.
   const h = harness({ anchorWaitMs: 10_000 });
   const observation = await h.observer.observe({ sessionId: SESSION, messages: LONE_TURN, step: 1 });
 
@@ -159,7 +159,7 @@ test('wait=0 disables the wait entirely', async () => {
  * The fixture the two remaining tests share, and the constraints that shaped it - none of which were obvious, and all
  * of which cost a rejected attempt:
  *
- *   - `unscoredWithin` only looks *backwards* from the anchor, so a user turn at index 0 of the graph has nothing to
+ *   - `unjudgedWithin` only looks *backwards* from the anchor, so a user turn at index 0 of the graph has nothing to
  *     wait for however long the wait is set to. The anchor needs a predecessor.
  *   - `scoreNew` walks the graph in order and scores each segment against the segments *before* it, so a segment that
  *     is already in the graph and has not been processed keeps a row that a later pass may or may not fill. Seeding
@@ -234,7 +234,7 @@ test('a wait that reaches its deadline proceeds, and reports the remainder exact
   assert.equal(giveUps.length, 1, `exactly one diagnostic, not one per poll: ${JSON.stringify(h.warns)}`);
   assert.match(
     giveUps[0] ?? '',
-    /anchor wait gave up after 1000ms \(2 drain\(s\)\): 1 pair\(s\) inside the window still unscored/,
+    /anchor wait gave up after 1000ms \(2 drain\(s\)\): 1 pair\(s\) inside the window still unjudged/,
   );
   const lines = h.probes.filter((p) => p.kind === 'anchor-wait');
   assert.equal(lines.length, 1, 'one probe line for the whole wait');
@@ -242,7 +242,7 @@ test('a wait that reaches its deadline proceeds, and reports the remainder exact
 });
 
 test('an idle queue with nothing in flight is not waited on at all', async () => {
-  // The guard that keeps the wait off the critical path when it cannot help. The anchor's row is unscored and the graph
+  // The guard that keeps the wait off the critical path when it cannot help. The anchor's row is unjudged and the graph
   // is exactly the one that made the test above wait; what is different is that no scoring call is running and nothing
   // is queued, so no amount of waiting could complete the row. The diagnostic is still written - the fail-open rule is
   // about to admit the pairs, and the record has to say so - but the step pays one check and no sleep.
@@ -256,4 +256,50 @@ test('an idle queue with nothing in flight is not waited on at all', async () =>
   assert.ok(observation !== undefined, 'and it assembled');
   assert.equal(stats.upkeep.applied, 0, 'no queue work was applied, because there was none');
   assert.equal(h.warns.filter((w) => w.includes('anchor wait gave up')).length, 1, 'the remainder is still reported');
+});
+
+/**
+ * "Complete" means the backend judged the row, not that a number is there.
+ *
+ * The two tests below differ in one field and nothing else: both seed the same pair with the same weight, and only
+ * `source` changes. That is the whole rule - a failed System-1 call still writes a lexical score, so asking whether a
+ * number exists made the wait stand down through exactly the round it was written for (191 of 281 `s1_call` records
+ * failed, `unknownAdmitted` never fired, 11 of 49 assemblies fell back to recency). Testing one direction only would
+ * pass on a rule that waits forever or on one that never waits.
+ */
+test('a row the lexical fallback wrote is not a complete row: the wait still reports the remainder', async () => {
+  const seed = seededGraph();
+  // The shape of a failed System-1 call: the batch scorer returns `undefined`, and `scoreNew` scores the window with
+  // the local fallback, recording `source: 'lexical'`.
+  await seed.scoreNew({ windowN: 1024, threshold: 0.55, scoreBatch: () => undefined });
+  const h = harness({ anchorWaitMs: 10_000, seed });
+  const observation = await h.observer.observe({ sessionId: SESSION, messages: SEEDED_TAIL, step: 1 });
+
+  assert.ok(observation !== undefined, 'the step assembled');
+  assert.deepEqual(h.slept, [], 'nothing is running that could judge the row, so no sleep is spent');
+  const giveUps = h.warns.filter((w) => w.includes('anchor wait gave up'));
+  assert.equal(giveUps.length, 1, `a fallback row leaves the pair unjudged: ${JSON.stringify(h.warns)}`);
+  assert.match(giveUps[0] ?? '', /1 pair\(s\) inside the window still unjudged/);
+  assert.deepEqual(
+    h.probes.filter((p) => p.kind === 'anchor-wait'),
+    [{ schema: 0, kind: 'anchor-wait', ms: 10_000, polls: 0, unknown: 1 }],
+    'and the count the fail-open rule will admit is reported',
+  );
+});
+
+test('a row the backend judged is a complete row: the wait does not run at all', async () => {
+  const seed = seededGraph();
+  // Same weight, same pair, different provenance: the backend answered this window.
+  await seed.scoreNew({
+    windowN: 1024,
+    threshold: 0.55,
+    scoreBatch: async (_current, candidates) => candidates.map(() => 0.9),
+  });
+  const h = harness({ anchorWaitMs: 10_000, seed });
+  const observation = await h.observer.observe({ sessionId: SESSION, messages: SEEDED_TAIL, step: 1 });
+
+  assert.ok(observation !== undefined, 'the step assembled');
+  assert.deepEqual(h.slept, [], 'a judged row costs no sleep');
+  assert.equal(h.warns.filter((w) => w.includes('anchor wait gave up')).length, 0, 'and nothing is reported');
+  assert.equal(h.probes.filter((p) => p.kind === 'anchor-wait').length, 0, 'not even a probe line');
 });

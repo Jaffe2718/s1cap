@@ -636,9 +636,9 @@ window.__ModuleLoader__.load({
             'BFS depth d bounds how many hops recall may walk the association graph (integer, d > 0). The relevance ' +
               'threshold r is the edge weight a segment must reach to be recalled (0 ≤ r ≤ 1). The window w is how many ' +
               'recent segments each new segment is scored against, and it is what bounds the System-1 cost of scoring. ' +
-              'The wait is how long a step may hold for the newest user segment\'s own scoring row before it assembles ' +
-              'anyway, in milliseconds (a measured relevance call has a median of 15.3 s; 0 turns the wait off, and the ' +
-              'assembler then admits the unscored pairs as unknown). ' +
+              'The wait is how long a step may hold for the newest user segment\'s own scoring row to be judged by the ' +
+              'System-1 backend before it assembles anyway, in milliseconds (a measured relevance call has a median of ' +
+              '15.3 s; 0 turns the wait off, and the assembler then admits the pairs the backend never judged as unknown). ' +
               'The host reads all of them at session start and /s1 reports the effective values.',
           ),
           e(

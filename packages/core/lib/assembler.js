@@ -9,6 +9,7 @@
  */
                                                                           
 import { AssociationGraph } from './assoc-graph.js';
+                                                  
 import { estimateTokens } from './segmenter.js';
 
                                 
@@ -34,6 +35,44 @@ import { estimateTokens } from './segmenter.js';
 
 export function totalTokens(segments                    )         {
   return segments.reduce((sum, s) => sum + s.tokens, 0);
+}
+
+/**
+ * The tree one recall walk produced, as a nested object keyed by segment id: the anchor at the root, every hit
+ * under the node `via` says it was reached from, leaves `{}`.
+ *
+ * Keys are ids and nothing else - no weight, no kind, no depth, no count. This is the *shape* of the walk that
+ * produced the step's recall, not a ranking of it; the ranking is `layout.recalled` and `recall.selected`.
+ *
+ * Every hit `recall` returned is placed, including the ones the token budget or the chunk de-duplication dropped
+ * afterwards: the tree documents what the selector found. `hits` is the array `assemble` already has, so this
+ * reads the walk that happened rather than paying for a second one.
+ */
+function recallTreeOf(anchorId        , hits                      )                          {
+  const tree                          = {};
+  // An empty object is the answer for a walk that found nothing (or was not run at all): the field is written
+  // either way, because "recall produced nothing" and "nobody looked" must not both read as an absent field.
+  if (hits.length === 0) return tree;
+  const root                          = {};
+  tree[anchorId] = root;
+  const placed = new Map                                 ([[anchorId, root]]);
+  // Ascending discovery depth, because `via` is frozen at discovery (`AssociationGraph.recall`): a hit's parent is
+  // the anchor or a hit exactly one depth above it, so one pass places every node after its parent. Recall
+  // returns its hits weight-first, which says nothing about that order.
+  for (const hit of [...hits].sort((a, b) => a.depth - b.depth)) {
+    // One appearance per id, under the parent that reached it first. `recall` keeps a single `best` entry per
+    // node and no longer re-parents it after discovery, so a node reachable by two paths - a branch, or the
+    // `b -> a` back-edge of a cycle - arrives here once and lands under the parent that discovered it.
+    if (placed.has(hit.id)) continue;
+    // A parent that is not in the tree attaches at the root instead of being dropped. Reachable only if recall
+    // filtered a hit out because its segment is no longer in the graph, which is why it is a fallback and not a
+    // rule: the walk did reach this id, and losing it would under-report the walk.
+    const parent = placed.get(hit.via) ?? root;
+    const node                          = {};
+    parent[hit.id] = node;
+    placed.set(hit.id, node);
+  }
+  return tree;
 }
 
 /**
@@ -68,10 +107,12 @@ export function assemble(input               )                 {
   let droppedSiblings = 0;
   let recalled            = [];
   let fallback                              ;
-  /** segments admitted because their pair with the anchor was inside w and unscored; see `AssemblyResult` */
+  /** segments admitted because their pair with the anchor was inside w and unjudged; see `AssemblyResult` */
   let unknownAdmitted = 0;
   let candidates = 0;
   let bfsDepth = 0;
+  /** the structure the walk below produced; `{}` when it was not run or found nothing (see `AssemblyResult`) */
+  let recallTree                          = {};
 
   if (policy.recall.tier1 !== 'off' && recalledBudget > 0) {
     const hits = graph.recall([current.id], {
@@ -82,6 +123,7 @@ export function assemble(input               )                 {
       now: input.now,
     });
     candidates = hits.length;
+    recallTree = recallTreeOf(current.id, hits);
     let used = 0;
     for (const hit of hits) {
       if (excluded.has(hit.id)) continue;
@@ -114,8 +156,12 @@ export function assemble(input               )                 {
     // it is "relevant" - a false positive spends tokens under a budget that already caps this block, while a false
     // negative hands the step to the recency window, which is what a live session did for an entire run. The
     // admitted segments are nearest-first, bounded by the same budget, and counted separately.
+    //
+    // "Has not answered" is what `unjudgedWithin` tests, and it has to be the backend's judgement rather than the
+    // presence of a number: a failed System-1 call still leaves a lexical score in the graph, so a rule that asked
+    // only for a score entry stayed silent through a round in which 191 of 281 `s1_call` records failed.
     if (candidates === 0 && recalled.length === 0) {
-      const unknown = graph.unscoredWithin(current.id, policy.recall.window);
+      const unknown = graph.unjudgedWithin(current.id, policy.recall.window);
       for (const seg of unknown) {
         if (used + seg.tokens > recalledBudget) break;
         const parent = seg.chunkOf ?? seg.id;
@@ -142,6 +188,9 @@ export function assemble(input               )                 {
       // emitted, rather than of every layout that was tried and thrown away.
       droppedSiblings = 0;
       selectedParents.clear();
+      // `recallTree` is deliberately not reset with the block. The fallback is a judgement about what the walk
+      // found - too thin to deliver - and the walk itself still happened; clearing the tree here would report the
+      // recency window as if no recall had been attempted, which is the one thing this run is a measurement of.
       for (const seg of history) {
         if (excluded.has(seg.id)) continue;
         const parent = seg.chunkOf ?? seg.id;
@@ -220,6 +269,7 @@ export function assemble(input               )                 {
           : recalledTokens + tailTokens + current.tokens,
     },
     recall: { candidates, selected: recalled.length, bfsDepth, ...(droppedSiblings > 0 ? { droppedSiblings } : {}) },
+    recallTree,
   };
   return result;
 }

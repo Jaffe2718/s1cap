@@ -231,7 +231,7 @@ export async function observeStep(
   //
   // Contained, and deliberately quiet: this function has no diagnostic sink of its own (it is pure by design, see
   // the header) and the plugin's wait is written never to throw. A throw here is a caller bug, and the same
-  // fail-open rule that admits unscored pairs is what makes swallowing it safe - the step assembles with whatever
+  // fail-open rule that admits unjudged pairs is what makes swallowing it safe - the step assembles with whatever
   // the graph has, and `unknownAdmitted` reports the difference. It must not cost the step.
   try {
     await input.beforeAssemble?.(current.id);
@@ -330,6 +330,10 @@ export async function observeStep(
     layoutStableTokens: result.cacheStability.layoutStableTokens,
     cutAfterBlock: result.cacheStability.cutAfterBlock,
     tokensAfterCut: result.cacheStability.tokensAfterCut,
+    // The structure this step's recall produced, straight from the assembler: the tree the walk actually made,
+    // ids only. Unconditional, unlike `fallback` below, because `{}` is a reading - recall found nothing - and
+    // not the absence of one.
+    recallTree: result.recallTree,
     ...(result.fallback !== undefined ? { fallback: result.fallback } : {}),
   };
 

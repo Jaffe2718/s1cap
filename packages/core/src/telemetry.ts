@@ -140,6 +140,18 @@ export interface AssemblyEvent {
   /** tokens behind that cut, i.e. the cost of one re-prefill */
   tokensAfterCut?: number;
   fallback?: string;
+  /**
+   * The graph structure this step's recall produced, copied from the assembler's result.
+   *
+   * A nested tree: the anchor segment id at the root, each hit under the id recall reached it from, leaves `{}`.
+   * **Keys are segment ids only** - no weights, kinds, depths or counts - and every hit recall returned is in it,
+   * including the ones the budget dropped, because the tree records the walk the selector made rather than what
+   * survived it. Written on every assembly record: `{}` is the answer for a walk that produced nothing, and an
+   * absent field would read as "this step was not measured" instead.
+   *
+   * Optional only so that records written before this field existed stay readable; `assemble()` always fills it.
+   */
+  recallTree?: Record<string, unknown>;
 }
 
 export interface PlanGateEvent {

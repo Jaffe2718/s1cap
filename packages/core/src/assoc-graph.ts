@@ -288,6 +288,10 @@ export class AssociationGraph {
    * Bounded BFS from the seed segments over edges with w_eff > τ,
    * depth ≤ d, expanding at most k neighbours per node.
    * Returns hits (seeds excluded), best weight first.
+   *
+   * The hits describe a tree rooted at the seed: `via` is the parent that *discovered* the hit and `depth` its
+   * discovery depth, both fixed at discovery, while `w` is the heaviest path's weight. The two are allowed to
+   * disagree, because they answer different questions - what to rank by, and what the walk looked like.
    */
   recall(seedIds: readonly string[], opts: RecallOptions): RecallHit[] {
     const seeds = new Set<string>(seedIds);
@@ -314,8 +318,22 @@ export class AssociationGraph {
           if (seeds.has(n.other)) continue;
           const depth = node.depth + 1;
           const prev = best.get(n.other);
-          if (!prev || n.w > prev.w) {
+          if (prev === undefined) {
+            // `via` and `depth` are written once, at discovery, and never rewritten.
+            //
+            // They used to be overwritten whenever a heavier path to the node turned up later
+            // (`if (!prev || n.w > prev.w) best.set(...)`), which made `via` mean "the best predecessor seen so
+            // far" rather than "the parent that discovered this node". A tree rebuilt from that is only
+            // tree-*shaped*: it can re-parent a node under a node discovered after it, or close a cycle - anchor
+            // `x -> a`, `a -> b`, then `b -> a` heavier than `x -> a` gives `best = {a: via b, b: via a}` - and the
+            // structure logged for a step would then not be the walk that produced its selection. `recallTree`
+            // records that walk, so the parent it records has to be the one the walk actually took.
             best.set(n.other, { id: n.other, w: n.w, via: node.id, depth });
+          } else if (n.w > prev.w) {
+            // A heavier path still raises the weight - it is what the hit is ranked, thresholded and ordered by -
+            // but it does not re-parent the node. Keeping the two decisions apart is what makes a tree possible
+            // at all: the strongest path and the discovery edge are no longer required to agree.
+            prev.w = n.w;
           }
           if (!visited.has(n.other)) {
             visited.add(n.other);
@@ -395,17 +413,29 @@ export class AssociationGraph {
   }
 
   /**
-   * Segments within `windowN` before `seedId` whose pair with it has never been scored, nearest first.
+   * Segments within `windowN` before `seedId` whose pair with it the System-1 backend has never judged, nearest
+   * first.
    *
-   * This is the fail-open set. A pair inside the window with no score is not "irrelevant" - it is "not computed
-   * yet", and the two are different facts that used to look identical. Treating the unknown as irrelevant is what
-   * made a live session's BFS anchor return zero candidates and the assembly fall back to the recency window.
+   * This is the fail-open set: a pair inside the window is not "irrelevant", it is "the backend has not answered
+   * for it", and the two are different facts that used to look identical. Treating the unknown as irrelevant is
+   * what made a live session's BFS anchor return zero candidates and the assembly fall back to the recency window.
+   *
+   * **Unjudged, not unscored**, and the difference is the whole rule. This used to test `#scores` for an entry,
+   * and a failing System-1 call still writes one - computed by the local lexical fallback, with `source:
+   * 'lexical'` - so a pair the backend never judged looked exactly like one it had judged and the fail-open rule
+   * stayed silent precisely when it was needed. Measured on a round with 281 `s1_call` records of which 191
+   * failed (97 `TypeError: fetch failed`, 57 `S1TimeoutError` after 30 s, 37 `503 server busy` from Laya):
+   * every pair carried a lexical score, `unknownAdmitted` fired zero times, 11 of 49 assemblies fell back to
+   * `recency-window`, and the graph held zero `s1-noul` edges. The owner's rule is "unknown means relevant"; what
+   * is unknown is the *backend's judgement*, not the presence of a number. A pair therefore counts as unknown
+   * when it has no `#scores` entry at all, or when its entry was not produced by the backend (`source !==
+   * 's1-noul'`, which is also what a lexical entry from `scoreNew` carries).
    *
    * Pairs *beyond* the window are deliberately not returned: they were never asked, by design, and admitting them
    * would undo the saving `w` exists for. So the distinction this draws is exactly the one the window draws, plus
-   * "and we have not heard back yet".
+   * "and the backend has not answered for it".
    */
-  unscoredWithin(seedId: string, windowN: number): Segment[] {
+  unjudgedWithin(seedId: string, windowN: number): Segment[] {
     const seed = this.#order.indexOf(seedId);
     if (seed < 0) return [];
     const from = Math.max(0, seed - Math.max(0, Math.trunc(windowN)));
@@ -413,7 +443,8 @@ export class AssociationGraph {
     // Nearest first: when the backend has not answered, recency *inside* the window is the best ordering there is.
     for (let i = seed - 1; i >= from; i -= 1) {
       const id = this.#order[i] as string;
-      if (this.#scores.has(`${id}->${seedId}`)) continue;
+      const scored = this.#scores.get(`${id}->${seedId}`);
+      if (scored !== undefined && scored.source === 's1-noul') continue;
       const segment = this.#segments.get(id);
       if (segment !== undefined) out.push(segment);
     }

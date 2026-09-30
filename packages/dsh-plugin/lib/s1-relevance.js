@@ -15,11 +15,25 @@
  * request, so the window is asked about in one round trip and the saving is real rather than rhetorical.
  * `scoredPairs` in the control plane still counts pairs - the graph is where that is decided, not here.
  *
- * Failure policy: a System-1 call that times out, errors, or returns an answer we cannot read yields **no
+ * Failure policy: a System-1 call that errors or returns an answer we cannot read yields **no
  * weights**, and the graph's caller falls back to its lexical scorer. That is deliberate. A relevance backend
  * that is briefly unavailable must cost accuracy, never the round, and never a stack trace into the harness.
+ *
+ * "No weights" is the right answer only when asking again would not help, and a measured round says it often
+ * would have. That round produced 281 `s1_call` records of which 191 failed: 97 x `TypeError: fetch failed` (a
+ * backend that was not reachable), 57 x `S1TimeoutError` at the 30 000 ms transport guard, and 37 x
+ * `S1HttpError: systemone 503: {"detail":"server busy"}` - the server itself asking for less at a time. Every
+ * one of those windows was scored lexically instead, and the round ended with **zero** `s1-noul` edges in the
+ * whole graph: the fallback did not merely cost accuracy, it cost the entire System-1 signal.
+ *
+ * So a failure that a retry could plausibly clear (a 5xx, a 429, the transport timeout) is retried with an
+ * exponential wait and a smaller batch, because the server said it was busy and the smaller request is the one
+ * it can answer. A cancellation is never retried, and neither is a 4xx: those are statements about the request,
+ * not about the server's load. Which failures were retried, and which windows were abandoned *after* retrying,
+ * is counted in `S1RelevanceStats` rather than left silent - a retry nobody can see is how "the backend was
+ * slow" stayed indistinguishable from "the backend was refusing" for a whole round.
  */
-import { S1CancelledError, S1TimeoutError, noul, normalize } from '@s1cap/s1-client';
+import { S1CancelledError, S1HttpError, S1TimeoutError, noul, normalize } from '@s1cap/s1-client';
                                                    
                                            
 
@@ -39,6 +53,74 @@ import { S1CancelledError, S1TimeoutError, noul, normalize } from '@s1cap/s1-cli
  */
 const MAX_SEGMENT_CHARS = 256;
 
+/**
+ * How many times one request may be attempted before its window is abandoned: the original plus two retries.
+ *
+ * Three, because this scorer runs on the upkeep queue's critical path - the segment behind it waits - and because
+ * the measured 503s were a server reporting itself busy, where a fourth attempt is a bet the third already lost.
+ * A constant rather than a policy field, for the reason `S1_TRANSPORT_TIMEOUT_MS` is one: `s1.questionsPerCall`
+ * describes the workload and belongs to the config, while how often a dead socket is asked again is a property of
+ * the transport, and a knob there is a knob that silently decides how much of a session is scored lexically.
+ */
+export const S1_RETRY_ATTEMPTS = 3;
+
+/**
+ * The first backoff wait; it doubles per attempt and is clamped by `S1_RETRY_MAX_DELAY_MS`.
+ *
+ * A second, not a millisecond: the failures this retries are a server saying "busy" (37 x 503 in the measured
+ * round) or a request that died at the 30 s transport guard, where a wait shorter than a second is not long
+ * enough to be a different question and a wait of many seconds is paid by the segment waiting behind it. How
+ * long a busy local backend needs is **not measured** - this is the number to revisit if `retries` keeps firing
+ * and `gaveUpAfterRetries` keeps rising. Deliberately deterministic, with no jitter: retries here are sequential
+ * inside one window, and a test must be able to assert the schedule rather than sleep on it. Several sessions
+ * retrying at once could synchronize on this schedule, which is unmeasured.
+ */
+export const S1_RETRY_BASE_DELAY_MS = 1_000;
+
+/**
+ * The ceiling on one backoff wait.
+ *
+ * Without it the schedule is 1 s, 2 s, 4 s, 8 s ..., so raising `S1_RETRY_ATTEMPTS` by one would buy minutes of
+ * waiting per window instead of seconds. 1.5 s is below `2 x S1_RETRY_BASE_DELAY_MS`, on purpose: the clamp then
+ * binds on the second wait of a default three-attempt run, so it is exercised by the tests instead of being a
+ * branch nobody has ever taken.
+ */
+export const S1_RETRY_MAX_DELAY_MS = 1_500;
+
+/**
+ * The wall-clock a single window may spend retrying, measured from its first attempt on `opts.now`.
+ *
+ * The transport guard is 30 s and the measured round had 57 calls that died at exactly 30 000 ms: at that price
+ * the second attempt is already a minute, and a third is refused. The bound is on the whole window and not on one
+ * wait, because what must not happen is a window holding the upkeep queue for minutes while it retries; a window
+ * that answers late is worth less than one that answers. Fast failures (a 503 in tens of milliseconds) never
+ * reach this bound - `S1_RETRY_ATTEMPTS` stops them first - so in practice this budget is the timeout path's.
+ */
+export const S1_RETRY_BUDGET_MS = 60_000;
+
+/** The wait before retry number `attempt` (1-based): the base doubled per attempt, clamped. */
+function retryDelayMs(attempt        )         {
+  return Math.min(S1_RETRY_MAX_DELAY_MS, S1_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+}
+
+/**
+ * Whether asking the same question again could plausibly get a different answer.
+ *
+ * Retryable: a 5xx (including the measured 503 "server busy"), a 429, and the transport timeout - all three say
+ * the server could not serve *this request now*. Not retryable: a cancellation, which is the caller's decision
+ * and must never be restarted; the other 4xx, which say the request was wrong and will still be wrong; and
+ * anything unclassified. The measured `TypeError: fetch failed` (97 of them) falls in that last group - an
+ * unreachable backend may well come back a second later, so this is a judgement and not a proof: retrying it
+ * would add latency to every window of a round whose backend is simply not running, and the `failures` counter
+ * plus the control-plane `s1_call` records are what would show it. If that evidence arrives, this is the line to
+ * change. Errors are matched by class and `status`, never by message.
+ */
+function isRetryable(err         )          {
+  if (err instanceof S1TimeoutError) return true;
+  if (err instanceof S1HttpError) return err.status === 429 || err.status >= 500;
+  return false;
+}
+
                                      
                                                                                        
                                                                                                                             
@@ -50,10 +132,17 @@ const MAX_SEGMENT_CHARS = 256;
                                  
                            
                  
+     
+                                                                                                                 
+                                                                                                           
+                                                                          
+     
+                                    
  
 
                                    
                 
+                                                                                                                   
                     
                       
                        
@@ -66,12 +155,26 @@ const MAX_SEGMENT_CHARS = 256;
                       
                                                                                                     
                             
-                                                                      
+                                                                                           
                    
                                                                                       
                     
-                                                               
+                                                                                    
                    
+     
+                                                                                                               
+                                                                                                                
+                                                                        
+     
+                  
+                                                                                                                    
+                         
+     
+                                                                                                               
+                                                                                                              
+                                                
+     
+                             
  
 
                               
@@ -121,14 +224,20 @@ export function createS1Relevance(opts                    )              {
     timedOut: 0,
     cancelled: 0,
     failures: 0,
+    retries: 0,
+    reducedBatches: 0,
+    gaveUpAfterRetries: 0,
   };
   const perCall = Math.max(1, Math.trunc(opts.questionsPerCall ?? 16));
+  const clock = opts.now ?? Date.now;
+  const wait =
+    opts.sleep ?? ((ms        ) => new Promise      ((resolve) => { setTimeout(resolve, ms); }));
   /** one line, not one per segment: "no backend" is a mode, and a mode repeated per segment is noise */
   let reportedNoClient = false;
 
   const scoreBatch = async (current         , candidates                    )                                         => {
     if (candidates.length === 0) return [];
-    const started = (opts.now ?? Date.now)();
+    const started = clock();
     const out = new Array        (candidates.length).fill(0);
 
     // The window is covered in sequential batches, not truncated at the first one.
@@ -143,73 +252,124 @@ export function createS1Relevance(opts                    )              {
     // redefine the window as twenty; splitting the same questions across several requests changes the number
     // of round trips and not the number of questions.
     let cursor = 0;
+    // The request size for the rest of this window, and the one number a retry changes. It stays reduced instead
+    // of being reset per chunk: a 503 is evidence that this server is busy *now*, so asking the next chunk of the
+    // same window for a full `perCall` again would ask it to be busy again. The cost is round trips - a window
+    // reduced twice pays up to four requests where it paid one - which is the trade the server asked for, and the
+    // smaller requests are the ones with the small prefill, so it is not obviously a latency loss even when every
+    // request answers.
+    let requestSize = perCall;
     while (cursor < candidates.length) {
-      const batch           = [];
-      for (let i = cursor; i < candidates.length && batch.length < perCall; i += 1) batch.push(i);
-
-      // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
-      // the candidate's position in the window, so the model can still tell which part of the history it is
-      // being asked about.
-      // Rendered once per batch rather than once per question: it was called inside the loop, so a fourteen
-      // question batch sliced the same 1200-character string fourteen times. More to the point, its length is the
-      // number that explains a 15-second call, so it is counted and reported instead of being left to be guessed
-      // at from a latency nobody can attribute.
-      const stateText = render(current);
-      const questions                                          = {};
-      batch.forEach((candidateIndex, slot) => {
-        const candidateText = render(candidates[candidateIndex]           );
-        stats.promptChars += stateText.length + candidateText.length;
-        questions[`h${slot}`] = noul(
-          `Does retrieving this candidate help answer or continue the current segment?\n\n` +
-            `Current segment:\n${stateText}\n\n` +
-            `Candidate h${candidateIndex}:\n${candidateText}`,
-          {
-            true: 'retrieving the candidate would help with the current segment',
-            false: 'the candidate is unrelated or a distraction',
-          },
-        );
-      });
-
+      // What this chunk would ask for with no back-pressure. It is the yardstick that keeps `reducedBatches`
+      // meaning "smaller because the backend pushed back" rather than "smaller because the window ran out", which
+      // is why the naturally short last chunk of a window is not counted.
+      const natural = Math.min(perCall, candidates.length - cursor);
+      let size = Math.min(requestSize, candidates.length - cursor);
+      let batch           = [];
       let answers                                                              ;
-      try {
-        const result = await opts.decide(
-          // The state is the current segment: one System-1 call judges how useful the listed candidates are for
-          // it, which is the direction the design asks for (h_i's reference value for s_j, not string overlap).
-          { kind: current.kind, text: render(current) },
-          questions,
-        );
-        // `undefined` is the caller saying there is no backend to ask - observation mode, or a provider that
-        // resolved to `none`. That is a state and not a failure, so it is reported once instead of per segment;
-        // and it is handled here rather than by a TypeError on `result.answers`, which is what it used to be.
-        if (result === undefined) {
-          if (!reportedNoClient) {
-            reportedNoClient = true;
-            opts.onWarn?.('[s1cap] relevance: no System-1 client is answering; windows are scored lexically');
+
+      // The attempt loop: `attempt` is 1-based and the first pass is the original request, so a window that never
+      // fails makes exactly the calls it made before this loop existed.
+      for (let attempt = 1; ; attempt += 1) {
+        batch = [];
+        for (let i = cursor; i < candidates.length && batch.length < size; i += 1) batch.push(i);
+        if (batch.length < natural) stats.reducedBatches += 1;
+
+        // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
+        // the candidate's position in the window, so the model can still tell which part of the history it is
+        // being asked about.
+        // Rendered once per batch rather than once per question: it was called inside the loop, so a fourteen
+        // question batch sliced the same 1200-character string fourteen times. More to the point, its length is the
+        // number that explains a 15-second call, so it is counted and reported instead of being left to be guessed
+        // at from a latency nobody can attribute.
+        const stateText = render(current);
+        const questions                                          = {};
+        batch.forEach((candidateIndex, slot) => {
+          const candidateText = render(candidates[candidateIndex]           );
+          stats.promptChars += stateText.length + candidateText.length;
+          questions[`h${slot}`] = noul(
+            `Does retrieving this candidate help answer or continue the current segment?\n\n` +
+              `Current segment:\n${stateText}\n\n` +
+              `Candidate h${candidateIndex}:\n${candidateText}`,
+            {
+              true: 'retrieving the candidate would help with the current segment',
+              false: 'the candidate is unrelated or a distraction',
+            },
+          );
+        });
+        // Counted here rather than after the answer, so a question that was sent and never answered is still part
+        // of the spend: `answeredQuestions` is the subset that came back.
+        stats.questions += batch.length;
+
+        try {
+          const result = await opts.decide(
+            // The state is the current segment: one System-1 call judges how useful the listed candidates are for
+            // it, which is the direction the design asks for (h_i's reference value for s_j, not string overlap).
+            { kind: current.kind, text: render(current) },
+            questions,
+          );
+          // `undefined` is the caller saying there is no backend to ask - observation mode, or a provider that
+          // resolved to `none`. That is a state and not a failure, so it is reported once instead of per segment;
+          // and it is handled here rather than by a TypeError on `result.answers`, which is what it used to be.
+          // It is also not retried: there is no endpoint to ask again.
+          if (result === undefined) {
+            if (!reportedNoClient) {
+              reportedNoClient = true;
+              opts.onWarn?.('[s1cap] relevance: no System-1 client is answering; windows are scored lexically');
+            }
+            return undefined;
           }
-          return undefined;
+          answers = result.answers;
+          stats.calls += 1;
+          stats.inputTokens += result.usage?.input_tokens ?? 0;
+          stats.outputTokens += result.usage?.output_tokens ?? 0;
+          stats.answeredQuestions += batch.length;
+          break;
+        } catch (err) {
+          stats.failures += 1;
+          // Classified, because the three are different facts about a run: a dead socket, a cancelled session, and
+          // a backend that answered something unusable. They used to arrive here as one TypeError.
+          if (err instanceof S1TimeoutError) stats.timedOut += 1;
+          else if (err instanceof S1CancelledError) stats.cancelled += 1;
+
+          const retryable = isRetryable(err);
+          const elapsed = clock() - started;
+          if (!retryable || attempt >= S1_RETRY_ATTEMPTS || elapsed >= S1_RETRY_BUDGET_MS) {
+            const why = !retryable
+              ? 'not retryable'
+              : elapsed >= S1_RETRY_BUDGET_MS
+                ? `the window's ${S1_RETRY_BUDGET_MS}ms retry budget is spent`
+                : `all ${S1_RETRY_ATTEMPTS} attempts used`;
+            // A window abandoned *because it retried* is a different fact from one abandoned on its first failure:
+            // the first says the backend kept refusing, the second says it was never asked twice. Both end in the
+            // lexical fallback, and only this counter tells them apart afterwards.
+            if (retryable) stats.gaveUpAfterRetries += 1;
+            opts.onWarn?.(
+              `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (${why}; falling back to lexical scoring): ${String(err)}`,
+            );
+            return undefined;
+          }
+
+          stats.retries += 1;
+          // Halve what was actually asked, not the window's cap: a two-question request that failed must come back
+          // as one question rather than as eight, and the floor of 1 is the smallest request the protocol can
+          // carry. The reduction sticks for the rest of the window (see `requestSize` above).
+          size = Math.max(1, Math.floor(batch.length / 2));
+          requestSize = size;
+          const delay = retryDelayMs(attempt);
+          opts.onWarn?.(
+            `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (retryable; retrying in ${delay}ms with ${size} question${size === 1 ? '' : 's'}): ${String(err)}`,
+          );
+          await wait(delay);
         }
-        answers = result.answers;
-        stats.calls += 1;
-        stats.inputTokens += result.usage?.input_tokens ?? 0;
-        stats.outputTokens += result.usage?.output_tokens ?? 0;
-      } catch (err) {
-        stats.failures += 1;
-        // Classified, because the three are different facts about a run: a dead socket, a cancelled session, and
-        // a backend that answered something unusable. They used to arrive here as one TypeError.
-        if (err instanceof S1TimeoutError) stats.timedOut += 1;
-        else if (err instanceof S1CancelledError) stats.cancelled += 1;
-        opts.onWarn?.(
-          `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (falling back to lexical scoring): ${String(err)}`,
-        );
-        return undefined;
       }
-      stats.questions += batch.length;
-      stats.answeredQuestions += batch.length;
 
       // All or nothing for the segment. A batch that answered while its neighbour timed out would leave some
       // pairs judged by the backend and others by the lexical scorer, and the graph would then hold two kinds of
       // number in one window without a per-pair record saying which - the exact confusion `ScoredPair.source`
-      // exists to prevent. A segment whose backend did not answer is scored lexically, in full, and says so.
+      // exists to prevent. A segment whose backend did not answer is scored lexically, in full, and says so. The
+      // retry above does not soften this: it either gets the whole window judged by the backend or hands the whole
+      // window to the fallback, because half a window of backend weights is a window whose `source` record lies.
       for (let slot = 0; slot < batch.length; slot += 1) {
         const weight = readWeight(answers[`h${slot}`]                                   );
         if (weight === undefined) {
@@ -222,7 +382,7 @@ export function createS1Relevance(opts                    )              {
       cursor += batch.length;
     }
 
-    stats.lastMs = Math.max(0, (opts.now ?? Date.now)() - started);
+    stats.lastMs = Math.max(0, clock() - started);
     // Aligned by candidate index, so a partial batch is impossible to misread as a full one.
     return out;
   };

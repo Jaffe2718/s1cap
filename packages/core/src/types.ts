@@ -103,7 +103,8 @@ export interface AssemblyPolicy {
        */
       window: number;
       /**
-       * Bounded wait, in milliseconds, for the anchor segment's own row to finish scoring before assembly.
+       * Bounded wait, in milliseconds, for the anchor segment's own row to be *judged by the backend* before
+       * assembly.
        *
        * Default 10 000 (10 s), and `0` disables it entirely.
        *
@@ -112,8 +113,12 @@ export interface AssemblyPolicy {
        * local backend. A step can therefore assemble before the segment it recalls from — the anchor, the newest
        * `user` segment — has any scored edges, and BFS recall then returns nothing at all. This is the cheaper
        * first remedy: it waits only for the anchor's row, only until the deadline, and never throws. The fail-open
-       * rule in `assemble()` (`AssociationGraph.unscoredWithin`, counted as `unknownAdmitted`) is the backstop and
+       * rule in `assemble()` (`AssociationGraph.unjudgedWithin`, counted as `unknownAdmitted`) is the backstop and
        * stays: this wait makes it rarer, it does not replace it.
+       *
+       * "Judged" rather than "scored", because the wait has to outlast a *failed* call rather than a slow one: a
+       * lexical row written after a backend error is not a row there is nothing left to wait for, and stopping on
+       * it is what would let the fail-open rule stay silent through a round of backend failures.
        */
       anchorWaitMs: number;
     /** bounded BFS depth d */
@@ -228,8 +233,12 @@ export interface AssemblyResult {
   };
   fallback?: 'recency-window';
   /**
-   * How many segments were recalled because their pair with the anchor was inside `w` and had not been scored
-   * yet, rather than because the backend judged them relevant.
+   * How many segments were recalled because their pair with the anchor was inside `w` and the System-1 backend
+   * had not judged it, rather than because the backend judged them relevant.
+   *
+   * "Not judged" is the rule (`AssociationGraph.unjudgedWithin`), and it is deliberately not "has no score": a
+   * failed System-1 call still leaves a lexical score behind, so a rule that asked only for an entry stayed silent
+   * through a round in which 191 of 281 `s1_call` records failed and 11 of 49 assemblies fell back to recency.
    *
    * Counted separately on purpose: fail-open is a measurement decision as much as a safety one, and a run that
    * added these to the System-1 selection would report an intervention rate inflated by exactly the amount it
@@ -267,6 +276,18 @@ export interface AssemblyResult {
      */
     droppedSiblings?: number;
   };
+  /**
+   * The graph structure this step's recall produced.
+   *
+   * A nested tree: the anchor segment id at the root, each hit under the id recall reached it from, leaves `{}`.
+   * **Keys are segment ids only** - no weights, kinds, depths or counts - because the tree records the *shape* of
+   * the walk, not a ranking of it; the ranking is `layout.recalled`, and the counts are `recall`.
+   *
+   * Every hit `AssociationGraph.recall` returned is in it, including the ones the budget then dropped: what the
+   * selector found is the thing being recorded. Always present - `{}` states that the walk produced nothing
+   * (recall was not run, or it found no hit), which is a different fact from a record without the field.
+   */
+  recallTree: Record<string, unknown>;
 }
 
 export interface PlanCandidate {
