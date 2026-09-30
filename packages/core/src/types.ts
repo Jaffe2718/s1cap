@@ -177,7 +177,12 @@ export interface AssemblyPolicy {
     model?: string;
     /** "" = read the provider's environment variable (TYPESAFE_API_KEY / S1CAP_API_KEY); never logged */
     apiKey?: string;
-    timeoutMs: number;
+    /**
+     * There is deliberately no request deadline here. It was `timeoutMs`, and as a policy field it silently
+     * decided which scorer judged a pair: a timeout costs the batch its System-1 answer and hands it to the
+     * lexical fallback. The deadline now lives in the client as `S1_TRANSPORT_TIMEOUT_MS`, where the concern
+     * actually belongs - a request that never returns - and where nobody can tune it into a quality switch.
+     */
     /** questions per /v1/systemone call (context-rot guard) */
     questionsPerCall: number;
   };
@@ -286,7 +291,7 @@ export function defaultPolicy(): AssemblyPolicy {
     xFirst: true,
     deliver: false,
     planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
-    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', timeoutMs: 2500, questionsPerCall: 20 },
+    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20 },
   };
 }
 

@@ -20,9 +20,15 @@ recall starts - are drawn as red lines when they have no edges at all, because a
 never return a candidate.
 
 Usage:
-  python scripts/plot-rg.py <snapshot.json> [out.png]
+  python scripts/plot-rg.py <snapshot.json> [out.png] [threshold]
 
 The snapshot is the file the plugin writes per session under `<DSH_HOME>/.s1cap/rg/`.
+
+The left panel is the graded picture: every pair the backend was asked about, coloured by the probability it
+returned. The right panel is what the threshold kept. Before `scores` was stored the two were the same thing -
+the graph kept only the pairs that cleared r, so a matrix drawn from it could only ever be a yes/no picture, and
+the sub-threshold probabilities were gone even though they had been paid for. A schema-1 snapshot has no
+`scores` and the left panel says so rather than drawing an empty grid that reads as "nothing was relevant".
 """
 import json
 import sys
@@ -32,6 +38,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
@@ -46,6 +53,7 @@ KIND_COLOUR = {
 }
 S1_RGB = np.array([0.84, 0.15, 0.16])      # red: scored by the System-1 backend
 LEX_RGB = np.array([0.55, 0.55, 0.55])     # grey: the lexical fallback
+GRADED_CMAP = plt.get_cmap("viridis")
 
 
 def hex_to_rgb(value):
@@ -91,6 +99,17 @@ def main():
         canvas[i, j] = S1_RGB * (1.0 - 0.35 * max(0.0, min(1.0, w)))
         canvas[j, i] = canvas[i, j]
 
+    # The graded picture: one cell per pair the backend was asked about, coloured by the probability it gave.
+    # NaN is "never scored", which is a different fact from "scored 0" and is drawn as blank.
+    scores = snap.get("scores") or []
+    graded = np.full((n, n), np.nan)
+    for pair in scores:
+        i, j = position.get(pair["from"]), position.get(pair["to"])
+        if i is None or j is None:
+            continue
+        graded[i, j] = pair["w"]
+        graded[j, i] = pair["w"]
+
     degree = Counter()
     for e in edges:
         degree[e["from"]] += 1
@@ -98,45 +117,74 @@ def main():
     users = [i for i, k in enumerate(kind_of) if k == "user"]
     dead_anchors = [i for i in users if degree[order[i]] == 0]
 
-    fig = plt.figure(figsize=(15, 11))
-    # The strip owns the title: putting it on the matrix put the first line underneath the strip, which is how a
-    # picture whose whole point is three numbers ends up showing none of them.
-    ax = fig.add_axes([0.09, 0.07, 0.66, 0.70])
-    ax_top = fig.add_axes([0.09, 0.79, 0.66, 0.015])
-    ax_left = fig.add_axes([0.065, 0.07, 0.015, 0.70])
+    fig = plt.figure(figsize=(17, 10))
+    # Two matrices, because "what was measured" and "what was kept" stopped being the same thing the moment the
+    # probabilities were stored. The strip owns each title: putting it on a matrix put the first line underneath
+    # the strip, which is how a picture whose whole point is three numbers ends up showing none of them.
+    ax_g = fig.add_axes([0.06, 0.10, 0.34, 0.58])
+    ax_e = fig.add_axes([0.52, 0.10, 0.34, 0.58])
+    ax_gt = fig.add_axes([0.06, 0.69, 0.34, 0.012])
+    ax_et = fig.add_axes([0.52, 0.69, 0.34, 0.012])
+    ax_gl = fig.add_axes([0.04, 0.10, 0.012, 0.58])
 
-    ax.imshow(canvas, interpolation="nearest", origin="upper", extent=(-0.5, n - 0.5, n - 0.5, -0.5))
-    ax.set_xlabel("segment index in the append order  (newer ->)")
-    ax.set_ylabel("segment index in the append order  (newer ->)")
-    # Every twentieth index, because the batch cap that decides which candidates are actually asked is twenty.
-    for tick in range(0, n, 20):
-        ax.axhline(tick, color="black", lw=0.3, alpha=0.25)
-        ax.axvline(tick, color="black", lw=0.3, alpha=0.25)
+    extent = (-0.5, n - 0.5, n - 0.5, -0.5)
+    graded_img = np.ones((n, n, 3))
+    if scores:
+        mask = ~np.isnan(graded)
+        graded_img[mask] = GRADED_CMAP(np.nan_to_num(graded, nan=0.0))[mask][:, :3]
+    ax_g.imshow(graded_img, interpolation="nearest", origin="upper", extent=extent)
+    ax_e.imshow(canvas, interpolation="nearest", origin="upper", extent=extent)
+
+    for axis in (ax_g, ax_e):
+        axis.set_xlabel("segment index in the append order  (newer ->)")
+        axis.set_ylabel("segment index in the append order  (newer ->)")
+        # Every twentieth index: that is the request size, so it is the grid the batches move along.
+        for tick in range(0, n, 20):
+            axis.axhline(tick, color="black", lw=0.3, alpha=0.25)
+            axis.axvline(tick, color="black", lw=0.3, alpha=0.25)
+        for i in dead_anchors:
+            axis.axhline(i, color="red", lw=1.1, alpha=0.9)
+            axis.axvline(i, color="red", lw=1.1, alpha=0.9)
+
     for i in dead_anchors:
-        ax.axhline(i, color="red", lw=1.1, alpha=0.9)
-        ax.axvline(i, color="red", lw=1.1, alpha=0.9)
-        ax.annotate(
+        ax_e.annotate(
             f"  anchor {i}: 0 edges",
             (n - 0.5, i), xytext=(-4, 4), textcoords="offset points",
             ha="right", va="bottom", fontsize=8, color="red",
         )
 
     strip = np.array([hex_to_rgb(KIND_COLOUR.get(k, "#333333")) for k in kind_of]).reshape(1, n, 3)
-    ax_top.imshow(strip, aspect="auto", interpolation="nearest", extent=(-0.5, n - 0.5, 0, 1))
-    ax_top.set_axis_off()
-    ax_top.set_title(
-        f"connectivity matrix  -  {n} segments, {len(edges)} edges "
-        f"({sum(1 for e in edges if e.get('source') == 's1-noul')} System-1, "
-        f"{sum(1 for e in edges if e.get('source') != 's1-noul')} lexical)  -  "
-        f"cursor {snap.get('scored')}, scoredPairs {snap.get('scoredPairs')}\n"
-        f"both axes are the append order; every edge sits above the diagonal, because a segment is scored "
-        f"only against earlier ones\n"
-        f"a band parallel to the diagonal is local connection; a band running straight up from one early index "
-        f"is every later segment measured against that same part",
+    for strip_axis in (ax_gt, ax_et):
+        strip_axis.imshow(strip, aspect="auto", interpolation="nearest", extent=(-0.5, n - 0.5, 0, 1))
+        strip_axis.set_axis_off()
+    ax_gl.imshow(strip.reshape(n, 1, 3), aspect="auto", interpolation="nearest", extent=(0, 1, n - 0.5, -0.5))
+    ax_gl.set_axis_off()
+
+    s1_edges = sum(1 for e in edges if e.get("source") == "s1-noul")
+    if scores:
+        s1_scores = sum(1 for p in scores if p.get("source") == "s1-noul")
+        ax_g.set_title(
+            f"what the backend was asked, and what it answered  -  {len(scores)} scored pairs "
+            f"({s1_scores} System-1)\n"
+            f"colour is the probability itself; blank means the pair was never scored",
+            fontsize=9, pad=8,
+        )
+        sm = plt.cm.ScalarMappable(norm=Normalize(0, 1), cmap=GRADED_CMAP)
+        fig.colorbar(sm, ax=ax_g, fraction=0.046, pad=0.02, label="P(retrieving the candidate helps)")
+    else:
+        ax_g.set_title(
+            "no `scores` in this snapshot: it is schema 1, written before the probabilities were kept,\n"
+            "so this panel cannot be drawn - the pairs below the threshold are gone",
+            fontsize=9, pad=8, color="#b00",
+        )
+
+    ax_et.set_title(
+        f"what the threshold kept  -  {n} segments, {len(edges)} edges ({s1_edges} System-1, "
+        f"{len(edges) - s1_edges} lexical)  -  cursor {snap.get('scored')}, scoredPairs {snap.get('scoredPairs')}\n"
+        f"both axes are the append order, and every edge sits above the diagonal because a segment is scored "
+        f"only against earlier ones",
         fontsize=9, pad=8,
     )
-    ax_left.imshow(strip.reshape(n, 1, 3), aspect="auto", interpolation="nearest", extent=(0, 1, n - 0.5, -0.5))
-    ax_left.set_axis_off()
 
     legend = [
         Line2D([], [], color=S1_RGB, lw=4, label="edge scored by the System-1 backend (s1-noul)"),
@@ -145,7 +193,7 @@ def main():
     ] + [
         Patch(facecolor=KIND_COLOUR[k], label=k) for k in KIND_ORDER if k in set(kind_of)
     ]
-    ax.legend(handles=legend, loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8, framealpha=0.95)
+    ax_e.legend(handles=legend, loc="upper left", bbox_to_anchor=(1.03, 1.0), fontsize=8, framealpha=0.95)
 
     fig.savefig(out, dpi=150)
     print(f"wrote {out}")

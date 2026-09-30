@@ -246,7 +246,7 @@ test('defaults: C4 policy, provider jev, two distinct sinks, no conflicts', () =
 
 test('layausa runtime endpoint drives the resolved base URL when provider is laya-serve', () => {
   const resolved = resolvePluginConfig({
-    s1: { provider: 'laya-serve', timeoutMs: 4000 },
+    s1: { provider: 'laya-serve' },
     laya: {
       enabled: true,
       autoStart: false,

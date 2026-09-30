@@ -84,24 +84,32 @@ test('an unreadable answer also yields undefined, so a partial batch is never mi
   assert.equal(weights, undefined, 'one unreadable answer invalidates the batch rather than scoring it 0');
 });
 
-test('the question cap is a stated limit, not a silent truncation', async () => {
-  const warnings: string[] = [];
+test('the window is covered in batches, so the cap costs round trips and not coverage', async () => {
+  // This replaces a test that asserted the opposite, and the opposite was the defect. The scorer used to ask
+  // about `candidates[0 .. perCall-1]` and stop, warning that "the rest is unscored" - so with the graph building
+  // its candidate list oldest-first, every segment past the first twenty was measured against the session's
+  // opening twenty segments and never against its recent neighbours. A live session showed it exactly: 100% of
+  // its System-1 edges had an older endpoint in 0..19, and the later BFS anchors had no edges at all, so recall
+  // fell back to the recency window. The cap bounds one request, not the window.
   const seen: string[][] = [];
   const relevance = createS1Relevance({
     questionsPerCall: 2,
     decide: async (_state, questions) => {
       seen.push(Object.keys(questions));
-      return { answers: { h0: { type: 'noul', noul: 0.5 }, h1: { type: 'noul', noul: 0.5 } } };
+      const answers: Record<string, { type: string; noul: number }> = {};
+      for (const key of Object.keys(questions)) answers[key] = { type: 'noul', noul: 0.5 };
+      return { answers };
     },
-    onWarn: (message) => warnings.push(message),
   });
 
   const many = [segment('a', 'x'), segment('b', 'y'), segment('c', 'z')];
   const weights = await relevance(current, many);
-  assert.deepEqual(seen, [['h0', 'h1']], 'only the cap is asked about in this call');
-  assert.equal(weights?.length, 3, 'the result is still one weight per candidate');
-  assert.equal(weights?.[2], 0, 'the unscored tail is zero, and that is why it is reported');
-  assert.ok(warnings.some((w) => w.includes('questionsPerCall')), 'the truncation is stated');
+  assert.deepEqual(
+    seen,
+    [['h0', 'h1'], ['h0']],
+    'three candidates at a cap of two is two requests, not one request that quietly drops the third',
+  );
+  assert.deepEqual(weights, [0.5, 0.5, 0.5], 'and every candidate gets a weight, including the ones past the first request');
 });
 
 test('an empty window costs nothing', async () => {

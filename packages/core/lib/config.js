@@ -52,7 +52,6 @@ export const NUMBER_RULES                        = [
   { path: 'planGate.maxPlans', min: 1, max: 8, integer: true },
   { path: 'planGate.attemptCap', min: 1, max: 8, integer: true },
   { path: 'planGate.abstainConfidence', min: 0, max: 1 },
-  { path: 's1.timeoutMs', min: 50, max: 60_000, integer: true },
   { path: 's1.questionsPerCall', min: 1, max: 64, integer: true },
 ];
 

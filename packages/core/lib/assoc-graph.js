@@ -5,7 +5,7 @@
  * Storage is in-memory for M0/M1; the SQLite-backed store plugs in behind the
  * same surface (segments + edges + provenance).
  */
-                                                           
+                                                                       
 
 /** w_eff = w · exp(−Δt/λ) */
 export function decayedWeight(w        , ageMs        , lambdaMs        )         {
@@ -40,7 +40,31 @@ export function decayedWeight(w        , ageMs        , lambdaMs        )       
  * is not a graph a newer build may half-read: an unrecognised version is treated as absent, so the
  * worst a stale file can cost is the scoring it did not carry over.
  */
-export const RG_SNAPSHOT_SCHEMA = 1;
+export const RG_SNAPSHOT_SCHEMA = 2;
+
+/**
+ * One pair the association backend was actually asked about, with the probability it returned.
+ *
+ * This exists because the graph kept only the pairs that cleared the threshold: `scoreNew` tested the weight
+ * against `recall.threshold` and `continue`d, so a probability of 0.54 was computed, paid for, and discarded.
+ * Three things follow from keeping them, and each is a reason the field is here.
+ *
+ *  - The threshold becomes what the brief says it is - a *traversal* test for the BFS ("关联超过阈值 r 就继续计算")
+ *    - instead of an ingest filter that destroys the measurement before anything can read it.
+ *  - `r` becomes sweepable offline. It is one of the three ablation knobs, and a run recorded at r = 0.55 could
+ *    not previously be re-read at r = 0.3 without asking the backend for every pair a second time.
+ *  - The graph stops throwing away its only graded signal. Edges are binary by construction, which is why a
+ *    connectivity matrix drawn from them can only ever be a yes/no picture.
+ */
+                             
+               
+             
+                                                                                             
+            
+                                                                            
+                     
+             
+ 
 
                              
                  
@@ -53,6 +77,11 @@ export const RG_SNAPSHOT_SCHEMA = 1;
                   
                       
                            
+     
+                                                                                                               
+                                                                                              
+     
+                        
                                                                                                    
                  
                       
@@ -67,6 +96,8 @@ export class AssociationGraph {
   /** cumulative pair comparisons - the number recall.window is meant to bound */
   #scoredPairs = 0;
   #edges = new Map                         ();
+  /** every scored pair, above and below the threshold, by `${from}->${to}`; see `ScoredPair` */
+  #scores = new Map                    ();
   #adj = new Map                  ();
 
   get segmentCount()         {
@@ -75,6 +106,11 @@ export class AssociationGraph {
 
   get edgeCount()         {
     return this.#edges.size;
+  }
+
+  /** pairs the backend was asked about, which is not the same number as the edges they produced */
+  get scoreCount()         {
+    return this.#scores.size;
   }
 
   addSegments(segments                   )       {
@@ -156,15 +192,23 @@ export class AssociationGraph {
 
       for (let i = 0; i < candidates.length; i += 1) {
         const weight = weights[i]          ;
+        const other = candidates[i]           ;
+        // `'s1-noul'` is the only System-1 question shape the association path asks; `'lexical'` means
+        // "computed here, no backend consulted", which is the distinction an experiment has to be able to read.
+        const source             = byBackend ? 's1-noul' : 'lexical';
+        // Recorded before the threshold, not after it. The probability is the measurement; the threshold is a
+        // reading of it. Testing first - which is what this did - spent the System-1 call and kept only the
+        // verdict, leaving a graph that cannot answer "how relevant was it" or "what would r = 0.3 have kept".
+        if (Number.isFinite(weight)) {
+          this.#scores.set(`${other.id}->${id}`, { from: other.id, to: id, w: weight, source, at: current.ts });
+        }
         if (!Number.isFinite(weight) || weight < opts.threshold) continue;
         this.upsertEdge({
-          from: (candidates[i]           ).id,
+          from: other.id,
           to: id,
           w: weight,
           wTier1: weight,
-          // `'s1-noul'` is the only System-1 question shape the association path asks; `'lexical'` means
-          // "computed here, no backend consulted", which is the distinction an experiment has to be able to read.
-          source: byBackend ? 's1-noul' : 'lexical',
+          source,
           verifiedAt: current.ts,
           provenance: byBackend ? `window:${String(windowN)};s1` : `window:${String(windowN)};fallback`,
         });
@@ -287,25 +331,48 @@ export class AssociationGraph {
       order: [...this.#order],
       segments: [...this.#segments.values()],
       edges: [...this.#edges.values()],
+      scores: [...this.#scores.values()],
       scored: this.#scored,
       scoredPairs: this.#scoredPairs,
     };
   }
 
-  /** Rebuild a graph from a snapshot. An unrecognised schema version yields an empty graph, not a partial one. */
+  /**
+   * Rebuild a graph from a snapshot.
+   *
+   * Schema 1 is still read: it held the same segments and the same thresholded edges, and only lacked the
+   * sub-threshold probabilities. Refusing it would throw away a whole session's graph to punish a file for
+   * being written one version earlier.
+   */
   static fromSnapshot(snap                        )                   {
     const graph = new AssociationGraph();
-    if (snap === undefined || snap.schema !== RG_SNAPSHOT_SCHEMA) return graph;
+    if (snap === undefined || (snap.schema !== RG_SNAPSHOT_SCHEMA && snap.schema !== 1)) return graph;
     for (const segment of snap.segments ?? []) graph.#segments.set(segment.id, segment);
     graph.#order = (snap.order ?? []).filter((id) => graph.#segments.has(id));
     for (const edge of snap.edges ?? []) {
       graph.#edges.set(`${edge.from}->${edge.to}`, edge);
       graph.#link(edge.from, edge.to);
     }
+    for (const score of snap.scores ?? []) graph.#scores.set(`${score.from}->${score.to}`, score);
     // Clamped, because a cursor larger than the order array would silently skip scoring forever.
     graph.#scored = Math.max(0, Math.min(graph.#order.length, Math.trunc(snap.scored ?? 0)));
     graph.#scoredPairs = Math.max(0, Math.trunc(snap.scoredPairs ?? 0));
     return graph;
+  }
+
+  /**
+   * Every pair the backend was asked about, above and below the threshold, newest first.
+   *
+   * Read-only and for analysis: this is the graded relevance the graph keeps, and the thing that makes `r` a
+   * reading rather than a filter. `edgesAt` is the thresholded view of the same data.
+   */
+  scores()               {
+    return [...this.#scores.values()].sort((a, b) => b.at - a.at);
+  }
+
+  /** The pairs that would be edges if the threshold were `threshold` - an offline sweep of `recall.threshold`. */
+  edgesAt(threshold        )               {
+    return this.scores().filter((pair) => Number.isFinite(pair.w) && pair.w >= threshold);
   }
 }
 

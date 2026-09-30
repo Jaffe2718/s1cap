@@ -177,7 +177,12 @@ export const CORE_SCHEMA_VERSION = 1         ;
                    
                                                                                                          
                     
-                      
+       
+                                                                                                            
+                                                                                                            
+                                                                                                             
+                                                                                                            
+       
                                                                
                              
     
@@ -286,7 +291,7 @@ export function defaultPolicy()                 {
     xFirst: true,
     deliver: false,
     planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
-    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', timeoutMs: 2500, questionsPerCall: 20 },
+    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20 },
   };
 }
 

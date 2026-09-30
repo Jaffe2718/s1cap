@@ -86,69 +86,95 @@ function readWeight(answer                                                      
 export function createS1Relevance(opts                    )              {
   const stats                   = { calls: 0, questions: 0, inputTokens: 0, outputTokens: 0, lastMs: 0, failures: 0 };
   const perCall = Math.max(1, Math.trunc(opts.questionsPerCall ?? 16));
+  /** one line, not one per segment: "no backend" is a mode, and a mode repeated per segment is noise */
+  let reportedNoClient = false;
 
   const scoreBatch = async (current         , candidates                    )                                         => {
     if (candidates.length === 0) return [];
     const started = (opts.now ?? Date.now)();
-    const questions                                          = {};
-    const index           = [];
-    for (let i = 0; i < candidates.length; i += 1) {
-      // The window is asked about in batches bounded by the caller's cap. A cap reached is a real limit, not a
-      // silent truncation, so it is reported once and the remaining candidates simply get no weight.
-      if (i > 0 && i % perCall === 0) {
-        opts.onWarn?.(`[s1cap] relevance: window of ${candidates.length} exceeds questionsPerCall=${perCall}; the rest is unscored`);
-        break;
-      }
-      const id = `h${i}`;
-      questions[id] = noul(
-        `Does retrieving this candidate help answer or continue the current segment?\n\n` +
-        `Current segment:\n${render(current)}\n\n` +
-        `Candidate h${i}:\n${render(candidates[i]           )}`,
-        {
-          true: 'retrieving the candidate would help with the current segment',
-          false: 'the candidate is unrelated or a distraction',
-        },
-      );
-      index.push(i);
-    }
-    if (index.length === 0) return undefined;
+    const out = new Array        (candidates.length).fill(0);
 
-    let answers                                                              ;
-    try {
-      const result = await opts.decide(
-        // The state is the current segment: one System-1 call judges how useful the listed candidates are for
-        // it, which is the direction the design asks for (h_i's reference value for s_j, not string overlap).
-        { kind: current.kind, text: render(current) },
-        questions,
-      );
-      answers = result.answers;
-      stats.calls += 1;
-      stats.inputTokens += result.usage?.input_tokens ?? 0;
-      stats.outputTokens += result.usage?.output_tokens ?? 0;
-    } catch (err) {
-      stats.failures += 1;
-      opts.onWarn?.(`[s1cap] relevance call failed (falling back to lexical scoring): ${String(err)}`);
-      return undefined;
-    }
-    stats.questions += index.length;
-    stats.lastMs = Math.max(0, (opts.now ?? Date.now)() - started);
+    // The window is covered in sequential batches, not truncated at the first one.
+    //
+    // The previous shape asked about `candidates[0 .. perCall-1]` and stopped, warning that "the rest is
+    // unscored". Because the graph builds its candidate list oldest-first, that meant every segment past the
+    // first twenty was measured against **the session's opening twenty segments** and never against its recent
+    // neighbours: a live session showed 100% of its System-1 edges with an older endpoint in 0..19, exactly
+    // twenty distinct older endpoints, and BFS anchors with no edges at all - recall then fell back to the
+    // recency window, which reads as "the selector found nothing" and was in fact "the selector was never
+    // asked". `w` is supposed to bound the System-1 *cost* of one segment (O(w) questions), not silently
+    // redefine the window as twenty; splitting the same questions across several requests changes the number
+    // of round trips and not the number of questions.
+    let cursor = 0;
+    while (cursor < candidates.length) {
+      const batch           = [];
+      for (let i = cursor; i < candidates.length && batch.length < perCall; i += 1) batch.push(i);
 
-    const weights           = [];
-    for (const i of index) {
-      const answer = answers[`h${i}`]                                   ;
-      const weight = readWeight(answer);
-      if (weight === undefined) {
+      // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
+      // the candidate's position in the window, so the model can still tell which part of the history it is
+      // being asked about.
+      const questions                                          = {};
+      batch.forEach((candidateIndex, slot) => {
+        questions[`h${slot}`] = noul(
+          `Does retrieving this candidate help answer or continue the current segment?\n\n` +
+            `Current segment:\n${render(current)}\n\n` +
+            `Candidate h${candidateIndex}:\n${render(candidates[candidateIndex]           )}`,
+          {
+            true: 'retrieving the candidate would help with the current segment',
+            false: 'the candidate is unrelated or a distraction',
+          },
+        );
+      });
+
+      let answers                                                              ;
+      try {
+        const result = await opts.decide(
+          // The state is the current segment: one System-1 call judges how useful the listed candidates are for
+          // it, which is the direction the design asks for (h_i's reference value for s_j, not string overlap).
+          { kind: current.kind, text: render(current) },
+          questions,
+        );
+        // `undefined` is the caller saying there is no backend to ask - observation mode, or a provider that
+        // resolved to `none`. That is a state and not a failure, so it is reported once instead of per segment;
+        // and it is handled here rather than by a TypeError on `result.answers`, which is what it used to be.
+        if (result === undefined) {
+          if (!reportedNoClient) {
+            reportedNoClient = true;
+            opts.onWarn?.('[s1cap] relevance: no System-1 client is answering; windows are scored lexically');
+          }
+          return undefined;
+        }
+        answers = result.answers;
+        stats.calls += 1;
+        stats.inputTokens += result.usage?.input_tokens ?? 0;
+        stats.outputTokens += result.usage?.output_tokens ?? 0;
+      } catch (err) {
         stats.failures += 1;
-        opts.onWarn?.(`[s1cap] relevance: no usable weight for candidate h${i}; the whole batch falls back`);
+        opts.onWarn?.(
+          `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (falling back to lexical scoring): ${String(err)}`,
+        );
         return undefined;
       }
-      weights.push(weight);
+      stats.questions += batch.length;
+
+      // All or nothing for the segment. A batch that answered while its neighbour timed out would leave some
+      // pairs judged by the backend and others by the lexical scorer, and the graph would then hold two kinds of
+      // number in one window without a per-pair record saying which - the exact confusion `ScoredPair.source`
+      // exists to prevent. A segment whose backend did not answer is scored lexically, in full, and says so.
+      for (let slot = 0; slot < batch.length; slot += 1) {
+        const weight = readWeight(answers[`h${slot}`]                                   );
+        if (weight === undefined) {
+          stats.failures += 1;
+          opts.onWarn?.(`[s1cap] relevance: no usable weight for candidate h${batch[slot]}; the whole batch falls back`);
+          return undefined;
+        }
+        out[batch[slot]          ] = weight;
+      }
+      cursor += batch.length;
     }
+
+    stats.lastMs = Math.max(0, (opts.now ?? Date.now)() - started);
     // Aligned by candidate index, so a partial batch is impossible to misread as a full one.
-    const out = new Array        (candidates.length).fill(0);
-    index.forEach((candIndex, k) => {
-      out[candIndex] = weights[k]          ;
-    });
     return out;
   };
 

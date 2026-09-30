@@ -90,11 +90,28 @@
                   
                   
                  
-                                                                  
-                     
+     
+                                                                                                              
+                                                                                                           
+    
+                                                                                                               
+                                                                                                             
+                                                                                                                
+                                                     
+     
+                       
                              
                            
  
+
+/**
+ * The transport guard: how long one HTTP request may hang before it is treated as dead.
+ *
+ * Not a knob, and exported only so a test can advance a mocked timer to it instead of waiting. Measured calls
+ * against a warm Laya server peak at ~2.4 s for a full batch of twenty questions, so 30 s is an order of
+ * magnitude outside the distribution: it fires when a socket is dead, never when a model is merely thinking.
+ */
+export const S1_TRANSPORT_TIMEOUT_MS = 30_000;
 
 export class S1HttpError extends Error {
            status        ;
@@ -112,6 +129,20 @@ export class S1TimeoutError extends Error {
   }
 }
 
+/**
+ * The request was aborted because the caller was cancelled, not because the backend was slow.
+ *
+ * A separate type on purpose: a cancelled session is not a failing backend, and a record that cannot tell the
+ * two apart would report cancellations as reliability problems - and, worse, would count them as reasons to fall
+ * back to the lexical scorer.
+ */
+export class S1CancelledError extends Error {
+  constructor() {
+    super('systemone request cancelled by the caller');
+    this.name = 'S1CancelledError';
+  }
+}
+
 /** Known deployments live in `providers.ts` (one active backend at a time); re-exported here. */
 export * from './providers.js';
 export * from './resolve.js';
@@ -120,22 +151,28 @@ export class S1Client {
   #baseUrl        ;
   #apiKey                    ;
   #model                    ;
-  #timeoutMs        ;
   #fetch              ;
 
   constructor(opts                 ) {
     this.#baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.#apiKey = opts.apiKey;
     this.#model = opts.model;
-    this.#timeoutMs = opts.timeoutMs ?? 2500;
     this.#fetch = opts.fetchImpl ?? fetch;
   }
 
   /** Evaluate any number of questions against one state in a single call. */
-  async decide(state         , questions                            )                          {
+  async decide(
+    state         ,
+    questions                            ,
+    opts                           = {},
+  )                          {
     const started = Date.now();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
+    const guard = new AbortController();
+    const timer = setTimeout(() => guard.abort(), S1_TRANSPORT_TIMEOUT_MS);
+    // Two reasons to abort, kept distinguishable: our own transport guard, and the caller's cancellation. The
+    // caller's signal wins the classification, because a cancelled session is not a slow backend.
+    const signal =
+      opts.signal === undefined ? guard.signal : AbortSignal.any([guard.signal, opts.signal]);
     try {
       const headers                         = { 'content-type': 'application/json' };
       if (this.#apiKey) headers.authorization = `Bearer ${this.#apiKey}`;
@@ -148,7 +185,7 @@ export class S1Client {
           ...(this.#model ? { model: this.#model } : {}),
           questions,
         }),
-        signal: controller.signal,
+        signal,
       });
 
       if (!res.ok) {
@@ -167,7 +204,10 @@ export class S1Client {
         ...(json.routing !== undefined ? { routing: json.routing } : {}),
       };
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') throw new S1TimeoutError(this.#timeoutMs);
+      if (err instanceof Error && err.name === 'AbortError') {
+        if (opts.signal?.aborted === true) throw new S1CancelledError();
+        throw new S1TimeoutError(S1_TRANSPORT_TIMEOUT_MS);
+      }
       throw err;
     } finally {
       clearTimeout(timer);

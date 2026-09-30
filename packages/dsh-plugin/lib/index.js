@@ -718,7 +718,6 @@ function applyInner(ctx               , raw                             )       
             baseUrl: backend.baseUrl,
             ...(backend.apiKey ? { apiKey: backend.apiKey } : {}),
             ...(backend.model ? { model: backend.model } : {}),
-            timeoutMs: config.s1.timeoutMs,
           })
         : undefined;
     return { backend, client };
@@ -994,10 +993,14 @@ function applyInner(ctx               , raw                             )       
           recordS1Call('assoc', 'noul', count, result, s1SessionScope);
           return result;
         } catch (err) {
-          // Recorded, then the same `undefined` an absent client produces: the graph scores that batch lexically
-          // and the session continues. What must not happen is the failure leaving no trace in the data.
+          // Recorded, then **rethrown**. Returning `undefined` here looked like the same thing - the scorer below
+          // turns either into "no weights, use the lexical fallback" - but it destroyed the reason: the scorer's
+          // own catch received a `TypeError: cannot read properties of undefined (reading 'answers')` instead of
+          // the `S1TimeoutError` that actually happened, so the one line a human reads named the wrong failure.
+          // A cancelled caller is reported as a cancellation and is not a reason to re-score lexically; the
+          // scorer treats it the same way only because a cancelled batch has no answer to keep.
           recordS1Failure('assoc', 'noul', count, err, s1SessionScope);
-          return undefined;
+          throw err;
         }
       },
       questionsPerCall: config.s1.questionsPerCall,
@@ -1423,7 +1426,6 @@ function applyInner(ctx               , raw                             )       
             baseUrl: backend.baseUrl,
             model: backend.model,
             key: redactKey(backend.apiKey),
-            timeoutMs: config.s1.timeoutMs,
             questionsPerCall: config.s1.questionsPerCall,
           },
           // The interpreter is reported here and not only on the panel's route: "which python will this run

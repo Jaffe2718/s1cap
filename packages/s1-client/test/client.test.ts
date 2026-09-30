@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  S1CancelledError,
   S1Client,
   S1HttpError,
   S1TimeoutError,
+  S1_TRANSPORT_TIMEOUT_MS,
   choice,
   normalize,
   noul,
@@ -92,10 +94,14 @@ test('decide: surfaces HTTP failures with status', async () => {
   );
 });
 
-test('decide: aborts on timeout with S1TimeoutError', async () => {
+test('decide: the transport guard aborts with S1TimeoutError, and the deadline is not a knob', async (t) => {
+  // 30 s is not something a test should wait for, so the timer is mocked and advanced to the constant. That the
+  // constant is exported for this - and is not settable through options - is the point of the change: a
+  // configurable deadline is what turned a transport property into a silent quality switch, because a timeout
+  // here does not cost latency, it replaces the backend's score with the lexical fallback's.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const client = new S1Client({
     baseUrl: 'http://127.0.0.1:8008',
-    timeoutMs: 25,
     fetchImpl: mockFetch(
       (_url, init) =>
         new Promise<Response>((_resolve, reject) => {
@@ -107,9 +113,38 @@ test('decide: aborts on timeout with S1TimeoutError', async () => {
         }),
     ),
   });
+  const pending = client.decide('x', { q: noul('is it relevant?') });
+  t.mock.timers.tick(S1_TRANSPORT_TIMEOUT_MS);
   await assert.rejects(
-    () => client.decide('x', { q: noul('is it relevant?') }),
+    () => pending,
     (err: unknown) => err instanceof S1TimeoutError,
+  );
+});
+
+test('decide: a cancelled caller is a cancellation, not a slow backend', async (t) => {
+  // The distinction matters twice over. A cancelled session is not a reliability problem, so it must not be
+  // counted as a failed call; and it is not a reason to score the batch lexically, which is what a timeout means.
+  // The harness hands a plugin its own signal, so this path becomes live as soon as it is forwarded.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    fetchImpl: mockFetch(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }),
+    ),
+  });
+  const caller = new AbortController();
+  const pending = client.decide('x', { q: noul('is it relevant?') }, { signal: caller.signal });
+  caller.abort();
+  await assert.rejects(
+    () => pending,
+    (err: unknown) => err instanceof S1CancelledError,
   );
 });
 

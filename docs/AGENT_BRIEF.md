@@ -223,7 +223,9 @@ interface AssemblyPolicy {
   tail: { k: number };                                    // verbatim recent turns always kept
   planGate: { on: boolean; maxPlans: number; attemptCap: number; abstainConfidence: number };
   s1: { provider: 'jev' | 'laya-serve' | 'edgejev' | 'kev' | 'none';
-        baseUrl?: string; model?: string; timeoutMs: number; questionsPerCall: number };
+        baseUrl?: string; model?: string; questionsPerCall: number };
+        // no request deadline, deliberately: it was `timeoutMs`, and as a policy field it decided which scorer
+        // judged a pair. The transport guard is `S1_TRANSPORT_TIMEOUT_MS` in the client and is not tunable.
 }
 
 interface S1Client {                                      // thin wrapper over /v1/systemone

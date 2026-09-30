@@ -837,7 +837,9 @@ not activate at all:
             budgetRatio(number) minRecalledShare(number)
     tail: k(number)
     planGate: on(bool) maxPlans(number) attemptCap(number) abstainConfidence(number)
-    s1: provider(string) baseUrl(string) model(string) apiKey(string) timeoutMs(number) questionsPerCall(number)
+    s1: provider(string) baseUrl(string) model(string) apiKey(string) questionsPerCall(number)
+        // no request deadline, deliberately: as a policy field it silently decided whether a pair was scored by
+        // the backend or by the lexical fallback. The transport guard is a client constant now.
     telemetry: sessionJsonl(string) controlJsonl(string) tapeJsonl(string)
     laya: enabled(bool) preferConsoleScript(bool) host(string) port(number) healthPath(string)
           autoStart(bool) startupTimeoutMs(number) pollIntervalMs(number)
