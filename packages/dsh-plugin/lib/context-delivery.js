@@ -156,7 +156,16 @@ function textOf(message         )         {
 
 function renderSegment(seg                    )         {
   const parent = seg.chunkOf ?? seg.id;
-  return `## recalled · ${seg.kind} · ${parent}\n${seg.text}`;
+  // A provenance line, and nothing else. The segment's own text follows verbatim.
+  //
+  // This is the whole shape of the block, and it is a correction. It used to open with S1CAP prose - "the blocks
+  // below were selected by relevance to the current task, they supplement the transcript" - which is S1CAP
+  // writing *about* the context into the conversation, under a rule that says S1CAP manages the harness's own
+  // context and contributes no text of its own. And a bare concatenation would be worse than either: an earlier
+  // turn re-sent as a fresh user message reads as something the user just said, which is a distortion of the
+  // transcript rather than a convenience. One line naming where the text came from is the minimum that keeps the
+  // distinction honest, and it is a label rather than content.
+  return `## earlier ${seg.kind} turn, quoted verbatim · ${parent}\n${seg.text}`;
 }
 
 /**
@@ -186,7 +195,11 @@ export function deliverContext(input                      )                     
     if (block === 'stateProxy') {
       const text = input.stateProxy;
       if (typeof text === 'string' && text !== '') {
-        parts.push(`## state proxy T\n${text}`);
+        // Labelled as authored, because it is: T is a summary S1CAP wrote, not a quotation. The recalled
+        // segments below are quoted verbatim and say so; this one must not read as if it were. Whether an
+        // authored T may be delivered at all is an open question about the method (docs/STATUS.md), not something
+        // to decide by quietly labelling it.
+        parts.push('## state proxy T, written by S1CAP from this session\n' + text);
         blocks.push('stateProxy');
       }
     } else if (block === 'recalled') {
@@ -202,13 +215,9 @@ export function deliverContext(input                      )                     
     return NOT_DELIVERED('nothing to insert: no recalled block and no state proxy');
   }
 
-  const text = [
-    '# context assembled for this step',
-    'The blocks below were selected by relevance to the current task. They supplement the transcript; they do',
-    'not replace it.',
-    '',
-    ...parts,
-  ].join('\n');
+  // No preamble, no explanation, no instruction. What the model reads is quoted session content with a
+  // provenance line, and nothing else.
+  const text = parts.join('\n\n');
   const payloadId = payloadIdFor(text);
 
   // Already delivered: the previous injection is part of the log and comes back through the decision, so

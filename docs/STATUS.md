@@ -1199,6 +1199,32 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   context-registration API returned nothing, and `dsh-system-prompt` exports only the render/join functions. Until
   that probe is done, delivery stays an insertion, and the block's framing text is the part that most needs
   removing.
+- **The probe is done, and it closes that option.** Searched the packaged source for a plugin-facing
+  prompt-assembly surface:
+  - `system-prompt/`, `prompt/assemble`, `systemPrompt/` as hook names: **zero hits**. There is no event a plugin
+    can subscribe to for prompt assembly.
+  - `assembleContextFor(agent, signal)` is imported from `@deepseek-ai/dsh-agent` and builds the contexts from the
+    agent's own configuration; `contexts:` appears only in `dsh-system-prompt` and in `dsh-tool-cordis`'s
+    **type catalog** (`PromptAssembly`, `PromptContext` — a list of types, not of callable services).
+  - `dsh-system-prompt` exports `renderPrompt`, `renderContextSections`, `joinContextSections` — renderers, no
+    registry.
+  - The host's own context plugin, `dsh-agent-instructions`, injects through the same `agent/pre-step` splice, in
+    production, with the same insertion rule S1CAP now uses.
+
+  So there is exactly one channel a plugin has, and delivery is an insertion. What was wrong was the block's
+  shape, not the channel, and that is now fixed: the delivered text is **quoted session content with a one-line
+  provenance label each, and no S1CAP prose at all**. A bare concatenation would have failed the other way — an
+  earlier turn re-sent as a fresh user message reads as something the user just said, which distorts the
+  transcript — so the label is the minimum that keeps the distinction honest.
+- **Open question about the method, not the code: may an authored state proxy be delivered at all?**
+  Selection and ordering act on content that already exists, so they fit the rule cleanly. T is a summary S1CAP
+  *writes*, which is the same category as the prose that was just removed. It is currently delivered and labelled
+  `## state proxy T, written by S1CAP from this session` — labelled so a reader of the transcript can tell
+  authored from quoted, not because that settles it. Two consequences worth deciding before the next experiment:
+  (1) if authored T may not be delivered, C2 and C4 stop differing in *delivery* and differ only in ordering,
+  which changes what the TAS axis of the ablation means; (2) the alternative is an **extractive** T — verbatim
+  spans of real tool results rather than a written summary — which would keep TAS in the method while staying
+  inside the rule. Not chosen unilaterally.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
   remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
   index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a

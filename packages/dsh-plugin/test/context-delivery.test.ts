@@ -65,6 +65,29 @@ test('the block lands after the last claimed message, where the question is alre
   assert.ok(injected.content[0].text.includes('TASK: read three files'), 'and the state proxy, because C4 builds one');
 });
 
+test('the block carries quoted session content and no S1CAP prose of its own', () => {
+  const result = deliverContext(input());
+  const messages = result.messages ?? [];
+  const injected = messages[2] as { content: { text: string }[] };
+  const text = injected.content[0].text;
+
+  // The rule: S1CAP manages which of the harness's own context is in the prompt, and contributes no text of its
+  // own. An earlier version opened with "the blocks below were selected by relevance to the current task, they
+  // supplement the transcript" - S1CAP writing about the context into the conversation. A bare concatenation
+  // would fail the other way: an earlier turn re-sent as a fresh user message reads as something the user just
+  // said. So: quoted verbatim, one provenance line each, nothing else.
+  assert.ok(!/^#/m.test(text.split('## ')[0] ?? ''), `no preamble before the first block: ${text.slice(0, 80)}`);
+  assert.ok(!text.includes('selected by relevance'), 'no explanation of why these were chosen');
+  assert.ok(!text.includes('supplement'), 'and no instruction about how to read them');
+  assert.ok(text.includes('quoted verbatim'), 'each block says where its text came from');
+  assert.ok(text.includes('written by S1CAP from this session'), 'the authored state proxy says so, unlike the quotes');
+  assert.ok(
+    text.includes('scripts: build, test, dsh:add'),
+    'the recalled turn is present word for word, not summarized',
+  );
+  assert.ok(text.includes('TASK: read three files'), 'and the state proxy body, since TAS is part of the method');
+});
+
 test('the layout order decides the block order inside the message', () => {
   const xFirst = deliverContext(input({ order: ['pinned', 'stateProxy', 'anchor', 'recalled', 'tail'] }));
   const xLast = deliverContext(input({ order: ['pinned', 'stateProxy', 'recalled', 'tail', 'anchor'] }));
@@ -79,8 +102,8 @@ test('the layout order decides the block order inside the message', () => {
   assert.deepEqual(xFirst.blocks, ['stateProxy', 'recalled', 'recalled']);
   assert.deepEqual(xLast.blocks, ['stateProxy', 'recalled', 'recalled']);
   assert.ok(
-    textOf(xFirst).indexOf('state proxy T') < textOf(xFirst).indexOf('recalled · assistant · h1'),
-    'the state proxy precedes the recalled segments',
+    textOf(xFirst).indexOf('state proxy T') < textOf(xFirst).indexOf('earlier assistant turn'),
+    'the state proxy precedes the quoted turns',
   );
 });
 
