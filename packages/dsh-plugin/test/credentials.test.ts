@@ -105,6 +105,28 @@ test('the scoring window floor is 64, and it is dropped rather than clamped belo
   assert.deepEqual(parseTuningArgs('w=63'), {}, 'below the floor: dropped');
 });
 
+test('the panel can set the bounded anchor wait, and an out-of-range value is dropped', () => {
+  // The requirement is that this value be settable from the settings panel, so the keyed form is the one that
+  // matters: `wait=` has no positional slot, because the first four tokens are the legacy `d r w xFirst` order that
+  // older writes and the credential string use, and a fifth would put a duration where `xFirst` is read from.
+  assert.deepEqual(parseTuningArgs('wait=3000'), { anchorWaitMs: 3000 });
+  assert.deepEqual(parseTuningArgs('anchorWaitMs=3000'), { anchorWaitMs: 3000 });
+  assert.deepEqual(parseTuningArgs('wait=0'), { anchorWaitMs: 0 }, '0 is a real value: it disables the wait');
+  assert.deepEqual(parseTuningArgs('wait=60000'), { anchorWaitMs: 60000 }, 'the top of the bound is accepted');
+  assert.deepEqual(parseTuningArgs('d=3 wait=3000'), { depth: 3, anchorWaitMs: 3000 });
+
+  // Dropped, never clamped: a value the researcher never chose must not decide whether a step waits.
+  assert.deepEqual(parseTuningArgs('wait=99999'), {}, 'above the bound: dropped');
+  assert.deepEqual(parseTuningArgs('wait=60001'), {}, 'and the bound is inclusive at 60000, not 60001');
+  assert.deepEqual(parseTuningArgs('wait=-1'), {}, 'a negative wait is not a wait');
+  assert.deepEqual(parseTuningArgs('wait=1.5'), {}, 'it is an integer number of milliseconds');
+  assert.deepEqual(parseTuningArgs('wait=soon'), {}, 'and not a word');
+  // `Number('')` is 0, which is legal here, so an empty value has to be rejected before the coercion - otherwise
+  // `wait=` would silently disable the wait it was written to set.
+  assert.deepEqual(parseTuningArgs('wait='), {}, 'an empty value is not 0');
+  assert.deepEqual(parseTuningArgs('d=3 wait='), { depth: 3 });
+});
+
 test('the panel can write the Laya fields, and a mistyped one falls back instead of failing at launch', () => {
   // The reason these exist on this surface at all: the interpreter path is a *required* field, and a required field
   // with no write path is one nobody can fill — which would make every Laya run impossible rather than unusual.

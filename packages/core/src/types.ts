@@ -102,6 +102,20 @@ export interface AssemblyPolicy {
        * unaffected, and segments outside the window stay in the graph as nodes and remain reachable.
        */
       window: number;
+      /**
+       * Bounded wait, in milliseconds, for the anchor segment's own row to finish scoring before assembly.
+       *
+       * Default 10 000 (10 s), and `0` disables it entirely.
+       *
+       * Why it exists: scoring runs asynchronously in the upkeep queue, off the step's critical path, and a
+       * measured System-1 relevance call now takes a median of 15.3 s (mean 14.0, p90 25.0, max 29.0) against the
+       * local backend. A step can therefore assemble before the segment it recalls from — the anchor, the newest
+       * `user` segment — has any scored edges, and BFS recall then returns nothing at all. This is the cheaper
+       * first remedy: it waits only for the anchor's row, only until the deadline, and never throws. The fail-open
+       * rule in `assemble()` (`AssociationGraph.unscoredWithin`, counted as `unknownAdmitted`) is the backstop and
+       * stays: this wait makes it rarer, it does not replace it.
+       */
+      anchorWaitMs: number;
     /** bounded BFS depth d */
     depth: number;
     /** per-node expansion fanout k */
@@ -288,6 +302,7 @@ export function defaultPolicy(): AssemblyPolicy {
     recall: {
       threshold: 0.55,
     window: 1024,
+      anchorWaitMs: 10_000,
       depth: 2,
       fanout: 8,
       tier1: 'embed',

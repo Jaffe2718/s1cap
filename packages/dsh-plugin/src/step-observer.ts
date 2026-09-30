@@ -7,8 +7,15 @@
  * wiring in `index.ts` a few lines.
  *
  * Nothing here can change a round: `observe()` never throws, never rewrites the payload, and is called
- * *after* the harness's own middleware chain produced its decision. Upkeep never runs inside it — new session
- * events go into a bounded queue and are folded into the graph on a later tick.
+ * *after* the harness's own middleware chain produced its decision.
+ *
+ * Upkeep does not *start* inside `observe()`: new session events go into a bounded queue and are folded into the
+ * graph on a later tick. It can, however, be *advanced* there, and that is deliberate. A measured System-1 call
+ * takes a median of 15.3 s, so a step can arrive before the segment it recalls from has been scored at all, and
+ * BFS from an unscored anchor returns nothing while the block is silently refilled from the recency window.
+ * `waitForAnchorRow` therefore drains already-queued upkeep, bounded by `recall.anchorWaitMs` and skipped
+ * entirely when the row is complete or when nothing is queued or in flight. The bounded wait is the exception
+ * path; the fail-open rule in `assemble()` is what runs when it expires.
  */
 import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
 import type {
@@ -75,6 +82,17 @@ export interface StepObserverOptions {
   onSessionEvent?(event: RawEvent): void;
   /** schedule one deferred upkeep tick; injected so tests can drive it by hand */
   schedule?(tick: () => void): void;
+  /**
+   * The wait used by the bounded anchor wait (`recall.anchorWaitMs`), injected for the same reason as `schedule`:
+   * this module keeps no clock of its own (see the header). It defaults to an immediate resolve, so a test that
+   * does not inject one never waits - the wait is an exception path, and a test suite that slept for it would be
+   * paying the median 15.3 s relevance call it exists to cover for.
+   *
+   * Note the pairing with `now()`: the deadline is `now() + anchorWaitMs`, and a clock that does not move means the
+   * loop can only end when the anchor's row is complete - never by deadline. A caller that injects a sleep which
+   * resolves without advancing its own clock therefore has to complete the row, or the step waits for it forever.
+   */
+  sleep?(ms: number): Promise<void>;
 }
 
 export interface StepObserverStats {
@@ -278,10 +296,88 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       if (typeof (timer as { unref?: () => void }).unref === 'function') (timer as { unref: () => void }).unref();
     });
 
+  // An injected sleep, or none at all. The default resolves immediately *on purpose*: the anchor wait is an
+  // exception path, and a test that reached it without injecting a clock would otherwise sit for the full
+  // `anchorWaitMs` against a fixture that can never finish scoring.
+  const sleep = opts.sleep ?? ((): Promise<void> => Promise.resolve());
+
+  // The bounded anchor wait (`recall.anchorWaitMs`): at most one diagnostic line per step, and only when the wait
+  // gave up with pairs still unknown. The poll count is what makes a stuck wait legible - a line per poll would be
+  // hundreds of lines for one slow backend, and no line at all would leave `unknownAdmitted` in the record with
+  // nothing explaining it.
+  const reportAnchorWait = (probe: (line: Record<string, unknown>) => void, waitMs: number, polls: number, unknown: number): void => {
+    probe({ schema: 0, kind: 'anchor-wait', ms: waitMs, polls, unknown });
+    opts.onWarn?.(
+      `[s1cap] anchor wait gave up after ${waitMs}ms (${polls} drain(s)): ` +
+        `${unknown} pair(s) inside the window still unscored; the fail-open rule admits them`,
+    );
+  };
+
+  const waitForAnchorRow = async (probe: (line: Record<string, unknown>) => void, sessionId: string, anchorId: string): Promise<void> => {
+    const waitMs = opts.policy.recall.anchorWaitMs;
+    // `0`, or anything below it, disables the wait: the panel sets this, and a researcher turning it off must get
+    // the step's own timing back rather than a small wait.
+    if (!(waitMs > 0)) return;
+    const graph = graphFor(sessionId);
+    // The common case, and the reason this is an exception path rather than a per-step cost: the anchor's row is
+    // already scored, so this check is one `indexOf` plus a map lookup per pair inside `w`. Returns without saying
+    // anything, because there is nothing to report.
+    const unknownBefore = graph.unscoredWithin(anchorId, opts.policy.recall.window).length;
+    if (unknownBefore === 0) return;
+    // Nothing queued and nothing in flight means there is no scoring call to wait for, so waiting could only be
+    // answered by time passing. That is not a hypothetical saving: it is what a step should do in a session whose
+    // upkeep has not been asked for anything yet, and it is what keeps a caller with a clock that does not advance (a
+    // deterministic test) from holding a step open for the whole deadline over a queue nobody is going to fill. The
+    // give-up line is still written - the fail-open rule is about to admit these pairs, and the record has to say so -
+    // with a poll count of 0, which is what makes it distinguishable from a wait that ran out of time.
+    if (queue.stats().pending === 0 && scoringInFlight === 0) {
+      reportAnchorWait(probe, waitMs, 0, unknownBefore);
+      return;
+    }
+    const deadline = opts.now() + waitMs;
+    // A poll ceiling as well as a deadline, because the deadline came from the injected clock: a caller whose `now()`
+    // does not advance would otherwise spin on a resolved sleep until something else stopped it. At the documented
+    // 50 ms interval, `waitMs` allows `waitMs / 50` polls, so a real wait is never cut short by this.
+    const maxPolls = Math.max(1, Math.ceil(waitMs / 50)) + 1;
+    let polls = 0;
+    let unknown = 0;
+    for (;;) {
+      // Draining is what makes the wait able to succeed at all: the System-1 calls happen in the queue's handler, so
+      // a loop that only slept would hold the step for the full deadline and learn nothing. It is synchronous, which
+      // is why the loop needs the sleep below: a drain cannot await a call that is still in flight.
+      queue.drain();
+      polls += 1;
+      // Re-read after the drain, because the row may have completed inside it.
+      unknown = graph.unscoredWithin(anchorId, opts.policy.recall.window).length;
+      if (unknown === 0) return;
+      // The deadline is tested *before* the sleep, not after it, so that the row is re-read between the last sleep
+      // and giving up. The first version tested it after the sleep and broke straight out of the loop, which made the
+      // sleep the final act: work completed during it was thrown away and the diagnostic below reported a remainder
+      // that was already scored. Measured on a fixture whose drain completes the row, that turned a finished wait
+      // into a reported failure.
+      if (polls >= maxPolls || opts.now() >= deadline) break;
+      await sleep(50);
+    }
+    // Giving up is not a failure: assembly carries on, and the pairs it could not wait for are counted as
+    // `unknownAdmitted`. The wait makes the fail-open rule rarer; it does not replace it.
+    reportAnchorWait(probe, waitMs, polls, unknown);
+  };
+
+  // How many upkeep scoring calls are in flight right now.
+  //
+  // The queue cannot answer this: it counts an event as `applied` the moment its handler is entered, and the handler is
+  // `async`, so a System-1 call that will take fifteen seconds is indistinguishable from one that has already
+  // returned. The anchor wait has to tell those apart - waiting is only worth anything while a call is actually
+  // running - so the count is kept here, around the one `scoreNew` call upkeep makes.
+  let scoringInFlight = 0;
+
   // The queued unit is an event *plus the session it belongs to*. The id is captured at enqueue time, in the
   // handler that received the event, and travels with the item: reading `stats.sessionId` at drain time attributed
   // a late-draining event to whichever session happened to be current then, which is exactly the cross-session
   // leak this is here to close.
+  //
+  // `waitForAnchorRow` above drains this queue, and reads it at call time rather than at definition time: a step is
+  // observed long after `createStepObserver` has returned, so the binding is always initialised by then.
   const queue = createUpkeepQueue<{ sessionId: string; event: unknown }>({
     maxLagTurns: opts.maxLagTurns ?? 2,
     onWarn: (message) => opts.onWarn?.(message),
@@ -362,6 +458,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       // critical path: the queue already defers this to a timer, and a failure here must cost the edges, not
       // the session - so a backend that is down degrades to no edges for that segment rather than throwing.
       let scored: { scoredPairs: number; edges: number } = { scoredPairs: 0, edges: 0 };
+      scoringInFlight += 1;
       try {
         scored = await graph.scoreNew({
           windowN: opts.policy.recall.window,
@@ -372,6 +469,8 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         stats.errors += 1;
         stats.lastError = `upkeep scoring: ${String(err)}`;
         opts.onWarn?.(`[s1cap] upkeep scoring failed for a new ${segments.length}-segment batch: ${String(err)}`);
+      } finally {
+        scoringInFlight -= 1;
       }
       stats.upkeepEvents += 1;
       stats.upkeepSegments += segments.length;
@@ -414,6 +513,14 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     queue.flush();
   }
 
+  // The diagnostic sink as a plain function, so the anchor wait can reach it without going through the object being
+  // built here. `this.probe` inside `observe` would have worked at call time, and `observe` is called as a method -
+  // but that is exactly the kind of thing the erasure-only build cannot check, so it is not relied on.
+  const writeProbe = (line: Record<string, unknown>): void => {
+    stats.probes += 1;
+    opts.onProbe?.(line);
+  };
+
   return {
     /**
      * Observe one step and return what it assembled, or `undefined` when there was nothing to assemble.
@@ -450,6 +557,10 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           fixedOverheadTokens: opts.fixedOverheadTokens,
           lambdaMs: opts.lambdaMs,
           graph: graphFor(sessionId),
+          // The anchor id is computed inside `observeStep` and the queue that drains scoring lives here, so the wait
+          // has to travel back out as a callback. It is called after the anchor is chosen and before `assemble()`,
+          // and it never throws: a wait that gave up is reported and the fail-open rule covers the rest.
+          beforeAssemble: (anchorId: string) => waitForAnchorRow(writeProbe, sessionId, anchorId),
           // One slot for the whole observer, so T survives between steps. It is created here rather than inside
           // observeStep because that function is pure: a per-call cache would rebuild T every step, and T's
           // stability across steps is the property the whole block placement rests on.
@@ -591,8 +702,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     },
 
     probe(line: Record<string, unknown>): void {
-      stats.probes += 1;
-      opts.onProbe?.(line);
+      writeProbe(line);
     },
 
     setSystemPrompt(text: string, tokens?: number): void {

@@ -242,6 +242,75 @@ test('a delivered block is never ingested, never recalled, and never in the toke
   );
 });
 
+// --- the bounded anchor wait (recall.anchorWaitMs): the hook, and its containment ---
+
+/**
+ * The anchor id is computed inside `observeStep` and the queue that drains asynchronous scoring lives in the
+ * plugin, so the wait has to travel back out as a callback. What matters for the core half is only that it is
+ * called, that it is called with the anchor's own id, and that it happens before `assemble()` reads the graph.
+ */
+test('observeStep offers the anchor id to beforeAssemble, and only after the anchor is chosen', async () => {
+  const policy = cellPolicy('C4');
+  const graph = new AssociationGraph();
+  const seen: string[] = [];
+  // The hook is called with the anchor's id *and* with the anchor already in the graph, which is what makes the
+  // plugin's `unscoredWithin(anchorId, w)` check meaningful rather than always empty.
+  const observation = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 1,
+    beforeAssemble: (anchorId: string) => {
+      seen.push(anchorId);
+      assert.ok(graph.getSegment(anchorId) !== undefined, 'the anchor is in the graph when the hook runs');
+    },
+  });
+
+  // The anchor is the newest `user` segment: u2 is last in MESSAGES and 'also check the expiry path' is the task.
+  assert.deepEqual(seen, ['u2']);
+  assert.equal(observation.kind, 'assembled');
+  if (observation.kind !== 'assembled') return;
+  assert.equal(observation.layout.anchor.id, 'u2', 'and it is the anchor the layout was built from');
+});
+
+test('a throwing beforeAssemble costs the wait, never the step or the observation', async () => {
+  const policy = cellPolicy('C4');
+  const graph = new AssociationGraph();
+  const observation = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 1,
+    beforeAssemble: () => {
+      // The realistic shape of this failure: a wait that reached for a queue that is no longer there.
+      throw new Error('the scoring queue is gone');
+    },
+  });
+
+  assert.equal(observation.kind, 'assembled', 'an assembled step is still assembled');
+  if (observation.kind !== 'assembled') return;
+  assert.equal(observation.event.type, 'assembly');
+  assert.equal(observation.layout.anchor.id, 'u2');
+  assert.ok(observation.segments.length > 0, 'the observation itself is not lost');
+  assert.ok(observation.event.budgetUsed > 0);
+});
+
+test('a rejecting beforeAssemble is contained too: it is awaited, not left to reject the promise', async () => {
+  const policy = cellPolicy('C4');
+  const graph = new AssociationGraph();
+  const observation = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 1,
+    beforeAssemble: async () => {
+      await Promise.resolve();
+      throw new Error('the drain rejected');
+    },
+  });
+  assert.equal(observation.kind, 'assembled');
+});
+
 test('a delivered block arriving on the session-event stream is dropped at ingestion', async () => {
   // The path production takes: upkeep folds the session-event stream into the graph, so the delivered message
   // comes back as a RawEvent rather than being added by hand. The ingestion gate is what keeps it out.

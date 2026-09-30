@@ -394,6 +394,17 @@ export function readTuningFile(): Tuning {
     const threshold = typeof parsed.relevanceThreshold === 'number' ? parsed.relevanceThreshold : (parsed as { releTao?: unknown }).releTao;
     if (typeof threshold === 'number' && threshold >= 0 && threshold <= 1) out.relevanceThreshold = threshold;
     if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 64) out.window = parsed.window;
+    // The bounded anchor wait, read back through the same bounds `parseTuningArgs` applies (0 disables it). The
+    // asymmetry with the HTTP route is deliberate: the route answers 400 for a truncated or over-long wait, and this
+    // reader - which reads a file a previous version of this plugin may have written - falls back to the default.
+    if (
+      typeof parsed.anchorWaitMs === 'number' &&
+      Number.isInteger(parsed.anchorWaitMs) &&
+      parsed.anchorWaitMs >= 0 &&
+      parsed.anchorWaitMs <= 60_000
+    ) {
+      out.anchorWaitMs = parsed.anchorWaitMs;
+    }
     // `false` is a real value here, not an absence, so this tests the type rather than truthiness. The first
     // version omitted the field from this reader entirely, so the panel wrote it, the route echoed it back from
     // the in-memory copy, and the layout stayed on its default - a stored setting that looked saved everywhere
@@ -1085,6 +1096,10 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         const timer = setTimeout(tick, 0);
         if (typeof (timer as { unref?: () => void }).unref === 'function') (timer as { unref: () => void }).unref();
       },
+      // The anchor wait's clock, injected for the same reason `schedule` is: the observer keeps no timer of its own
+      // (step-observer.ts header), and its tests must not sleep. This is the only place a real timer exists, so an
+      // `anchorWaitMs` of 0 and a dead backend both cost the step nothing beyond this one option.
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       // The observer's diagnostic channel. This wrote a bare newline and dropped its argument, so every line the
       // observer tried to report - the session-event shapes, the early-buffer drain - went nowhere while the
       // tape still looked healthy, because the *other* probe sink (`probeOut`, used by the session/event hook)
@@ -1126,7 +1141,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         relevance: client !== undefined,
         planGate: client !== undefined,
         xFirst: config.xFirst,
-        recall: { d: config.recall.depth, r: config.recall.threshold, w: config.recall.window },
+        recall: { d: config.recall.depth, r: config.recall.threshold, w: config.recall.window, wait: config.recall.anchorWaitMs },
         tas: config.tas,
       }) + '\n',
     );
@@ -1159,6 +1174,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
       if (fromFile.relevanceThreshold !== undefined) appliedTuning.relevanceThreshold = fromFile.relevanceThreshold;
       if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
+      if (fromFile.anchorWaitMs !== undefined) appliedTuning.anchorWaitMs = fromFile.anchorWaitMs;
       if (fromFile.xFirst !== undefined) appliedTuning.xFirst = fromFile.xFirst;
       if (fromFile.layaPythonPath !== undefined) appliedTuning.layaPythonPath = fromFile.layaPythonPath;
       if (fromFile.layaWeightsCacheDir !== undefined) appliedTuning.layaWeightsCacheDir = fromFile.layaWeightsCacheDir;
@@ -1172,11 +1188,13 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         depth: config.recall.depth,
         relevanceThreshold: config.recall.threshold,
         window: config.recall.window,
+        anchorWaitMs: config.recall.anchorWaitMs,
         xFirst: config.xFirst,
       };
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.relevanceThreshold !== undefined) config.recall.threshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
+      if (appliedTuning.anchorWaitMs !== undefined) config.recall.anchorWaitMs = appliedTuning.anchorWaitMs;
       if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
       // The panel's Laya fields land on the *live* config object — the same one the launcher, the conflict check
       // and the status route read. This line previously declared a local of the same name from
@@ -1213,7 +1231,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         backend = rebuilt.backend;
         client = rebuilt.client;
       }
-      for (const knob of ['depth', 'relevanceThreshold', 'window', 'xFirst'] as const) {
+      for (const knob of ['depth', 'relevanceThreshold', 'window', 'anchorWaitMs', 'xFirst'] as const) {
         const after =
           knob === 'depth'
             ? config.recall.depth
@@ -1221,7 +1239,9 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
               ? config.recall.threshold
               : knob === 'window'
                 ? config.recall.window
-                : config.xFirst;
+                : knob === 'anchorWaitMs'
+                  ? config.recall.anchorWaitMs
+                  : config.xFirst;
         if (after !== cellBefore[knob]) {
           ctx.logger?.warn?.(
             `[s1cap] tuning overrides the running cell: ${knob} ${String(cellBefore[knob])} -> ${String(after)} ` +
@@ -1229,7 +1249,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           );
         }
       }
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, xFirst: config.xFirst } }) + '\n');
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, anchorWaitMs: config.recall.anchorWaitMs, xFirst: config.xFirst } }) + '\n');
       await primeSystemPrompt({
         service: (ctx as { get?: (name: string) => unknown }).get?.('systemPrompt'),
         observer,
@@ -1321,13 +1341,14 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       parsed.depth === undefined &&
       parsed.relevanceThreshold === undefined &&
       parsed.window === undefined &&
+      parsed.anchorWaitMs === undefined &&
       parsed.xFirst === undefined &&
       layaOnly
     ) {
       return {
         ok: false,
         reason:
-          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, xFirst on/off, or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
+          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, wait an integer 0..60000 (0 disables the anchor wait), xFirst on/off, or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
       };
     }
     appliedTuning = { ...appliedTuning, ...parsed };
@@ -1350,11 +1371,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
     if (parsed.relevanceThreshold !== undefined) config.recall.threshold = parsed.relevanceThreshold;
     if (parsed.window !== undefined) config.recall.window = parsed.window;
+    if (parsed.anchorWaitMs !== undefined) config.recall.anchorWaitMs = parsed.anchorWaitMs;
     if (parsed.xFirst !== undefined) config.xFirst = parsed.xFirst;
     const persist = writeTuningFile(appliedTuning);
     const persisted = persist.ok;
     ctx.logger?.info?.(
-      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.threshold} window=${config.recall.window} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
+      `[s1cap] recall tuning: depth=${config.recall.depth} relevanceThreshold=${config.recall.threshold} window=${config.recall.window} anchorWaitMs=${config.recall.anchorWaitMs} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
     );
     return {
       ok: true,
@@ -1362,6 +1384,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         depth: config.recall.depth,
         relevanceThreshold: config.recall.threshold,
         window: config.recall.window,
+        anchorWaitMs: config.recall.anchorWaitMs,
         xFirst: config.xFirst,
       },
       persisted,
@@ -1372,9 +1395,9 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     {
       name: 's1-tune',
       description:
-        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), xFirst on/off — and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
+        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), anchor wait in ms (0 disables), xFirst on/off — and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
       input: {
-        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "xFirst=off", or laya="D:/conda/envs/ml/python.exe")',
+        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "wait=10000", "xFirst=off", or laya="D:/conda/envs/ml/python.exe")',
       },
       handler: ({ rawInput }) => {
         const outcome = applyTuning(parseTuningArgs(rawInput));
@@ -1388,7 +1411,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
                 layaConfig.weightsCacheDir ?? '(default)',
               )} var=${String(layaConfig.weightsEnvVar ?? '(default)')}`
             : `depth=${String(eff?.depth)} relevanceThreshold=${String(eff?.relevanceThreshold)} ` +
-              `window=${String(eff?.window)} xFirst=${eff?.xFirst === true ? 'on' : 'off'}`;
+              `window=${String(eff?.window)} wait=${String(eff?.anchorWaitMs)} xFirst=${eff?.xFirst === true ? 'on' : 'off'}`;
         return commandSuccess(
           layaPart +
             (outcome.persisted === true ? ' (persisted)' : ` (in effect, NOT persisted: ${outcome.persistError ?? 'unknown'})`),
@@ -1413,6 +1436,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
               depth: config.recall.depth,
               relevanceThreshold: config.recall.threshold,
               window: config.recall.window,
+              anchorWaitMs: config.recall.anchorWaitMs,
               xFirst: config.xFirst,
             },
             keySource: credentialSource,
@@ -1589,6 +1613,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     if (storedNow.depth !== undefined) config.recall.depth = storedNow.depth;
     if (storedNow.relevanceThreshold !== undefined) config.recall.threshold = storedNow.relevanceThreshold;
     if (storedNow.window !== undefined) config.recall.window = storedNow.window;
+    if (storedNow.anchorWaitMs !== undefined) config.recall.anchorWaitMs = storedNow.anchorWaitMs;
     if (storedNow.xFirst !== undefined) config.xFirst = storedNow.xFirst;
   }
 
@@ -1620,6 +1645,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
                   depth: config.recall.depth,
                   relevanceThreshold: config.recall.threshold,
                   window: config.recall.window,
+                  anchorWaitMs: config.recall.anchorWaitMs,
                   xFirst: effective.xFirst,
                 },
                 status: {

@@ -52,6 +52,15 @@ export interface ObserveStepInput {
    */
   scoreOnStepPath?: boolean;
   /**
+   * Called with the anchor segment's id once the anchor has been chosen and before `assemble()` runs.
+   *
+   * It exists because the anchor id is computed *here*, inside `observeStep`, while the queue that drains
+   * asynchronous System-1 scoring lives in the plugin. The plugin uses this to wait for that one segment's row to
+   * finish scoring, which is what stops a step from assembling before the segment it recalls from has any scored
+   * edges. A throw is contained and reported like every other optional surface: it costs the wait, never the step.
+   */
+  beforeAssemble?: (anchorId: string) => void | Promise<void>;
+  /**
    * One-entry memo for T, held by the caller so it survives across steps. It is passed in rather than created
    * here because `observeStep` is a pure function of its input: a per-call proxy cache would rebuild T on every
    * step, which is exactly the instability the block is placed to avoid.
@@ -212,6 +221,22 @@ export async function observeStep(
       messages: input.messages.length,
       report,
     };
+  }
+  // The bounded anchor wait, before anything is assembled from the graph.
+  //
+  // It sits here, and not earlier, because `current.id` is only known once the anchor has been chosen; and not
+  // later, because `assemble()` is the first reader of the anchor's scored edges - a wait after it would be a
+  // measurement of nothing. `observeStep` stays a pure function of its input and owns no clock, so the waiting
+  // itself is the caller's: this only hands over the id and continues.
+  //
+  // Contained, and deliberately quiet: this function has no diagnostic sink of its own (it is pure by design, see
+  // the header) and the plugin's wait is written never to throw. A throw here is a caller bug, and the same
+  // fail-open rule that admits unscored pairs is what makes swallowing it safe - the step assembles with whatever
+  // the graph has, and `unknownAdmitted` reports the difference. It must not cost the step.
+  try {
+    await input.beforeAssemble?.(current.id);
+  } catch {
+    /* the wait failed: assemble from the graph as it stands, which is the fail-open path */
   }
   // Everything in the window except the anchor and the pinned prefix, in append order.
   //

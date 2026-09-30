@@ -17,8 +17,10 @@
  * Three things live here:
  *   1. the Jev key. It never passes through a command's raw input — that would put it in the session transcript —
  *      and the panel only ever shows whether a key exists, never its value;
- *   2. the recall tuning: **BFS depth d** (integer, d > 0) and **relevance threshold r** (0 <= r <= 1), stored as
- *      the plain string `"<d> <r>"` under `s1cap/tuning` and applied by the host at session start;
+ *   2. the recall tuning: **BFS depth d** (integer, d > 0), **relevance threshold r** (0 <= r <= 1) and the
+ *      **anchor wait** in milliseconds (integer 0..60000, 0 disables it), saved through the host's
+ *      `/s1cap-7340/tuning` route as the same command line `/s1-tune` takes, and applied by the host to the live
+ *      policy at session start;
  *   3. the local Laya backend: the Python interpreter, the weights cache and the environment variable that points
  *      at it. These are the fields whose absence the host reports as a conflict, and a conflicted session makes no
  *      System-1 calls — so a panel that could not write them left the local backend unreachable through the UI,
@@ -46,6 +48,15 @@ window.__ModuleLoader__.load({
     const DEFAULT_DEPTH = 2;
     const DEFAULT_TAU = 0.55;
     const DEFAULT_WINDOW = 1024;
+    /**
+     * Matches `defaultPolicy().recall.anchorWaitMs`: how long a step may wait for the anchor's own scoring row.
+     *
+     * The measured System-1 relevance call has a median of 15.3 s, so the default wait covers the typical case while
+     * staying well under it; the fail-open rule in the assembler is the backstop when it does not. 0 disables it.
+     */
+    const DEFAULT_WAIT = 10000;
+    /** the same bound core's NUMBER_RULES carries for `recall.anchorWaitMs`, so the panel refuses what the host would drop */
+    const MAX_WAIT = 60000;
     /** matches `defaultPolicy().xFirst`, so an unreachable host shows the layout that is actually in effect */
     const DEFAULT_XFIRST = true;
 
@@ -79,6 +90,7 @@ window.__ModuleLoader__.load({
         const [depth, setDepth] = React.useState('');
         const [tau, setTau] = React.useState('');
         const [win, setWin] = React.useState('');
+        const [wait, setWait] = React.useState('');
         const [xFirst, setXFirst] = React.useState(DEFAULT_XFIRST);
         /**
          * The local backend's three fields.
@@ -139,6 +151,7 @@ window.__ModuleLoader__.load({
             let nextDepth = String(DEFAULT_DEPTH);
             let nextTau = String(DEFAULT_TAU);
             let nextWin = String(DEFAULT_WINDOW);
+            let nextWait = String(DEFAULT_WAIT);
             let nextXFirst = DEFAULT_XFIRST;
             let nextLayaPath = '';
             let nextLayaWeights = '';
@@ -155,6 +168,11 @@ window.__ModuleLoader__.load({
                 nextTau = String(eff.relevanceThreshold);
               }
               if (Number.isInteger(eff.window) && eff.window >= 64) nextWin = String(eff.window);
+              // 0 is a real value here - it disables the anchor wait - so this tests the type and the bound rather
+              // than truthiness. The `>= 0` half is what keeps a disabled wait from reading back as "not stored".
+              if (Number.isInteger(eff.anchorWaitMs) && eff.anchorWaitMs >= 0 && eff.anchorWaitMs <= MAX_WAIT) {
+                nextWait = String(eff.anchorWaitMs);
+              }
               if (typeof eff.xFirst === 'boolean') nextXFirst = eff.xFirst;
               /**
                * The Laya fields come from `stored` first, because that is the file the next launch reads: showing
@@ -168,6 +186,12 @@ window.__ModuleLoader__.load({
               nextLayaPath = pick(stored.layaPythonPath, supplied.pythonPath);
               nextLayaWeights = pick(stored.layaWeightsCacheDir, supplied.weightsCacheDir);
               nextLayaEnvVar = pick(stored.layaWeightsEnvVar, supplied.weightsEnvVar);
+              // The wait is read from both, and `stored` wins for the same reason the Laya fields prefer it: that is
+              // the file the next launch reads, so showing the live copy would show a default for a value that is
+              // saved and about to be used. It is a number, not a string, so `pick` above does not apply to it.
+              if (Number.isInteger(stored.anchorWaitMs) && stored.anchorWaitMs >= 0 && stored.anchorWaitMs <= MAX_WAIT) {
+                nextWait = String(stored.anchorWaitMs);
+              }
               const conflicts = answer?.status?.laya?.conflicts;
               nextLayaStatus = {
                 state: String(answer?.status?.laya?.state?.status ?? ''),
@@ -198,6 +222,7 @@ window.__ModuleLoader__.load({
             setDepth(nextDepth);
             setTau(nextTau);
             setWin(nextWin);
+            setWait(nextWait);
             setXFirst(nextXFirst);
             setLayaPath(nextLayaPath);
             setLayaWeights(nextLayaWeights);
@@ -266,14 +291,15 @@ window.__ModuleLoader__.load({
          * refuse anything else instead of sending a value the host would silently drop.
          */
           /**
-           * Validate against the three stated rules and report **every** offending field, each with its own
-           * letter. A single first-failure message reads as if it were about the field just edited, which is how
-           * this misled us once when depth was still empty and the window was the field being typed into.
+           * Validate against the stated rules and report **every** offending field, each with its own name. A single
+           * first-failure message reads as if it were about the field just edited, which is how this misled us once
+           * when depth was still empty and the window was the field being typed into.
            */
           const saveTuning = React.useCallback(async () => {
             const d = Number(depth);
             const r = Number(tau);
             const w = Number(win);
+            const waitMs = Number(wait);
             const problems = [];
             if (depth.trim() === '' || !Number.isInteger(d) || d <= 0) {
               problems.push('depth d must be an integer greater than 0');
@@ -283,6 +309,11 @@ window.__ModuleLoader__.load({
             }
             if (win.trim() === '' || !Number.isInteger(w) || w < 64) {
               problems.push('window w must be an integer of at least 64');
+            }
+            // 0 is accepted and means "do not wait": the host drops a value outside 0..60000 rather than clamping it,
+            // so refusing it here is what keeps the form from looking saved next to a wait that never took effect.
+            if (wait.trim() === '' || !Number.isInteger(waitMs) || waitMs < 0 || waitMs > MAX_WAIT) {
+              problems.push('wait must be an integer between 0 and ' + MAX_WAIT + ' milliseconds (0 disables it)');
             }
             if (problems.length > 0) {
               setState((s) => ({ ...s, message: problems.join('; ') }));
@@ -306,7 +337,12 @@ window.__ModuleLoader__.load({
           if (layaPathValue !== '') layaFields.push('laya="' + layaPathValue + '"');
           if (layaWeightsValue !== '') layaFields.push('weights="' + layaWeightsValue + '"');
           if (layaEnvVarValue !== '') layaFields.push('weightsEnv=' + layaEnvVarValue);
-          const body = [d + ' ' + r + ' ' + w + ' xFirst=' + (xFirst ? 'on' : 'off')].concat(layaFields).join(' ');
+          // The wait rides on the same command line under its keyed name. It has no positional slot: the first four
+          // tokens are the legacy order (`d r w xFirst`) that older writes and the credential string use, and adding
+          // a fifth would put a duration where `xFirst` is read from.
+          const body = [d + ' ' + r + ' ' + w + ' xFirst=' + (xFirst ? 'on' : 'off'), 'wait=' + waitMs]
+            .concat(layaFields)
+            .join(' ');
           setState((s) => ({ ...s, message: 'saving...' }));
           try {
             const response = await fetch('/s1cap-7340/tuning', {
@@ -324,10 +360,13 @@ window.__ModuleLoader__.load({
             if (Number.isInteger(eff.depth) && eff.depth > 0) setDepth(String(eff.depth));
             if (Number.isFinite(eff.relevanceThreshold)) setTau(String(eff.relevanceThreshold));
             if (Number.isInteger(eff.window) && eff.window >= 64) setWin(String(eff.window));
+            if (Number.isInteger(eff.anchorWaitMs) && eff.anchorWaitMs >= 0 && eff.anchorWaitMs <= MAX_WAIT) {
+              setWait(String(eff.anchorWaitMs));
+            }
             if (typeof eff.xFirst === 'boolean') setXFirst(eff.xFirst);
             const summary =
               'saved: d=' + eff.depth + ' r=' + eff.relevanceThreshold + ' w=' + eff.window +
-                ' xFirst=' + (eff.xFirst ? 'on' : 'off') +
+                ' wait=' + eff.anchorWaitMs + ' xFirst=' + (eff.xFirst ? 'on' : 'off') +
                 (layaFields.length > 0 ? ' + ' + layaFields.length + ' Laya field(s)' : '') +
                 (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')');
             // Re-read the host so the backend status and the conflict line reflect what was just written. The
@@ -339,7 +378,7 @@ window.__ModuleLoader__.load({
           } catch (err) {
             setState((s) => ({ ...s, message: 'tuning save failed: ' + String(err) }));
           }
-        }, [depth, tau, win, xFirst, layaPath, layaWeights, layaEnvVar, load]);
+        }, [depth, tau, win, wait, xFirst, layaPath, layaWeights, layaEnvVar, load]);
 
         const clear = React.useCallback(async () => {
           try {
@@ -397,6 +436,9 @@ window.__ModuleLoader__.load({
             'BFS depth d bounds how many hops recall may walk the association graph (integer, d > 0). The relevance ' +
               'threshold r is the edge weight a segment must reach to be recalled (0 ≤ r ≤ 1). The window w is how many ' +
               'recent segments each new segment is scored against, and it is what bounds the System-1 cost of scoring. ' +
+              'The wait is how long a step may hold for the newest user segment\'s own scoring row before it assembles ' +
+              'anyway, in milliseconds (a measured relevance call has a median of 15.3 s; 0 turns the wait off, and the ' +
+              'assembler then admits the unscored pairs as unknown). ' +
               'The host reads all of them at session start and /s1 reports the effective values.',
           ),
           e(
@@ -435,6 +477,21 @@ window.__ModuleLoader__.load({
               value: win,
               placeholder: String(DEFAULT_WINDOW),
               onChange: (event) => setWin(event.target.value),
+            }),
+            // The anchor wait, in milliseconds. It sits beside the knobs because it is one: it decides how long a step
+            // may hold for the newest user segment's own scoring row, which is the difference between recalling from
+            // the current task and recalling from nothing. 0 is a legal value and turns it off.
+            e('label', { style: S.label, htmlFor: 's1cap-wait' }, 'wait'),
+            e('input', {
+              id: 's1cap-wait',
+              style: S.number,
+              type: 'number',
+              min: '0',
+              max: String(MAX_WAIT),
+              step: '1',
+              value: wait,
+              placeholder: String(DEFAULT_WAIT),
+              onChange: (event) => setWait(event.target.value),
             }),
             e('button', { style: S.button, type: 'button', onClick: () => void saveTuning() }, 'Save tuning'),
           ),

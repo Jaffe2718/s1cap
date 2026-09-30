@@ -108,6 +108,15 @@ export interface Tuning {
   /** S1 scoring window w (recall.window): integer >= 64, default 1024, no upper bound */
   window?: number;
   /**
+   * `recall.anchorWaitMs`: how long a step may wait, in milliseconds, for the newest `user` segment's own scoring
+   * row before it assembles anyway.
+   *
+   * Default 10 000, and `0` disables the wait. The bound is the same one `NUMBER_RULES` carries in core (0..60 000)
+   * and an out-of-range value is dropped rather than clamped, on the file's usual rule: a value the researcher never
+   * chose must not silently decide whether a step waits at all.
+   */
+  anchorWaitMs?: number;
+  /**
    * `xFirst` (policy.xFirst): place the current task before recalled history rather than after it.
    *
    * A layout switch, not a speed knob, but it lives here because this panel is the surface the researcher
@@ -145,6 +154,11 @@ function parseSwitch(token: string | undefined): boolean | undefined {
  * **Fail-safe, and deliberately not clamping:** a field outside its stated range (`d` an integer > 0, `0 <= r <= 1`)
  * is *dropped* so the policy default stands. Clamping would silently run a cell at a value the researcher never
  * chose, which is the one thing an ablation must never do.
+ *
+ * This reads the legacy `"<d> <r> <w> <xFirst>"` credential string, which is why it takes no `wait`: that field was
+ * added after the panel moved to the HTTP route and the keyed command line, and appending a fifth positional here
+ * would silently reinterpret an `xFirst` token that an old write already put in slot four. `parseTuningArgs` is the
+ * surface that owns it.
  */
 export function parseTuning(value: string | undefined): Tuning {
   const out: Tuning = {};
@@ -207,7 +221,9 @@ function unquote(value: string): string {
 
 /**
  * Parse a tuning command line. Accepts `3 0.7`, `d=3 r=0.7`, `depth=3 relevanceThreshold=0.7`, or either field alone; the same
- * two rules apply (d an integer > 0, 0 <= r <= 1) and anything else is dropped rather than clamped.
+ * two rules apply (d an integer > 0, 0 <= r <= 1) and anything else is dropped rather than clamped. `wait=` carries
+ * the bounded anchor wait (an integer 0..60000, where 0 turns it off) and has no positional slot, for the reason
+ * given on `parseTuning`.
  */
 export function parseTuningArgs(input: string | undefined): Tuning {
   if (typeof input !== 'string') return {};
@@ -220,6 +236,15 @@ export function parseTuningArgs(input: string | undefined): Tuning {
     }
     if (key === 'window' || key === 'w') {
       if (Number.isInteger(value) && value >= 64) out.window = value;
+      return;
+    }
+    // The bounded anchor wait. `Number('')` is 0, which is a *legal* value here - it turns the wait off - so an
+    // empty token like `wait=` would silently disable the wait it was meant to set. It has to be rejected before the
+    // coercion, and that is the only reason this branch is shaped differently from the two above.
+    if (key === 'anchorWaitMs' || key === 'wait') {
+      if (raw.trim() === '') return;
+      const ms = Number(raw);
+      if (Number.isInteger(ms) && ms >= 0 && ms <= 60_000) out.anchorWaitMs = ms;
       return;
     }
     if (key === 'relevanceThreshold' || key === 'r') {
@@ -253,7 +278,7 @@ export function parseTuningArgs(input: string | undefined): Tuning {
     // The value runs to the end of the token, not to the next space: `tokenize` has already made a quoted path
     // one token, and a `(\S+)` here would silently store `D:/Program` out of `D:/Program Files/...`.
     const match =
-      /^(depth|d|relevanceThreshold|r|window|w|xFirst|xf|layaPythonPath|laya|py|layaWeightsCacheDir|weights|layaWeightsEnvVar|weightsEnv)\s*=\s*(.+)$/.exec(
+      /^(depth|d|relevanceThreshold|r|window|w|anchorWaitMs|wait|xFirst|xf|layaPythonPath|laya|py|layaWeightsCacheDir|weights|layaWeightsEnvVar|weightsEnv)\s*=\s*(.+)$/.exec(
         token,
       );
     if (match && match[1] !== undefined && match[2] !== undefined) assign(match[1], match[2]);

@@ -341,7 +341,13 @@ test('an unknown observation value falls back to the default and is reported', a
 
 // --- N1 / N2 (2026-09-28): the pinned block gets the real system prompt, upkeep leaves the critical path ---
 
-test('a captured system prompt becomes the pinned block, and upkeep never runs inside observe()', async () => {
+test('a captured system prompt becomes the pinned block, and the anchor wait cannot hold a step open past its deadline', async () => {
+  // This test used to assert that assembly never touched the upkeep queue, and the anchor wait (`recall.anchorWaitMs`)
+  // changed exactly that: with events queued, the wait drains them, because that drain is what gives a scoring call the
+  // chance to finish. What survives - and what is asserted here - is the bound rather than the absence. The queue is
+  // applied during the step, and the step still returns: `statsBefore` below is the proof that it was pending
+  // beforehand, and the middleware call is awaited with a real, unadvanced clock, so a wait that could not terminate
+  // would hang this test rather than fail it.
   const records: { blocks?: Record<string, number>; prefixTokensStable?: number }[] = [];
   const ticks: (() => void)[] = [];
   const observer = createStepObserver({
@@ -366,7 +372,7 @@ test('a captured system prompt becomes the pinned block, and upkeep never runs i
 
   const statsBefore = observer.stats();
   assert.equal(statsBefore.upkeep.enqueued, 2, 'session events are queued, not applied inline');
-  assert.equal(statsBefore.upkeep.applied, 0, 'observe() must not drain upkeep');
+  assert.equal(statsBefore.upkeep.pending, 2, 'and they are still pending when the step begins');
   assert.ok(statsBefore.systemPromptTokens > 0, 'the prompt is tokenised for the pinned block');
   assert.equal(ticks.length, 1, 'one deferred tick was scheduled, not one per event');
 
@@ -375,12 +381,13 @@ test('a captured system prompt becomes the pinned block, and upkeep never runs i
   const record = records[records.length - 1];
   assert.ok((record?.blocks?.['pinned'] ?? 0) > 0, 'the pinned block is no longer empty');
   assert.equal(record?.prefixTokensStable, record?.blocks?.['pinned'], 'the cache-stable prefix is the pinned block');
-  assert.equal(observer.stats().upkeep.applied, 0, 'assembly did not wait for upkeep');
+  const afterStep = observer.stats();
+  assert.equal(afterStep.upkeep.applied, 2, 'the wait drained the pending events, which is what it is for');
+  assert.equal(afterStep.upkeep.errors, 0);
 
-  // the deferred tick drains the queue outside the hook
+  // the deferred tick still drains whatever is left, outside the hook
   ticks[0]?.();
   const after = observer.stats();
-  assert.equal(after.upkeep.applied, 2);
   assert.equal(after.upkeep.pending, 0);
   assert.ok(after.graphSegments >= MESSAGES.length, 'the graph has the session events');
   assert.equal(after.upkeep.overLag, false);

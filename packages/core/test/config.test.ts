@@ -93,6 +93,19 @@ test('a bad value is reported and the default is kept (fail-safe)', () => {
   }
 });
 
+test('the bounded anchor wait has a default, a bound, and 0 as a real value', () => {
+  // `KNOWN_PATHS` coverage in the first test is what proves the rule resolves on the default policy; this pins the
+  // two facts a reader of the rule table cannot see - the default itself, and that 0 (wait disabled) is accepted
+  // rather than treated as an absent value.
+  assert.equal(defaultPolicy().recall.anchorWaitMs, 10_000);
+  const disabled = validatePolicy({ recall: { anchorWaitMs: 0 } });
+  assert.equal(disabled.ok, true);
+  assert.equal(disabled.policy.recall.anchorWaitMs, 0, '0 survives validation: it is the value that turns the wait off');
+  const tooLong = validatePolicy({ recall: { anchorWaitMs: 60_001 } });
+  assert.equal(tooLong.ok, false);
+  assert.equal(tooLong.policy.recall.anchorWaitMs, 10_000, 'and an out-of-range value falls back to the default');
+});
+
 test('enums, booleans and strings are checked', () => {
   assert.equal(validatePolicy({ cell: 'C9' }).ok, false);
   assert.equal(validatePolicy({ cache: { reselectPolicy: 'never' } }).ok, false);

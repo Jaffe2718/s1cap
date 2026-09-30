@@ -44,6 +44,8 @@ export const NUMBER_RULES: readonly NumberRule[] = [
   { path: 'tas.tMaxChars', min: 0, max: 200_000, integer: true },
   { path: 'recall.threshold', min: 0, max: 1 },
   { path: 'recall.window', min: 64, max: 1048576, integer: true },
+  // the bounded wait for the anchor's own row before assembly; 0 disables it
+  { path: 'recall.anchorWaitMs', min: 0, max: 60_000, integer: true },
   { path: 'recall.depth', min: 1, max: 6, integer: true },
   { path: 'recall.fanout', min: 1, max: 64, integer: true },
   { path: 'recall.budgetRatio', min: 0.05, max: 0.95 },

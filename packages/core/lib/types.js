@@ -102,6 +102,20 @@ export const CORE_SCHEMA_VERSION = 1         ;
                                                                                                      
          
                      
+         
+                                                                                                           
+        
+                                                             
+        
+                                                                                                            
+                                                                                                                  
+                                                                                                                 
+                                                                                                               
+                                                                                                                   
+                                                                                                                   
+                                                                 
+         
+                           
                               
                   
                                       
@@ -288,6 +302,7 @@ export function defaultPolicy()                 {
     recall: {
       threshold: 0.55,
     window: 1024,
+      anchorWaitMs: 10_000,
       depth: 2,
       fanout: 8,
       tier1: 'embed',
