@@ -103,7 +103,8 @@ round are recorded in `docs/STATUS.md` §8 and are not repeated here. What this 
 **procedure**, and the draw does not change any of it: the cells and their presets, the prerequisites below, the
 pasting rules, the report generator and the metric specification all stay as written. What changes is the stimulus a
 measurement round runs — one task drawn from the pools `docs/AGENT_BRIEF.md` §9.2 names, run under all three cells
-before the next draw, instead of the three-turn fixture (see "Messages").
+before the next draw. **The three-turn fixture in `scripts/round-tasks.json` is not part of a round at all** (see
+"Messages").
 
 **Repeats are still what a claim needs.** One run per cell cannot separate an effect from noise, and round
 `20261001-1300` shows how much noise there is: the full-configuration arm's per-turn hit rates were 90.3 / 83.5 /
@@ -147,6 +148,14 @@ profile with three changes:
 - **The model is `deepseek-v4.1-flash`, with `reasoningEffort` pinned**, set through `agent-default-model` in the
   copied profile. **No sampling parameters are claimed:** DSH exposes none, so temperature and the like are not
   part of this run's setup and must not appear in a report of it.
+- **The DSH version is resolved per round, recorded with the round, and frozen for the whole round — it is not
+  fixed in advance.** Take the latest release available when the round starts, write it into the round's own record
+  beside its evidence, and run **all three cells on that one version**. A version change between cells invalidates
+  the round: it is restarted, not continued. Nothing here gates a release — what the rule buys is comparability:
+  the recorded version travels with the numbers, and **every quotation of a round's numbers carries the DSH version
+  that produced them**, so two rounds can be told apart and a reader can see which release a figure belongs to.
+  "Latest at run time" is the owner's decision, and it is also why no version number is written into this document:
+  the value lives in the round's record, and a number hardcoded here would be stale within days.
 
 Ports: **19491, 19492, 19493** (one per instance; a repeat uses the same port as its cell, since the instances do
 not overlap in time). Each instance is a managed background job, never `Start-Process`; the UI token comes from
@@ -178,7 +187,8 @@ a previous round into 191 failed S1 calls out of 281.
   into everything it spawns and fails this overwrite, while the same checks pass from an unrestricted launch. A
   stimulus that only ever creates *new* files never sees it; one that asks for an existing file to be corrected
   does, and the cell stops and asks a human instead of finishing.
-- **The smoke-test stimulus writes nothing at all**, which is the choice the three-turn fixture settled on. Files
+- **A conversation-only stimulus writes nothing at all**, which is what the three-turn fixture was, and where this
+  lesson was measured. Files
   make the round depend on the sandbox rather than on S1CAP: permissions, temp directories and security descriptors
   all become confounders, and the cell that hit them needed two human interventions to finish. A conversation-only
   stimulus removes the round directories too, since nothing is written that a later round could read. **A drawn
@@ -197,7 +207,8 @@ a previous round into 191 failed S1 calls out of 281.
 - `~/.dsh/profiles/node_modules` is a farm of unresolvable junctions: a recursive `grep` there fails with
   thousands of `os error 3`s. Read the profile patch files directly.
 
-**Round directories and salts are not used by these stimuli.** Nothing is written, so there is no directory to open
+**Round directories and salts are not used by the three-turn fixture** (and no round runs it — see "Messages").
+Nothing is written, so there is no directory to open
 and no `{salt}` placeholder to substitute. What isolates the cells instead is their **workspace**: each cell runs
 with its own empty working directory (`<run>/ws/<cell>`), so there is nothing in a cell's working directory for a
 later cell to inherit and no path for two cells to collide over. `node scripts/new-test-run.mjs --create` still
@@ -208,16 +219,16 @@ available for a stimulus that does write; with the current fixture it prints the
 workspace — and the mechanism is not: a benchmark instance is a repository, so each cell needs its own copy of it
 under `<run>/ws/<cell>` instead of the empty directory above. How the instance is materialized belongs in the
 round's own record (SWE-bench Verified and Terminal-Bench 4.0 run theirs in docker containers, τ²-bench is pure
-Python and needs neither — `docs/AGENT_BRIEF.md` §9.2), and the copy has to be per cell: one two cells shared would
+Python and needs neither — `docs/AGENT_BRIEF.md` §9.2), and the copy has to be per cell: two cells sharing one would
 let one cell's edits become the next cell's starting state.
 
-## Messages — the three-turn stimulus, kept as the harness smoke test
+## Messages — the three-turn fixture, which no round runs
 
-**These three turns are the harness's smoke test, not the measurement.** A measurement round draws one long-horizon
-task at random and runs that (`docs/STATUS.md` §8); this fixture is what a round runs when the question is whether
-the environment works at all — pre-flight, the three gates, the paste discipline and the report path — and it is the
-stimulus that proved it end to end in round `20261001-1414`, which is both the first clean three-cell run and the
-last short-task round.
+**No round runs these turns.** The three-turn stimulus stays in `scripts/round-tasks.json`, and the fixture is still
+the only copy of it, but it is not a step in this procedure: a measurement round sends the prompt of the task it drew
+(`docs/STATUS.md` §8), and what validates the environment is the **`PROBE` pre-flight instance** and its ten checks —
+never a three-cell round. The fixture is described below so that round `20261001-1414`, the last short-task round,
+stays readable against it.
 
 The three-turn LeetCode stimuli live in `scripts/round-tasks.json` (ASCII-escaped, because no repository file may
 contain Chinese), and they ask for the answer **in the conversation**: the stimulus forbids creating, modifying or
@@ -237,10 +248,10 @@ context. And the no-question rule, stated in the stimulus as well as enforced st
 driven by an agent, so a question is a turn spent waiting for an answer nobody sends.
 
 Turns 2 and 3 carry the owner's revision in its no-file form: each **keeps the earlier answers untouched and adds a
-new section** for the new problem — 121 → 122 → 123 (one transaction → any number of transactions → at most two),
-which is what makes the round a test of accumulation rather than of replacement. The fixture is still the only copy
-of the stimulus: the messages are read from it and sent as recorded, never retyped at the keyboard, because a
-stimulus that is retyped is a stimulus that has changed.
+new section** for the new problem — 121 → 122 → 123 (one transaction → any number of transactions → at most two) —
+which is what makes the fixture a test of accumulation rather than of replacement. The fixture is still the only copy
+of these turns, and the discipline travels to a drawn task: the stimulus is read from its source and sent as
+recorded, never retyped at the keyboard, because a stimulus that is retyped is a stimulus that has changed.
 
 **A drawn long-horizon task keeps the discipline without the fixture.** It does not come from
 `scripts/round-tasks.json`; it comes from its pool, and the round runs the instance as the pool ships it, records its
@@ -408,7 +419,7 @@ for turns, steps, per-step usage and tool durations, and `home/<cell>/.s1cap/rg/
 | --- | --- |
 | time | turns, steps, LLM calls, System-1 calls, other tool calls; LLM time, System-1 time, other tool time — with the frames they sit in printed beside them (`step frame` = `step/end − step/start`, `turn frame` = `turn/end − turn/start`, `between-step idle` = the difference), so that LLM + tool + residual = step frame can be checked rather than assumed |
 | cost | cached-hit input tokens, uncached input tokens, output tokens, plus the System-1 lane's own tokens |
-| completion | benchmark-only: turns completed and time to completion. The three-turn smoke-test stimulus completes in every cell, so for that fixture the report prints completion as one constant column and says so instead of printing a per-turn table of the same value |
+| completion | benchmark-only: turns completed and time to completion. The three-turn fixture completes in every cell, so for that fixture the report prints completion as one constant column and says so instead of printing a per-turn table of the same value |
 | mechanism diagnostics (not cost) | System-1 coverage beside every System-1 column, and the cache hit rate — it appears **once**, here, never in the cost table |
 
 Usage:

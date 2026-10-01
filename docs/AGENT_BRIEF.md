@@ -65,6 +65,12 @@
 
 ### 1.5 DSH plugin architecture (verified from local install + community plugin analysis)
 
+**Release scope.** The local-install observations in this section were taken while **0.1.7-rc.2** was the installed
+release — the one §1.8 documents and the one the plugin's `dshReleases` manifest names — so they are evidence about
+that release; the text labels the facts that come from other releases (`0.1.2` for the old `surfaceOp` shape,
+`0.1.5+` for `system/message` as node 0). Nothing here has been re-verified on the release the machine runs now
+(`docs/STATUS.md` §8).
+
 - DSH = DeepSeek Harness, open source (<https://github.com/deepseek-ai/deepseek-harness>), Electron app + agent runtime. Profiles live at `~/.dsh/profiles/<name>/` with `package.json` (field `dsh.profile.bundles`) and `cordis.patch.yml` (loader patch entries: `id` / `name` / `config`); `patchReload: live` enables hot reload.
 - **Plugin = npm package** declaring `dsh.bundle.patch: "./cordis.patch.yml"` (+ optional `dsh.client` for web-UI injection, `dsh.compatibility.dshReleases`). Install: `dsh plugin --profile web add <pkg|file:path>` — auto-registers in bundles and composes insert lines.
 - Official peer contracts (from `dsh-command-context-trim@0.3.2`, npm registry): `@deepseek-ai/cordis ^4.0.2`, `@deepseek-ai/dsh-llm`, `dsh-session`, `dsh-commands`, `dsh-compaction`, `dsh-invariants`, `dsh-token-meter`, `@deepseek-ai/schemastery` (0.1.2-rc.1 line; compatibility declared for 0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.5-rc.3 / 0.1.7-rc.2).
@@ -510,7 +516,8 @@ draw; (d) the loop has no budget cap or iteration count, while §9.6 prices the 
 - **M1 block 2 — observation mode: done 2026-09-28.** `agent/pre-step` runs SEGMENTER → RECALL → ASSEMBLER on
   every LLM call (`observation: log`, the default whenever the plugin is enabled) and appends one `assembly`
   record to the control-plane log; the harness decision is returned untouched, and `observe()` never throws.
-  Verified end-to-end in a real DSH round inside a clean CLI profile (`dsh --profile s1capobs "…"`), not only
+  Verified end-to-end in a real DSH round on the 0.1.7-rc.2 line (§1.8) inside a clean CLI profile
+  (`dsh --profile s1capobs "…"`), not only
   in unit tests — the record above is from that round. Adapter shapes are read from `dsh-llm`'s packaged
   source (`role: user|developer|assistant|system|tool`, parts tagged `type`, `source.kind`), and every shape
   without a rule is reported (`AdapterReport`) instead of being dropped. Next sub-steps: source the system

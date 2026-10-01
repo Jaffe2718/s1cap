@@ -2,13 +2,13 @@
 /**
  * Open one test round: a randomly named directory inside the workspace, and nothing else.
  *
- * **The current stimuli need no round directory.** `scripts/round-tasks.json` writes nothing: its turns ask for
- * the answer in the conversation and forbid creating, modifying or deleting a file or directory, so the fixture
- * contains no `{salt}` placeholder and nothing lands in the directory this script would open. Those rounds are
- * isolated by their workspace instead - each cell runs in its own empty working directory. Behaviour is unchanged
- * either way: `--create` still opens the directory, `{salt}` is still substituted where a fixture contains it
- * (nowhere, today), and the messages are printed as recorded - the closing summary still describes the directory,
- * which is what a writing stimulus uses.
+ * **No round runs the fixture any more, so it needs no round directory.** `scripts/round-tasks.json` is not part of
+ * a round (see `docs/CELLS-RUN.md`, "Messages"): measurement draws a long-horizon task, and what validates the
+ * environment is the harness's `PROBE` pre-flight instance. The fixture itself also writes nothing - its turns ask
+ * for the answer in the conversation and forbid creating, modifying or deleting a file or directory - so it contains
+ * no `{salt}` placeholder either. Behaviour is unchanged: `--create` still opens the directory, `{salt}` is still
+ * substituted where a fixture contains it (nowhere, today), and the messages are printed as recorded - the closing
+ * summary still describes the directory, which is what a writing stimulus uses.
  *
  * Why the mechanism exists. Test rounds used to write their answer to the workspace root, under a name the task
  * itself suggested - `pelican-bicycle.html` - so a later round could read the previous round's answer instead of

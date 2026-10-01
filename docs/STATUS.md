@@ -982,7 +982,7 @@ can never throw; only contracts read from the packaged source are registered.
 LLM call and appends one `assembly` record to the control-plane log. **The prompt the model receives is
 returned untouched** — this milestone changes no tokens, which is what makes it safe on a live session.
 
-Proof from a real headless round (`dsh --profile s1capobs "Reply with exactly: ok"`):
+Proof from a real headless round on the 0.1.7-rc.2 line that D5 records (`dsh --profile s1capobs "Reply with exactly: ok"`):
 
 ```json
 {"type":"assembly","schema":1,"ts":1790601921689,
@@ -1730,7 +1730,7 @@ is:
 
 | # | decision | in practice |
 | --- | --- | --- |
-| 1 | **Short tasks are retired as a measurement instrument** and kept only as the harness's own smoke test. | The three-turn LeetCode stimulus in `scripts/round-tasks.json` still runs; what it certifies is that the environment works, not how a cell spends tokens. |
+| 1 | **Short tasks are retired as a measurement instrument, and the short-stimulus round is retired from the procedure** (owner decision). | `scripts/round-tasks.json` keeps the three-turn fixture and **no round runs it**; what validates the environment is the `PROBE` pre-flight instance and its ten checks, not a three-cell round. |
 | 2 | **Measurement draws one long-horizon task at random** from the pools `docs/AGENT_BRIEF.md` §9.2 names (their sizes are in §9.1) — SWE-bench Verified, Terminal-Bench 4.0, τ²-bench (`tau2-bench`) — runs it under `C0`/`C1`/`C2`, optimizes whatever the run exposes, then draws again. | A repeated test/optimize loop instead of one grid. An iteration is a round in the existing sense: one run directory, three cells, `docs/CELLS-RUN.md` for the procedure. |
 | 3 | **The loop is handed to a Collaborator, supervised with `GPT-6-Astra`.** | The system under test does not change: DSH with `deepseek-account/deepseek-flash` (DeepSeek V4.1 Flash, the model the instances display), `reasoningEffort` pinned, no sampling parameter available to set. |
 
@@ -1773,13 +1773,15 @@ effect from run-to-run variance. The two control arms' System-1 zeros are **cons
 `C1` carry `provider: "none"` and `laya.enabled: false`, so no lane exists; their coverage is *undefined*, not 0 %).
 Coverage is **cell-level only**, from a running-total snapshot, so `C2`'s 100.0 % is the cell's final ratio and not a
 per-turn series. And the cells ran at **different wall-clock times** by design, so provider-side load differs between
-them and cannot be controlled from here.
+them and cannot be controlled from here. **The round also carries no DSH version**: it ran before any round record
+carried one, so its version is unknown and must not be inferred from the machine's current one (see "The DSH
+version" below).
 
 ### The loop
 
 **Draw one task at random, run it under all three cells, optimize what the run exposes, draw again.** The task comes
 from the pools `docs/AGENT_BRIEF.md` §9.2 names; the round is the three-cell round `docs/CELLS-RUN.md` already
-describes, with the drawn task in place of the three-turn stimulus.
+describes, with the drawn task as its stimulus (the three-turn fixture is not part of a round).
 
 **Why one task at a time instead of the full grid.** The grid's price is what this phase avoids: `AGENT_BRIEF.md`
 §9.6's own estimate for the three-arm run set is ≈ **$360 peak / $180 off-peak** for ~1 340 episodes. One draw per
@@ -1797,7 +1799,8 @@ unrecorded draw is not a draw.
 
 - `docs/CELLS-RUN.md` — the cells and their presets, the prerequisites a round repeats if it skips them
   (`DSH_PERMISSION_MODE=danger-full-access`; `s1.retryAttempts: 2` on the arm with a lane; `provider: "none"` *and*
-  `laya.enabled: false` on both controls; a pinned `s1.baseUrl`), the model row, and the metric specification the
+  `laya.enabled: false` on both controls; a pinned `s1.baseUrl`; the DSH version resolved per round, recorded with
+  it, and frozen across all three cells), the model row, and the metric specification the
   report implements.
 - `.s1cap-ablation/RUNBOOK.md` — the operating order, one level above this repository. The parts that are not
   optional: **one cell at a time, in the order `C0`, `C1`, `C2`**; **seed the workspace store before the instance
@@ -1821,6 +1824,39 @@ worked example: `C2`'s lane spent **86 214** tokens while that cell's own LLM sp
 measured per step rather than inferred, 175–212 tokens per block. Fresh content in the LLM's prompt is billed to the
 LLM as uncached input; the lane's consumption does not appear on the LLM's bill, and the LLM's uncached input is not
 the lane's consumption.
+
+### The DSH version: resolved per round, recorded with the round, and not yet re-verified
+
+**The version a round runs on is not fixed in advance and is not written into this repository.** It is resolved at
+the start of a round — the latest release available at that moment — written into the round's own record beside its
+evidence, and frozen for the whole round: all three cells run on one version, and a version change between cells
+invalidates the round, which is restarted rather than continued. **Every quotation of a round's numbers carries the
+DSH version that produced them**, which is what the rule buys: comparability, and the ability to tell which release
+a figure belongs to. It is not a gate on any release — nothing in the procedure waits for a new release to be
+validated by a round. "Latest at run time" is the owner's decision, so neither file hardcodes a version: the round's
+record carries the value (`docs/CELLS-RUN.md`, prerequisites).
+
+**What is known.** The project was built, and its DSH runtime facts were observed, on **0.1.7-rc.2**:
+`docs/AGENT_BRIEF.md` §1.8 is dated to it, §1.5's local-install facts come from that line, and the plugin's own
+manifest declares exactly one supported release — `packages/dsh-plugin/package.json` →
+`dsh.compatibility.dshReleases: { "0.1.7-rc.2": "supported" }`. The machine now answers **`0.2.0-rc.2`** to
+`dsh --version`, one minor release past the only release the plugin declares.
+
+**Nothing has been re-verified on `0.2.0-rc.2`.** Not §1.8's plugin-loading facts, not the version-specific claims
+scattered through this file's dated records (the plugin-manager page form, volatile HMR, the `surfaceOp` shape, the
+credential and settings surfaces), and not the plugin's own load path. Those statements are evidence about
+`0.1.7-rc.2`; on the release that runs now they are **inherited, not re-confirmed**, and a reader on `0.2.0-rc.2`
+should read them that way. Nothing here says `0.2.0-rc.2` works — nothing has established that.
+
+**No round record has carried a version, `20261001-1414` included.** It ran before any round record carried one, so
+its DSH version is **unknown** and must not be guessed — not from this file, not from the manifest, and not from the
+fact that it ran on this machine. Every earlier round is in the same position, `20261001-1300` among them.
+
+**The compatibility manifest is a claim, not an intention.** `dshReleases` is extended only when there is evidence
+on the release — the plugin exercised on it and the facts observed there — and never optimistically: a matrix entry
+is evidence, so adding one because a release exists would replace the project's only statement of support with a
+guess. The same discipline applies to any sentence anywhere in these documents that would otherwise read as "the
+newer release works".
 
 ### Handover, and the one thing not verified
 
