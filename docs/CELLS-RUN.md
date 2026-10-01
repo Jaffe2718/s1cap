@@ -86,6 +86,11 @@ a previous round into 191 failed S1 calls out of 281.
 - **Pick the cell model deliberately.** `bailian/qwen3.8-flash` over-thinks, which changes what a cell spends its
   steps on; the owner's choice for the next round is `deepseek-v4.1-flash`, set through `agent-default-model` in
   the copied profile.
+- **Set `s1.retryAttempts` (2 is enough) for a four-cell run.** The shared backend refuses rather than queues at
+  its admission limit, and a measured round lost 732 of 1 880 calls to `503 server busy` — after which the S1
+  columns are partly lexical ones, because a refused call falls back to the local scorer. With the retry on, a
+  refused call waits the server's own `Retry-After` and is answered, and `attempts`/`waitedMs` on the `s1_call`
+  record say how often that happened. Report `judgedPairs / scoredPairs` either way.
 - `~/.dsh/profiles/node_modules` is a farm of unresolvable junctions: a recursive `grep` there fails with
   thousands of `os error 3`s. Read the profile patch files directly.
 

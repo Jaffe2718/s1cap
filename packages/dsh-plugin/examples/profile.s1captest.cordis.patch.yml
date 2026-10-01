@@ -22,8 +22,10 @@
     s1:
       # exactly one System-1 backend is active at a time; enabling Laya requires this provider
       provider: laya-serve
-      timeoutMs: 2500
       questionsPerCall: 20
+      # attempts for a *refused* call; 1 = single attempt. Laya sheds with 503 + Retry-After rather than queueing
+      # (docs/LAYA_RUNTIME.md §6b), so a round under concurrent cells loses judgements without this.
+      retryAttempts: 2
     laya:
       enabled: true
       autoStart: false

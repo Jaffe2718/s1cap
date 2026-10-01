@@ -204,6 +204,21 @@ export interface AssemblyPolicy {
      */
     /** questions per /v1/systemone call (context-rot guard) */
     questionsPerCall: number;
+    /**
+     * How many times one System-1 call may be *attempted* when the backend refuses it. 1 is a single attempt,
+     * which is what this was before the option existed: a retry is a deliberate, recorded choice, not a default.
+     *
+     * The refusal this exists for is Laya's admission control, which answers `503 server busy` with
+     * `Retry-After: 1` the moment its semaphore is full and never queues (docs/LAYA_RUNTIME.md §6b). Measured
+     * 2026-10-01: four concurrent cells lost 39% of 1880 calls to it while their *average* load was about a third
+     * of what the server sustains, so the losses were a burst artifact, not a capacity shortage — and a
+     * one-second retry is what turns them back into judgements. Only a refusal is retried, never a timeout:
+     * a refusal costs nothing to repeat, a 30 s timeout costs 30 s.
+     *
+     * Every attempt is recorded (`attempts`, `waitedMs` on the `s1_call` record), because a judgement that had to
+     * be retried is not the same evidence as one that did not.
+     */
+    retryAttempts: number;
   };
 }
 
@@ -336,7 +351,7 @@ export function defaultPolicy(): AssemblyPolicy {
     xFirst: true,
     deliver: false,
     planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
-    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20 },
+    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20, retryAttempts: 1 },
   };
 }
 

@@ -201,6 +201,13 @@ So the fix belongs on the client side of the deadline, not in the cap:
 Neither is a substitute for reporting coverage: a cell whose calls were 39% refused is not a cell that received
 its configured System-1 governance, and `judgedPairs / scoredPairs` is the number that says so.
 
+**Implemented 2026-10-01: `s1.retryAttempts` (1–5, default 1).** The policy is explicit and off by default, so
+nothing changes unless a profile asks for it; the plugin turns it into an `S1Client` `retry` policy that repeats
+only a *refusal* — never a timeout (which costs another timeout) and never a cancellation (which is the caller's
+decision). The wait is the server's own `Retry-After`, bounded by a budget derived from the attempt count, and
+every call records `attempts` and `waitedMs` beside its cost, on success and on failure alike, because a judgement
+that had to be retried is weaker evidence than one that did not.
+
 ## 7. Tests
 
 `packages/laya-runtime/test` covers, offline and with injected fakes: conda JSON parsing

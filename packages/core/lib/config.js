@@ -55,6 +55,9 @@ export const NUMBER_RULES                        = [
   { path: 'planGate.attemptCap', min: 1, max: 8, integer: true },
   { path: 'planGate.abstainConfidence', min: 0, max: 1 },
   { path: 's1.questionsPerCall', min: 1, max: 64, integer: true },
+  // attempts for one refused System-1 call; 1 is the single attempt this used to be, 5 is the ceiling because a
+  // refusal costs a wait each time and the harness has to stay responsive
+  { path: 's1.retryAttempts', min: 1, max: 5, integer: true },
 ];
 
 export const ENUM_RULES                                                         = [

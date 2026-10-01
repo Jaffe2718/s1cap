@@ -30,7 +30,7 @@ test('valid overrides are applied, nested sections included', () => {
     recall: { threshold: 0.7, depth: 3, fanout: 16, tier1: 's1', budgetRatio: 0.5, minRecalledShare: 0.1 },
     tail: { k: 6 },
     planGate: { on: false, maxPlans: 4, attemptCap: 3, abstainConfidence: 0.6 },
-    s1: { provider: 'laya-serve', timeoutMs: 5000, questionsPerCall: 10, model: 'english' },
+    s1: { provider: 'laya-serve', timeoutMs: 5000, questionsPerCall: 10, model: 'english', retryAttempts: 3 },
     telemetry: { sessionJsonl: 'a.jsonl', controlJsonl: 'b.jsonl' },
   });
   assert.equal(result.ok, true, JSON.stringify(result.errors));
@@ -47,6 +47,9 @@ test('valid overrides are applied, nested sections included', () => {
   assert.equal(result.policy.planGate.attemptCap, 3);
   assert.equal(result.policy.s1.provider, 'laya-serve');
   assert.equal(result.policy.s1.model, 'english');
+  assert.equal(result.policy.s1.retryAttempts, 3);
+  // `timeoutMs` is not a policy path and must not become one: it was removed for exactly this reason.
+  assert.equal('timeoutMs' in result.policy.s1, false);
 });
 
 test('the two design invariants cannot be configured away', () => {
@@ -77,6 +80,9 @@ test('a bad value is reported and the default is kept (fail-safe)', () => {
     ['planGate.abstainConfidence', 2],
     ['cache.blockTokens', 0],
     ['s1.questionsPerCall', 100],
+    ['s1.retryAttempts', 0],
+    ['s1.retryAttempts', 9],
+    ['s1.retryAttempts', 2.5],
     ['tail.k', 50],
   ];
   for (const [path, value] of cases) {

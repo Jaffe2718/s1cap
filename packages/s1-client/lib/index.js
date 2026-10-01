@@ -81,9 +81,33 @@
                 
                                     
                  
+                                                                                             
              
                                                                   
                       
+                                                                           
+                   
+                                                        
+                   
+ 
+
+/**
+ * How a call may be re-attempted after the backend *refused* it.
+ *
+ * Explicit, and off unless the caller asks, because a hidden retry is a hidden policy: the caller is the one that
+ * decides a judgement is worth another second. Only a refusal is retryable — Laya answers `503 server busy` with
+ * `Retry-After` rather than queueing (docs/LAYA_RUNTIME.md §6b) — because repeating a refusal costs one wait while
+ * repeating a 30 s timeout costs another 30 s.
+ */
+                                
+                                                                     
+                      
+                                                                        
+                              
+                                                                          
+                           
+                                                                         
+                     
  
 
                                   
@@ -100,6 +124,8 @@
                                                      
      
                        
+                                                                                              
+                        
                              
                            
  
@@ -113,12 +139,27 @@
  */
 export const S1_TRANSPORT_TIMEOUT_MS = 30_000;
 
+/**
+ * Statuses that mean "refused, come back", not "your request is wrong".
+ *
+ * 503 is the one that matters here — it is Laya's admission control. 429 and the two gateway statuses are the
+ * same shape of answer from other deployments, and a 400/413/422 is a request the server will refuse again.
+ */
+export const S1_RETRYABLE_STATUS                    = [429, 502, 503, 504];
+
 export class S1HttpError extends Error {
            status        ;
-  constructor(status        , message        ) {
+  /** the server's `Retry-After` as a delay in ms, when it sent one and it parses as seconds */
+  retryAfterMs         ;
+  /** attempts made before this was thrown (1 for a single attempt), set by the retry loop */
+  attempts         ;
+  /** total time spent waiting between those attempts, set by the retry loop */
+  waitedMs         ;
+  constructor(status        , message        , retryAfterMs         ) {
     super(message);
     this.name = 'S1HttpError';
     this.status = status;
+    if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -152,20 +193,56 @@ export class S1Client {
   #apiKey                    ;
   #model                    ;
   #fetch              ;
+  #retry                           ;
 
   constructor(opts                 ) {
     this.#baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.#apiKey = opts.apiKey;
     this.#model = opts.model;
     this.#fetch = opts.fetchImpl ?? fetch;
+    this.#retry = opts.retry;
   }
 
-  /** Evaluate any number of questions against one state in a single call. */
+  /**
+   * Evaluate any number of questions against one state in a single call.
+   *
+   * With a `retry` policy a *refused* call is attempted again, waiting the server's own `Retry-After`; the returned
+   * `attempts` and `waitedMs` say what the answer took. A timeout is never retried — repeating it costs another
+   * timeout — and neither is a cancellation, which is the caller's decision rather than a backend failure.
+   */
   async decide(
     state         ,
     questions                            ,
     opts                           = {},
   )                          {
+    const maxAttempts = Math.max(1, Math.trunc(this.#retry?.maxAttempts ?? 1));
+    const budgetMs = this.#retry?.maxWaitMs ?? Number.POSITIVE_INFINITY;
+    let waitedMs = 0;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const result = await this.#decideOnce(state, questions, opts);
+        return { ...result, attempts: attempt, waitedMs };
+      } catch (err) {
+        const refused = err instanceof S1HttpError && S1_RETRYABLE_STATUS.includes(err.status);
+        if (!refused || attempt >= maxAttempts || opts.signal?.aborted === true) {
+          throw withAttempts(err, attempt, waitedMs);
+        }
+        const delayMs = retryDelayMs(err, this.#retry);
+        // The budget belongs to the caller: a retry that cannot fit inside it is not worth starting, and throwing
+        // the refusal now is more honest than returning a judgement several seconds past the caller's patience.
+        if (waitedMs + delayMs > budgetMs) throw withAttempts(err, attempt, waitedMs);
+        await sleepAbortable(delayMs, opts.signal, attempt, waitedMs);
+        waitedMs += delayMs;
+      }
+    }
+  }
+
+  /** One attempt. The loop above owns everything about repeating it. */
+  async #decideOnce(
+    state         ,
+    questions                            ,
+    opts                           = {},
+  )                                                         {
     const started = Date.now();
     const guard = new AbortController();
     const timer = setTimeout(() => guard.abort(), S1_TRANSPORT_TIMEOUT_MS);
@@ -190,7 +267,11 @@ export class S1Client {
 
       if (!res.ok) {
         const body = await res.text().catch(() => '');
-        throw new S1HttpError(res.status, `systemone ${res.status}: ${body.slice(0, 200)}`);
+        throw new S1HttpError(
+          res.status,
+          `systemone ${res.status}: ${body.slice(0, 200)}`,
+          parseRetryAfter(res.headers.get('retry-after')),
+        );
       }
 
       const json = (await res.json())                           ;
@@ -237,6 +318,63 @@ export class S1Client {
     if (Array.isArray(json)) return json;
     return (json.data ?? []).map((m) => m.id ?? '').filter(Boolean);
   }
+}
+
+/**
+ * The server's own hint, when it gave one that parses as a delay in seconds.
+ *
+ * `Retry-After` also has an HTTP-date form; Laya does not send it, and parsing a date would be inventing a delay
+ * rather than reading one, so an unparseable header is treated as absent.
+ */
+function parseRetryAfter(raw               )                     {
+  if (raw === null) return undefined;
+  const seconds = Number(raw.trim());
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds * 1000) : undefined;
+}
+
+/** The server's hint when there is one, the policy's fallback otherwise. */
+function retryDelayMs(err             , policy                           )         {
+  const fallback = policy?.fallbackDelayMs ?? 1000;
+  if (policy?.respectRetryAfter === false) return fallback;
+  return err.retryAfterMs ?? fallback;
+}
+
+/**
+ * Copy the attempt bookkeeping onto a thrown error.
+ *
+ * Attached rather than wrapped on purpose: callers already branch on the error's type (`S1HttpError`,
+ * `S1TimeoutError`, `S1CancelledError`), and a new wrapper type would make every one of those checks wrong in
+ * order to keep the record right.
+ */
+function withAttempts   (err   , attempts        , waitedMs        )    {
+  if (err instanceof Error) {
+    const target = err                                                    ;
+    target.attempts = attempts;
+    target.waitedMs = waitedMs;
+  }
+  return err;
+}
+
+/** Sleep between attempts, but let the caller's cancellation end the wait instead of outliving it. */
+function sleepAbortable(
+  ms        ,
+  signal                         ,
+  attempts        ,
+  waitedMs        ,
+)                {
+  return new Promise((resolve, reject) => {
+    const onAbort = ()       => {
+      clearTimeout(timer);
+      reject(withAttempts(new S1CancelledError(), attempts, waitedMs));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    if (signal === undefined) return;
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /** Probability normalization — Jev does not guarantee invariants (Σp may exceed 1). */

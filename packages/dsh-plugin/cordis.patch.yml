@@ -72,8 +72,13 @@
           # "" = read TYPESAFE_API_KEY (jev) or S1CAP_API_KEY from the environment. Never logged:
           # /s1 status prints a redacted fingerprint only.
           apiKey: ""
-          timeoutMs: 2500
           questionsPerCall: 20
+          # Attempts for one *refused* System-1 call. Laya answers `503 server busy` with `Retry-After` at its
+          # admission limit and never queues (docs/LAYA_RUNTIME.md §6b), which cost a measured round 39% of its
+          # calls. 1 is a single attempt — what this was before the option existed — and the choice is recorded:
+          # every call writes `attempts`/`waitedMs` into its `s1_call` record. Only a refusal is retried, never a
+          # timeout, because repeating a refusal costs one wait and repeating a timeout costs another timeout.
+          retryAttempts: 1
         # Local Laya backend (docs/LAYA_RUNTIME.md). Enable after installing the
         # serving extra in the target environment: <python> -m pip install "laya[serve]".
         # Machine-specific paths (condaPath, pythonPath) belong in the DSH profile patch.

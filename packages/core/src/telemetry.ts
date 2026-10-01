@@ -80,6 +80,15 @@ export interface S1CallEvent {
    */
   repo?: string;
   /**
+   * How many times this call was attempted, and how long it waited between attempts.
+   *
+   * Present because a judgement that had to be retried is weaker evidence than one that did not, and a record
+   * that cannot say which it was turns a degraded backend into an invisible one. `attempts: 1, waitedMs: 0` is
+   * the single-attempt case, and is what a record written before this field existed means.
+   */
+  attempts?: number;
+  waitedMs?: number;
+  /**
    * False when the call raised, in which case the scoring fell back to the lexical path. Absent on
    * records written before failures were recorded at all, so `ok !== false` keeps a success intact
    * while older logs stay readable.

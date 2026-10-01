@@ -184,3 +184,136 @@ test('s1CostUsd: Jev input-only pricing', () => {
   assert.ok(Math.abs(s1CostUsd(1_000_000) - 0.042) < 1e-12);
   assert.ok(Math.abs(s1CostUsd(15_000) - 0.00063) < 1e-12);
 });
+
+// ---- retry on refusal ----
+//
+// Laya answers `503 server busy` with `Retry-After` the moment its admission semaphore is full and never queues
+// (docs/LAYA_RUNTIME.md §6b), which cost a measured four-cell round 39% of its calls. The policy is off unless the
+// caller asks for it, and what it did is reported on both paths: `attempts`/`waitedMs` on the result, and the same
+// two fields on the error when the attempts run out.
+
+const okEnvelope = {
+  model: 'laya-typed-decisions',
+  answers: { q1: { type: 'noul', noul: 0.9 } },
+  usage: { input_tokens: 10, output_tokens: 0 },
+};
+
+/** The way Laya refuses: a status plus its own hint, no queueing. */
+function busyResponse(retryAfter?: string): Response {
+  return new Response(JSON.stringify({ detail: 'server busy, try again later' }), {
+    status: 503,
+    headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
+  });
+}
+
+/** Resolve with the thrown error instead of rejecting, so its fields can be asserted. */
+async function failure(p: Promise<unknown>): Promise<S1HttpError | S1CancelledError> {
+  return p.then(
+    () => {
+      throw new Error('expected the call to fail');
+    },
+    (err: unknown) => err as S1HttpError | S1CancelledError,
+  );
+}
+
+test('retry: with no policy a refusal is one attempt, exactly as before', async () => {
+  const captured: Captured[] = [];
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    fetchImpl: mockFetch(() => busyResponse('0'), captured),
+  });
+  const err = await failure(client.decide({ s: 1 }, { q1: noul('x') }));
+  assert.ok(err instanceof S1HttpError);
+  assert.equal(captured.length, 1, 'nothing may be retried without being asked to');
+  assert.equal(err.attempts, 1);
+  assert.equal(err.waitedMs, 0);
+  assert.equal(err.retryAfterMs, 0, 'the server hint is read even when it is not acted on');
+  assert.equal(err.status, 503);
+});
+
+test('retry: a refusal is retried, and the answer says it took two attempts', async () => {
+  const captured: Captured[] = [];
+  let n = 0;
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    retry: { maxAttempts: 2, respectRetryAfter: true },
+    fetchImpl: mockFetch(() => (++n === 1 ? busyResponse('0') : jsonResponse(okEnvelope)), captured),
+  });
+  const result = await client.decide({ s: 1 }, { q1: noul('x') });
+  assert.equal(captured.length, 2);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.waitedMs, 0);
+  assert.equal(result.answers.q1?.type, 'noul');
+});
+
+test('retry: the wait budget refuses a retry that cannot fit, and reports the hint it read', async () => {
+  const captured: Captured[] = [];
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    // the server asks for a second, the caller allows half of one: start no retry at all
+    retry: { maxAttempts: 2, respectRetryAfter: true, maxWaitMs: 500 },
+    fetchImpl: mockFetch(() => busyResponse('1'), captured),
+  });
+  const err = await failure(client.decide({ s: 1 }, { q1: noul('x') }));
+  assert.ok(err instanceof S1HttpError);
+  assert.equal(captured.length, 1, 'a retry that cannot fit the budget must not be started');
+  assert.equal(err.retryAfterMs, 1000);
+  assert.equal(err.attempts, 1);
+});
+
+test('retry: attempts stop at maxAttempts and the failure carries the count', async () => {
+  const captured: Captured[] = [];
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    retry: { maxAttempts: 3, respectRetryAfter: true },
+    fetchImpl: mockFetch(() => busyResponse('0'), captured),
+  });
+  const err = await failure(client.decide({ s: 1 }, { q1: noul('x') }));
+  assert.ok(err instanceof S1HttpError);
+  assert.equal(captured.length, 3);
+  assert.equal(err.attempts, 3);
+});
+
+test('retry: a 400 is a request the server would refuse again, so it is not retried', async () => {
+  const captured: Captured[] = [];
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    retry: { maxAttempts: 3, respectRetryAfter: true },
+    fetchImpl: mockFetch(() => new Response('{"detail":"bad request"}', { status: 400 }), captured),
+  });
+  const err = await failure(client.decide({ s: 1 }, { q1: noul('x') }));
+  assert.ok(err instanceof S1HttpError);
+  assert.equal(captured.length, 1);
+});
+
+test('retry: respectRetryAfter=false uses the fallback delay instead of the hint', async () => {
+  const captured: Captured[] = [];
+  let n = 0;
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    retry: { maxAttempts: 2, respectRetryAfter: false, fallbackDelayMs: 0 },
+    fetchImpl: mockFetch(() => (++n === 1 ? busyResponse('5') : jsonResponse(okEnvelope)), captured),
+  });
+  const result = await client.decide({ s: 1 }, { q1: noul('x') });
+  assert.equal(captured.length, 2, 'a five-second hint must not be obeyed when the policy says not to');
+  assert.equal(result.attempts, 2);
+});
+
+test('retry: a cancellation during the wait is a cancellation, not a backend failure', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const client = new S1Client({
+    baseUrl: 'http://127.0.0.1:8008',
+    retry: { maxAttempts: 3, respectRetryAfter: true },
+    fetchImpl: mockFetch(() => {
+      calls += 1;
+      return busyResponse('5');
+    }),
+  });
+  const pending = client.decide({ s: 1 }, { q1: noul('x') }, { signal: controller.signal });
+  setTimeout(() => controller.abort(), 10);
+  const err = await failure(pending);
+  assert.ok(err instanceof S1CancelledError, `expected a cancellation, got ${String(err)}`);
+  assert.equal(calls, 1, 'the wait must end with the caller, not outlive it');
+  assert.equal(err.attempts, 1);
+});

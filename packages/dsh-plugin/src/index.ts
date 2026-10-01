@@ -735,6 +735,21 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
             baseUrl: backend.baseUrl,
             ...(backend.apiKey ? { apiKey: backend.apiKey } : {}),
             ...(backend.model ? { model: backend.model } : {}),
+            // A refusal is cheap to repeat, and the alternative is handing the pair to the lexical fallback:
+            // Laya answers `503 server busy` with `Retry-After: 1` at its admission limit and never queues
+            // (docs/LAYA_RUNTIME.md §6b), which cost a measured round 39% of its calls. The wait is capped so a
+            // burst cannot push a scoring round past the caller's patience, and `retryAttempts: 1` keeps this
+            // exactly as it was before the option existed.
+            ...(config.s1.retryAttempts > 1
+              ? {
+                  retry: {
+                    maxAttempts: config.s1.retryAttempts,
+                    respectRetryAfter: true,
+                    fallbackDelayMs: 1000,
+                    maxWaitMs: 2000 * config.s1.retryAttempts,
+                  },
+                }
+              : {}),
           })
         : undefined;
     return { backend, client };
@@ -928,6 +943,10 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         ms?: number;
         model?: string;
         routing?: { model?: string; repo?: string };
+        /** attempts the answer took, from the client's retry loop */
+        attempts?: number;
+        /** time spent waiting between those attempts */
+        waitedMs?: number;
       },
       sessionId: string,
     ): void => {
@@ -947,6 +966,11 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           outputTokens: result.usage?.output_tokens ?? 0,
           ms: result.ms ?? 0,
           ok: true,
+          // Recorded on every record, not only on the interesting ones: a judgement that had to be retried is
+          // weaker evidence than one that did not, and a record that cannot say which it was makes a degraded
+          // backend indistinguishable from a healthy one.
+          attempts: result.attempts ?? 1,
+          waitedMs: result.waitedMs ?? 0,
           ...(result.model !== undefined ? { routedModel: result.model } : {}),
           // The address and the checkpoint that answered, not the name this plugin was configured with: a stub
           // answering on the configured port calls itself `laya-serve` too, and only the server's own `routing`
@@ -970,6 +994,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       err: unknown,
       sessionId: string,
     ): void => {
+      // The client attaches how many attempts it made before giving up, so a refusal that was retried and still
+      // failed stays distinguishable from one that was never retried at all.
+      const carried = (typeof err === 'object' && err !== null ? err : {}) as {
+        attempts?: number;
+        waitedMs?: number;
+      };
       try {
         controlLog.emit({
           type: 's1_call',
@@ -984,6 +1014,8 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           outputTokens: 0,
           ms: 0,
           ok: false,
+          attempts: carried.attempts ?? 1,
+          waitedMs: carried.waitedMs ?? 0,
           error: String(err).slice(0, 300),
           ...(backend.baseUrl !== '' ? { endpoint: backend.baseUrl } : {}),
         });
