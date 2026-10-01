@@ -282,5 +282,27 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
     setPath(target, path, value);
   }
 
+  // The pairing a measured round found to be the worst of the four, warned about and never rejected.
+  //
+  // C3 is `tas.on: false` with `recall.tier1: 'embed'`: recall selection running without the state proxy that
+  // keeps the head of the prompt byte-stable. Round `20261001-1300` measured that cell at a 79.2% cache hit rate
+  // against the baseline's 86.7%, 3 625 uncached input tokens per step against 2 595, and 85% of the baseline's
+  // cost; its counterpart - the stabiliser on with recall off (C2) - measured 1 783 uncached input tokens per
+  // step, the best in the table, and 58% of the baseline cost. So the pairing is one a cell may select on purpose
+  // and must not select by accident, and that is a warning rather than an error: `ok` stays true, no value is
+  // changed, and a session never fails over a combination of two legal settings.
+  if (policy.tas.on === false && policy.recall.tier1 !== 'off') {
+    issues.push({
+      path: 'recall.tier1',
+      message:
+        `recall selection is on ("${policy.recall.tier1}") while tas.on is off, and that pairing measured worse ` +
+        `than the baseline in round 20261001-1300: 79.2% cache hit against 86.7%, 3 625 uncached input tokens per ` +
+        `step against 2 595, 85% of the baseline's cost. With the stabiliser on and recall off the same run ` +
+        `measured 1 783 uncached input tokens per step and 58% of the baseline cost. Set tas.on true, or ` +
+        `recall.tier1 "off", unless this cell is the pairing under test`,
+      severity: 'warning',
+    });
+  }
+
   return finish();
 }

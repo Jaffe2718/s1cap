@@ -141,3 +141,51 @@ test('non-object config is an error, and the rule tables stay coherent', () => {
   }
   assert.equal(new Set(NUMBER_RULES.map((r) => r.path)).size, NUMBER_RULES.length, 'no duplicate rules');
 });
+
+test('recall selection without the state proxy warns: that pairing measured worse than the baseline', () => {
+  // C3 is the combination, and it is reachable by naming one cell - which is exactly why it needs a warning
+  // rather than a paragraph in a run report. Measured in round `20261001-1300`: C3 at a 79.2% cache hit rate
+  // against C1's 86.7% and 3 625 uncached input tokens per step against 2 595, for 85% of the baseline's cost;
+  // TAS on with recall off (C2) was the best cell in the table at 1 783 uncached tokens per step and 58% of it.
+  const c3 = validatePolicy({ cell: 'C3' });
+  assert.equal(c3.ok, true, 'a warning and never an error: a session must not fail over a combination');
+  const warning = c3.warnings.find((issue) => issue.path === 'recall.tier1');
+  assert.notEqual(warning, undefined, `the pairing must be reported: ${JSON.stringify(c3.issues)}`);
+  // Both numbers of both cells, because a warning that says "this is worse" and not "worse by how much" is the
+  // kind of claim this project keeps having to retract.
+  for (const [what, needle] of [
+    ['the pairing cell hit rate', '79.2%'],
+    ['the baseline hit rate', '86.7%'],
+    ['the pairing uncached input per step', '3 625'],
+    ['the baseline uncached input per step', '2 595'],
+    ['the counterpart uncached input per step', '1 783'],
+  ] as const) {
+    assert.ok(warning.message.includes(needle), `${what} (${needle}) belongs in the message: ${warning.message}`);
+  }
+  assert.equal(c3.policy.tas.on, false, 'and nothing is changed: the warning is advice, not a correction');
+  assert.equal(c3.policy.recall.tier1, 'embed', 'the configured tier is kept as written');
+
+  // Absent in the other three cells, and it is the *pairing* that decides - not "S1CAP is on" and not the cell
+  // name. A rule written against the cell would be a rule about a preset rather than about the mechanism.
+  assert.deepEqual(validatePolicy({ cell: 'C1' }).warnings, [], 'both halves off: the baseline is not the pairing');
+  assert.deepEqual(validatePolicy({ cell: 'C2' }).warnings, [], 'the stabiliser with recall off is the counterpart, not the pairing');
+  assert.deepEqual(validatePolicy({ cell: 'C4' }).warnings, [], "the project's own configuration runs both halves and is silent");
+
+  // And it follows the effective policy, so an override creates or removes it wherever the value came from.
+  assert.deepEqual(validatePolicy({ cell: 'C3', tas: { on: true } }).warnings, [], 'turning the stabiliser on fixes the pairing');
+  assert.equal(
+    validatePolicy({ cell: 'C1', recall: { tier1: 's1' } }).warnings[0]?.path,
+    'recall.tier1',
+    'turning recall on inside the baseline creates it, even though the baseline itself is silent',
+  );
+  assert.equal(
+    validatePolicy({ cell: 'C4', tas: { on: false } }).warnings.filter((i) => i.path === 'recall.tier1').length,
+    1,
+    'and turning the stabiliser off inside the full configuration creates it too',
+  );
+  assert.deepEqual(
+    validatePolicy({ cell: 'C2', recall: { tier1: 's1' } }).warnings,
+    [],
+    'while the same recall tier inside a cell that keeps tas.on is the pairing this warning is not about',
+  );
+});
