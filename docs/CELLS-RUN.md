@@ -142,6 +142,6 @@ proving it reaches the file.
 **Measured 2026-10-01 (round `20261001-1300`):** `recallTree` is present on **every** assembly record of all four
 cells — 19/19, 13/13, 11/11, 33/33 — and non-empty exactly where `tier1` selects (7/11 in C3, 13/33 in C4), empty
 in C1/C2 where recall selection is off. Both features are wired. The same run also shows what these counters are
-for: 698 of 1 880 System-1 calls came back `503 server busy` and 126 hit the 30 s transport guard, so only 17–32%
+for: 732 of 1 880 System-1 calls came back `503 server busy` and 126 hit the 30 s transport guard, so only 17–33%
 of association pairs were judged by the backend and the rest fell back to the local lexical scorer. A cell's
 `judgedPairs / scoredPairs` belongs in every report beside its S1 columns.
