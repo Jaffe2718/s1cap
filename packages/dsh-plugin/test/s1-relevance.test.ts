@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 import { createS1Relevance, S1_RETRY_ATTEMPTS, S1_RETRY_BASE_DELAY_MS, S1_RETRY_BUDGET_MS, S1_RETRY_MAX_DELAY_MS } from '../src/s1-relevance.ts';
 import { S1CancelledError, S1HttpError, S1TimeoutError } from '@s1cap/s1-client';
+import { AssociationGraph } from '@s1cap/core';
 import type { Segment } from '@s1cap/core';
 
 function segment(id: string, text: string): Segment {
@@ -459,3 +460,61 @@ test('the scorer is the returned value itself, not a method hanging off it', asy
   assert.deepEqual(await relevance(current, []), [], 'and it is callable directly, with an empty window costing nothing');
   assert.equal(typeof relevance.stats, 'function', 'stats hangs off the same function object');
 });
+
+test('a growing session costs the new pairs and nothing else, so the call count is T(T-1)/2 over the cap', async () => {
+  // The measurement this pins, from round `20261001-1300`: C4 offered 22 791 pairs for its 214 segments, exactly
+  // T(T-1)/2, and made 1 155 calls at 20 questions per call. The suspicion that motivated the check was that the
+  // whole window is re-scored at every arrival, which would make the question count grow faster than T(T-1)/2.
+  // It does not: the graph's cursor scores each segment once, so a pair is asked once. The test drives the real
+  // scorer through the real graph, one arrival at a time as upkeep does, and reads the pair back out of the
+  // rendered question - so a change that re-offered a pair would change the set, not merely a counter.
+  const perCall = 4;
+  const total = 16;
+  const graph = new AssociationGraph();
+  const questionsPerBatch: number[] = [];
+  const pairs: string[] = [];
+  const readPair = (instructions: string): string => {
+    const match = /Current segment:\n\[[^\]]*\] (text \d+)\n\nCandidate h\d+:\n\[[^\]]*\] (text \d+)/.exec(instructions);
+    return match === null ? 'unreadable question' : `${String(match[2])}->${String(match[1])}`;
+  };
+  const relevance = createS1Relevance({
+    questionsPerCall: perCall,
+    decide: async (_state, questions) => {
+      questionsPerBatch.push(Object.keys(questions).length);
+      const answers: Record<string, { type: string; noul: number }> = {};
+      for (const [id, question] of Object.entries(questions)) {
+        answers[id] = { type: 'noul', noul: 0.9 };
+        pairs.push(readPair(question.instructions));
+      }
+      return { answers };
+    },
+  });
+
+  for (let i = 0; i < total; i += 1) {
+    graph.addSegments([segment(`s${i}`, `text ${i}`)]);
+    // `w` wider than the session, which is the measured shape: C4 ran at w = 1024 against 214 segments.
+    await graph.scoreNew({ windowN: 1024, threshold: 0.55, scoreBatch: relevance });
+  }
+
+  const expectedPairs = (total * (total - 1)) / 2;
+  let expectedCalls = 0;
+  for (let j = 0; j < total; j += 1) expectedCalls += Math.ceil(j / perCall);
+
+  const stats = graph.stats();
+  assert.equal(stats.scoredPairs, expectedPairs, `T(T-1)/2 = ${String(expectedPairs)} pairs, each involving a new segment`);
+  assert.equal(stats.judgedPairs, expectedPairs, 'the backend answered every window it was offered');
+  assert.equal(pairs.length, expectedPairs, 'and the requests carried exactly that many questions');
+  assert.equal(new Set(pairs).size, pairs.length, 'no pair was asked twice');
+  assert.equal(relevance.stats().calls, expectedCalls, `the calls are the pairs over the cap: ${String(expectedCalls)}`);
+  assert.deepEqual(
+    questionsPerBatch.slice(0, 5),
+    [1, 2, 3, 4, 4],
+    'the early arrivals fit one call each; the fifth fills a batch of the cap and spills the remainder',
+  );
+  assert.equal(
+    questionsPerBatch.reduce((sum, n) => sum + n, 0),
+    expectedPairs,
+    'the questions sent are the pair count: batching saves round trips and not questions',
+  );
+});
+

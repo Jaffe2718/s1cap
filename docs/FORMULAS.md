@@ -318,3 +318,13 @@ it is not a recall parameter.
 Measured offline in `packages/core/test/window.test.ts` (`w = 64`, 400 segments): `scoredPairs` stays within
 `total * w` and strictly below full pairwise scoring, the first segment still holds its edges after leaving the
 window, and **doubling w roughly doubles the cost** — the cost tracks `w`, not the session length.
+
+**Measured in a live round (`20261001-1300`), and the caveat that comes with it: the window did not bind.** The
+four cells offered 6 670 / 4 278 / 3 321 / 22 791 pairs for 116 / 93 / 82 / 214 segments — `T(T-1)/2` to the pair,
+i.e. the *full-history* row of the table above, because `w = 1024` is larger than any session the round produced.
+Each persisted graph (`<DSH_HOME>/.s1cap/rg/*.json`) held exactly that many **distinct** pairs by `from->to`, so
+no pair was ever scored twice: `scoredPairs` counts offers, `scores` is keyed by pair, and one repeated pair would
+show up as a difference of exactly one. The call count then follows from the pair count and not from any
+redundancy — 22 791 pairs at `s1.questionsPerCall = 20` are the 1 155 calls C4 made. The lever on this cost is
+`w` (or the cap), never de-duplication: at `w = 64` the same 214 segments would offer 11 616 pairs, half of them,
+in 732 full batches where the unbounded window needs 1 243.

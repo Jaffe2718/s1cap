@@ -114,6 +114,79 @@ All four cells share one local Laya on `127.0.0.1:8008`. A measured round with w
 will be worse. Either stagger C3/C4 or report the 503s, because they change what the numbers mean: a cell that
 received no System-1 judgements is not a cell that measured S1 governance.
 
+### The S1 call volume is the pair count, not repeated work (measured 2026-10-01)
+
+The upkeep lane asks one question per **new** pair — the arriving segment against each segment in its window — and
+the volume that produces is `new pairs / s1.questionsPerCall`, which is quadratic in segments whenever `w` is
+larger than the session. It is worth writing down because the suspicion that a new segment re-scores the whole
+window, and therefore re-pays for pairs already judged, is natural and false, and because C4's "35 System-1 calls
+per step" (1 155 calls over 33 steps) reads as waste until the pair count is beside it.
+
+| cell | segments T | pairs offered = T(T−1)/2 | distinct pairs recorded | `s1_call` | ok / 503 / timeout |
+| --- | --- | --- | --- | --- | --- |
+| C1 | 116 | 6 670 | 6 670 | 363 | 134 / 202 / 27 |
+| C2 | 93 | 4 278 | 4 278 | 257 | 128 / 103 / 26 |
+| C3 | 82 | 3 321 | 3 321 | 241 | 89 / 145 / 7 |
+| C4 | 214 | 22 791 | 22 791 | 1 155 | 807 / 282 / 66 |
+
+Source: each cell's own `<DSH_HOME>/.s1cap/rg/*.json` (`order`, `scoredPairs`, `scores[]`) and its control JSONL.
+The two middle columns are the test. A pair offered twice costs nothing extra in `scoredPairs`, but `scores` is
+keyed by `${from}->${to}`, so a re-offer would leave the offered count one larger than the number of distinct
+pairs; in all four cells the difference is **zero**, and the offered count equals `T(T-1)/2` exactly, which is the
+full-history row of `docs/FORMULAS.md` §"Recall window w" — `w = 1024` never bound against a 214-segment session.
+`scoredPairs` is cumulative per session and is read from the last assembly record, not summed over records.
+
+The call count is that pair count over the cap (22 791 / 20 ≈ 1 140 full batches for C4), and the measured count
+brackets it: refusals *shorten* it, because a window whose call failed abandons its remaining candidates and is
+scored lexically in full, while the halving retry *lengthens* it by asking the rest of that window in smaller
+batches. Pinned by `packages/core/test/pair-cost.test.ts` and, on the scorer's own request stream, by
+`packages/dsh-plugin/test/s1-relevance.test.ts`. The lever is `recall.window` or `s1.questionsPerCall`; there is no
+duplicate work to remove.
+
+#### The lever, quantified: `recall.window`
+
+Pairs for a session of `T` segments at window `w` are `Σ_{j<T} min(w, j)` — the first `w` arrivals are short
+because there is less history than the window — which is `T(T-1)/2` while `T-1 ≤ w` and
+`w(w-1)/2 + (T-1-w)·w` after that. Quoting the same four sessions at four windows, with the calls each implies in
+full batches at `s1.questionsPerCall = 20` (`Σ_j ceil(min(w,j)/20)`; the measured count is at or below it when a
+refused window is abandoned):
+
+| cell | T | `w = 64` (the config floor) | `w = 128` | `w = 256` | `w = 1024` (what ran) |
+| --- | --- | --- | --- | --- | --- |
+| C1 | 116 | 5 344 pairs / 340 calls | 6 670 / 390 | 6 670 / 390 | 6 670 / 390 |
+| C2 | 93 | 3 872 / 248 | 4 278 / 260 | 4 278 / 260 | 4 278 / 260 |
+| C3 | 82 | 3 168 / 204 | 3 321 / 205 | 3 321 / 205 | 3 321 / 205 |
+| C4 | 214 | 11 616 / 732 | 19 136 / 1 071 | 22 791 / 1 243 | 22 791 / 1 243 |
+
+The three-turn sessions of the last round are short enough that only `w ≤ 64` changes anything for C1–C3, and C4
+roughly halves at the floor. A longer session is where the window bites: at `T = 1024` and `w = 64` the pairs are
+63 456 against 523 776 unbounded, and at `T = 4096` they are 260 064 against 8 386 560 — the Θ(T·w) row of
+`docs/FORMULAS.md` §"Recall window w". The floor of 64 in `NUMBER_RULES` is what makes `w = 64` the smallest
+setting available; a shorter window than that is not a config this repository supports, and lowering the floor is
+a separate decision with a recall-quality cost that nothing here has measured.
+
+#### The lever, quantified: `s1.questionsPerCall`, and the guard it must be argued against
+
+The cap is bounded 1–64, and raising it cuts calls the other way: at C4's measured `w = 1024`, `T = 214`, the full
+batches are 1 243 at 20, 819 at 32, 678 at 40 and 468 at 64. What stops that from being free is the transport
+guard, and the records bound it. Every successful `noul` call in the round (1 141 of them) carried **235–363 input
+tokens per question**, flat from 1 question (363) to 20 (361) — the two rendered segments per question, each
+capped at 256 characters by `MAX_SEGMENT_CHARS`, so a call of `q` questions is about `323·q` input tokens
+(6.5k at 20, 12.8k at 40, 20.5k at 64) in the backend's own tokenizer. Latency does **not** fall with batch size in
+this data and does not rise much either: median per call is 9.2 s at 1 question and 21.3 s at 20, overall median
+20 068 ms, p95 27 652 ms, and the maximum is 29 994 ms — 6 ms under `S1_TRANSPORT_TIMEOUT_MS = 30 000`. The round
+lost 126 of 2 016 calls to that guard and 732 to `503 server busy`, at every batch size. So the honest reading is
+not "bigger batches are cheaper on tokens and safe on time": it is that the backend was saturated, that the tail of
+every batch size sits against the guard, and that a larger cap has to be argued from a *load* measurement
+(`LAYA_MAX_CONCURRENT`, cells staggered in two waves) rather than from these latency numbers. What the records do
+establish is the token side: `~323` input tokens per question, measured, not estimated.
+
+One thing the records do **not** establish, and it should not be guessed at: whether a smaller `w` costs recall
+quality. `scoredPairs` and `judgedPairs` say how much was judged, and nothing in this round measured how often the
+pairs a smaller window would have dropped were the pairs recall went on to use. A run that lowers `w` has to carry
+`fallback`, `unknownAdmitted` and `recallTree` read beside it, or it is trading a measurable cost for an
+unmeasurable benefit.
+
 ## Measurements, and where each comes from
 
 | Metric | Source |
