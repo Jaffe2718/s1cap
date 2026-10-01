@@ -1424,26 +1424,30 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
    hook contracts registered, every optional surface failing soft with a warning.
 8. **Measurement honesty:** a telemetry record is metadata only (ids, counts, timings). Session content never
    enters the control plane, and control-plane records never become segments.
-9. **Every test round answers inside its own randomly named directory.** A round used to write its answer to the
-   workspace root under a name the task text itself supplied (`pelican-bicycle.html`), which meant a later round
-   could read the previous round's answer instead of solving the task, and two rounds writing the same name
-   replaced one another. The path is now `<workspace>/<salt>/<answer>.html`, where the salt is 48 bits of
-   urandom: a name that cannot be derived from the previous round's prompt, and therefore cannot be aimed at.
-   Open a round with `node scripts/new-test-run.mjs --create`, which prints the directory and **the messages to
-   send, in order, into one session**: the salt appears exactly once, in the first message, which is what gives
-   the round its directory, and the later turns edit the same file in place. The stimuli are LeetCode 121 → 122 →
-   123 (best time to buy and sell stock, one transaction → unlimited → at most two). That family is chosen for
-   the *continuity*: all three share one DP skeleton, so the third turn genuinely benefits from the first two and
-   the relevance path has something real to score - and the answers are short, because a round that spends
-   fifteen minutes rendering a 27 KB HTML animation measures the model's stamina rather than the mechanism. The
-   messages come from `scripts/round-tasks.json` and are substituted rather than retyped, because a mistyped salt
-   sends the answer somewhere the round is not watching. That fixture is ASCII-escaped (`\uXXXX`): the stimuli are
-   Chinese and no repository file may contain Chinese, so the escapes are how the exact recorded code points stay
-   exact. The **workspace itself is not reconfigured** — the session's workspace is part of what the experiment
-   observes, so narrowing it per round would change the thing under study. What the salt does *not* do is hide the
-   other rounds: they are still inside the workspace, so move a finished round's directory out once its evidence
-   is collected. The artifacts from before this rule live in `260930164900/` (a timestamp, from when the rule was a
-   timestamp).
+9. **A round's isolation is its workspace; the salt-named directory is for a stimulus that writes.** A round used
+   to write its answer to the workspace root under a name the task text itself supplied (`pelican-bicycle.html`),
+   which meant a later round could read the previous round's answer instead of solving the task, and two rounds
+   writing the same name replaced one another. The current stimuli write nothing — the answer goes into the
+   conversation, and no file or directory may be created, modified or deleted — so there is no salt to substitute
+   and no round directory to open: what isolates a cell is its **own empty workspace**, `<run>/ws/<cell>`, so there
+   is nothing for a later cell to inherit and no path for two cells to collide over. The directory mechanism stays
+   available for a stimulus that does write: `node scripts/new-test-run.mjs --create` opens
+   `<workspace>/<salt>/<answer>.html`, where the salt is 48 bits of urandom substituted wherever a fixture contains
+   `{salt}` — a name that cannot be derived from the previous round's prompt, and therefore cannot be aimed at.
+   Where a stimulus names such a directory, the salt appears exactly once, in the first message, and a mistyped salt
+   would send the answer somewhere the round is not watching; hence the messages are read from
+   `scripts/round-tasks.json` and sent as recorded, never retyped. The stimuli are LeetCode 121 → 122 → 123 (best
+   time to buy and sell stock, one transaction → unlimited → at most two), chosen for the *continuity*: all three
+   share one DP skeleton, so the third turn genuinely benefits from the first two and the relevance path has
+   something real to score - and each turn keeps the earlier answers untouched and adds a new section, under a
+   length cap (code ≤ 40 lines, rationale ≤ 6 bullets), because a round that spends fifteen minutes rendering a
+   27 KB HTML animation measures the model's stamina rather than the mechanism. That fixture is ASCII-escaped
+   (`\uXXXX`): the stimuli are Chinese and no repository file may contain Chinese, so the escapes are how the exact
+   recorded code points stay exact. The **workspace itself is not reconfigured** — the session's workspace is part
+   of what the experiment observes, so narrowing it per round would change the thing under study. For a writing
+   round, the salt does *not* hide the other rounds: they are still inside the workspace, so move a finished
+   round's directory out once its evidence is collected. The artifacts from before this rule live in
+   `260930164900/` (a timestamp, from when the rule was a timestamp).
 
 ## 5. Verify everything right now
 
