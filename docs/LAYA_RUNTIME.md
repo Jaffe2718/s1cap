@@ -154,6 +154,53 @@ Read from the installed `laya/serve.py`, not from documentation:
 Still open: GPU/CPU device behaviour on the target machine (`LAYA_DEVICE`), and whether future
 releases add CLI arguments.
 
+## 6b. Admission control under load (measured 2026-10-01)
+
+The 503s a four-cell run produces are **not** a compute shortage. `laya/serve.py` admits like this:
+
+```python
+if admission.locked():                     # every one of LAYA_MAX_CONCURRENT slots taken
+    raise HTTPException(503, "server busy, try again later", headers={"Retry-After": "1"})
+await admission.acquire()
+```
+
+It is a *non-blocking* level check: excess load is refused the moment the semaphore is full, never queued, so
+any burst above the cap loses its tail instantly. Measured against the running server, with a payload shaped like
+real traffic (a ~3 k-token state and three `noul` questions):
+
+| in-flight | default cap 16 | cap 64 |
+|---|---|---|
+| 8 | 8 ok, p50 2.0 s | 8 ok, p50 2.7 s |
+| 16 | 16 ok, p50 3.5 s | 16 ok, p50 3.5 s |
+| 24 | **16 ok / 8 × 503** | 24 ok, p50 4.9 s |
+| 32 | 16 ok / 16 × 503 | 32 ok, p50 6.4 s |
+| 48 | 16 ok / 32 × 503 | 48 ok, p50 10.5 s |
+| 64 | 16 ok / 48 × 503 | 64 ok, p50 **22.4 s** (p95 49 s) |
+| 128 | — | 64 ok / 64 × 503 |
+
+Two conclusions, and they point opposite ways from the obvious fix:
+
+- **Raising `LAYA_MAX_CONCURRENT` trades 503s for latency, and buys no throughput.** Throughput peaks at an
+  in-flight count of roughly 16–32 and *falls* beyond it; at 64 the median is 22 s and the 95th percentile is
+  49 s, which the client's `S1_TRANSPORT_TIMEOUT_MS = 30_000` guard turns straight back into `S1TimeoutError`.
+  A bigger cap does not make more System-1 available; it moves the loss from the server to the client.
+- **The shedding is a burst artifact, not a capacity shortage.** In round `20261001-1300` the four cells issued
+  1 880 calls over ~20 minutes — about 1.6 calls/s against a server that sustains several times that — yet 732 of
+  them (39%) came back 503 and 126 more hit the 30 s guard. The average was far under capacity; the *instantaneous*
+  bursts were far over it, and this server refuses rather than smooths.
+
+So the fix belongs on the client side of the deadline, not in the cap:
+
+- **Let the excess wait.** Either a bounded retry that honours `Retry-After: 1` (two attempts is enough for a
+  1 s turnover) with `attempts` and `waitedMs` recorded in the `s1_call` record, or a small local queue in front
+  of Laya holding in-flight at 16–32 and queueing the rest. Both convert a lost judgement into a slower one.
+- **Cut the fragmentation.** `s1.questionsPerCall: 20` is not what happens: measured calls carry **1–3 questions**
+  (`questions` field of the `s1_call` records). More questions per request means fewer, larger bursts — the
+  cheapest reduction in peak in-flight available.
+
+Neither is a substitute for reporting coverage: a cell whose calls were 39% refused is not a cell that received
+its configured System-1 governance, and `judgedPairs / scoredPairs` is the number that says so.
+
 ## 7. Tests
 
 `packages/laya-runtime/test` covers, offline and with injected fakes: conda JSON parsing
