@@ -22,7 +22,7 @@ test('no config means the defaults, and every documented path exists on the poli
 
 test('valid overrides are applied, nested sections included', () => {
   const result = validatePolicy({
-    cell: 'C2',
+    cell: 'C1',
     assemblyDeadlineMs: 500,
     rgMaintenance: { mode: 'async', maxLagTurns: 5 },
     cache: { reselectPolicy: 'threshold', blockTokens: 128 },
@@ -34,7 +34,7 @@ test('valid overrides are applied, nested sections included', () => {
     telemetry: { sessionJsonl: 'a.jsonl', controlJsonl: 'b.jsonl' },
   });
   assert.equal(result.ok, true, JSON.stringify(result.errors));
-  assert.equal(result.policy.cell, 'C2');
+  assert.equal(result.policy.cell, 'C1');
   assert.equal(result.policy.assemblyDeadlineMs, 500);
   assert.equal(result.policy.rgMaintenance.maxLagTurns, 5);
   assert.equal(result.policy.cache.reselectPolicy, 'threshold');
@@ -155,7 +155,7 @@ test('unknown keys warn instead of failing, and plugin keys can be declared', ()
 });
 
 test('non-object config is an error, and the rule tables stay coherent', () => {
-  assert.equal(validatePolicy('C4').ok, false);
+  assert.equal(validatePolicy('C2').ok, false);
   assert.equal(validatePolicy([]).ok, false);
   for (const rule of NUMBER_RULES) {
     assert.ok(rule.min < rule.max, `${rule.path}: min must be below max`);
@@ -164,14 +164,16 @@ test('non-object config is an error, and the rule tables stay coherent', () => {
 });
 
 test('recall selection without the state proxy warns: that pairing measured worse than the baseline, per step', () => {
-  // C3 is the combination, and it is reachable by naming one cell - which is exactly why it needs a warning
-  // rather than a paragraph in a run report. Measured in round `20261001-1300`, per step: 3 625 uncached input
-  // tokens against the baseline's 2 595, 2 574 output tokens against 1 523, and a 79.2% cache hit rate against
-  // 86.7%; TAS on with recall off (C2) measured 1 783 uncached input tokens and 1 493 output tokens per step.
-  const c3 = validatePolicy({ cell: 'C3' });
-  assert.equal(c3.ok, true, 'a warning and never an error: a session must not fail over a combination');
-  const warning = c3.warnings.find((issue) => issue.path === 'recall.tier1');
-  assert.notEqual(warning, undefined, `the pairing must be reported: ${JSON.stringify(c3.issues)}`);
+  // The pairing is `tas.on: false` with `recall.tier1: 'embed'`, and no cell selects it - the arm that did was
+  // dropped - so reaching it now takes two explicit knobs. That is exactly why it needs a warning rather than a
+  // paragraph in a run report: a combination no preset chooses is one a profile must not choose by accident.
+  // Measured in round `20261001-1300`, per step: 3 625 uncached input tokens against the baseline's 2 595,
+  // 2 574 output tokens against 1 523, and a 79.2% cache hit rate against 86.7%; TAS on with recall off (cell C1)
+  // measured 1 783 uncached input tokens and 1 493 output tokens per step.
+  const pairing = validatePolicy({ tas: { on: false }, recall: { tier1: 'embed' } });
+  assert.equal(pairing.ok, true, 'a warning and never an error: a session must not fail over a combination');
+  const warning = pairing.warnings.find((issue) => issue.path === 'recall.tier1');
+  assert.notEqual(warning, undefined, `the pairing must be reported: ${JSON.stringify(pairing.issues)}`);
   // Both sides of both pairs, because a warning that says "this is worse" and not "worse by how much" is the
   // kind of claim this project keeps having to retract.
   for (const [what, needle] of [
@@ -189,29 +191,33 @@ test('recall selection without the state proxy warns: that pairing measured wors
   // And the quantities are the whole of it: a warning reasoned from a price-weighted share of a bill is a
   // statement about a price list, and the three token types carry three prices that differ by model and provider.
   assert.equal(/\$|USD|bill|cost|price/i.test(warning.message), false, `no currency or price scalar: ${warning.message}`);
-  assert.equal(c3.policy.tas.on, false, 'and nothing is changed: the warning is advice, not a correction');
-  assert.equal(c3.policy.recall.tier1, 'embed', 'the configured tier is kept as written');
+  assert.equal(pairing.policy.tas.on, false, 'and nothing is changed: the warning is advice, not a correction');
+  assert.equal(pairing.policy.recall.tier1, 'embed', 'the configured tier is kept as written');
 
-  // Absent in the other three cells, and it is the *pairing* that decides - not "S1CAP is on" and not the cell
+  // Absent in all three cells, and it is the *pairing* that decides - not "S1CAP is on" and not the cell
   // name. A rule written against the cell would be a rule about a preset rather than about the mechanism.
-  assert.deepEqual(validatePolicy({ cell: 'C1' }).warnings, [], 'both halves off: the baseline is not the pairing');
-  assert.deepEqual(validatePolicy({ cell: 'C2' }).warnings, [], 'the stabiliser with recall off is the counterpart, not the pairing');
-  assert.deepEqual(validatePolicy({ cell: 'C4' }).warnings, [], "the project's own configuration runs both halves and is silent");
+  assert.deepEqual(validatePolicy({ cell: 'C0' }).warnings, [], 'both halves off: the baseline is not the pairing');
+  assert.deepEqual(validatePolicy({ cell: 'C1' }).warnings, [], 'the stabiliser with recall off is the counterpart, not the pairing');
+  assert.deepEqual(validatePolicy({ cell: 'C2' }).warnings, [], "the project's own configuration runs both halves and is silent");
 
   // And it follows the effective policy, so an override creates or removes it wherever the value came from.
-  assert.deepEqual(validatePolicy({ cell: 'C3', tas: { on: true } }).warnings, [], 'turning the stabiliser on fixes the pairing');
+  assert.deepEqual(
+    validatePolicy({ tas: { on: true }, recall: { tier1: 'embed' } }).warnings,
+    [],
+    'turning the stabiliser on fixes the pairing',
+  );
   assert.equal(
-    validatePolicy({ cell: 'C1', recall: { tier1: 's1' } }).warnings[0]?.path,
+    validatePolicy({ cell: 'C0', recall: { tier1: 's1' } }).warnings[0]?.path,
     'recall.tier1',
     'turning recall on inside the baseline creates it, even though the baseline itself is silent',
   );
   assert.equal(
-    validatePolicy({ cell: 'C4', tas: { on: false } }).warnings.filter((i) => i.path === 'recall.tier1').length,
+    validatePolicy({ cell: 'C2', tas: { on: false } }).warnings.filter((i) => i.path === 'recall.tier1').length,
     1,
     'and turning the stabiliser off inside the full configuration creates it too',
   );
   assert.deepEqual(
-    validatePolicy({ cell: 'C2', recall: { tier1: 's1' } }).warnings,
+    validatePolicy({ cell: 'C1', recall: { tier1: 's1' } }).warnings,
     [],
     'while the same recall tier inside a cell that keeps tas.on is the pairing this warning is not about',
   );

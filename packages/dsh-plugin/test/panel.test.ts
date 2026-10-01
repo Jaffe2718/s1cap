@@ -226,7 +226,7 @@ function stubFetch(state: { calls: { method: string; body: string }[]; provider:
         stored: {},
         effective,
         status: {
-          cell: 'C4',
+          cell: 'C2',
           s1: {
             provider: state.provider,
             configuredProvider: state.provider,
@@ -338,13 +338,13 @@ test('the Off text says what Off does and does not do, because "Off" reads as "n
     const text = textOf(backendBlocks(panel.view())[2]);
     // Each of these is a way a researcher could be misled by the word "Off" alone, measured against the code:
     // with no client the relevance scorer answers `undefined` (`s1-relevance.ts`) and the graph keeps the lexical
-    // edges `lexicalScore` wrote; recall selection is `recall.tier1`, which the cell preset decides — C1/C2 set it
-    // to 'off' (`cellPolicy`, `assembler.ts`: an empty recalled block), so Off inside C3/C4 is not a cell.
+    // edges `lexicalScore` wrote; recall selection is `recall.tier1`, which the cell preset decides — C0/C1 set it
+    // to 'off' (`cellPolicy`, `assembler.ts`: an empty recalled block), so Off inside C2 is not a cell.
     assert.match(text, /lexical/, 'it says the fallback scorer takes over');
     assert.match(text, /association graph keeps growing/, 'and that the graph keeps being built');
     assert.match(text, /recall selection/, 'it names recall selection as the thing Off does not decide');
     assert.match(text, /cellPolicy/, 'and names the place that does decide it');
-    assert.match(text, /not C1/, 'and states the conclusion a reader must not have to infer');
+    assert.match(text, /not C0/, 'and states the conclusion a reader must not have to infer');
   } finally {
     panel.restore();
   }

@@ -78,7 +78,7 @@ function recallTreeOf(anchorId: string, hits: readonly RecallHit[]): Record<stri
 /**
  * Assemble one model-view context.
  *
- * Note: with `recall.tier1 === 'off'` (cells C1/C2) the recalled block is empty by
+ * Note: with `recall.tier1 === 'off'` (cells C0/C1) the recalled block is empty by
  * design — those cells let the harness manage history natively.
  */
 export function assemble(input: AssembleInput): AssemblyResult {

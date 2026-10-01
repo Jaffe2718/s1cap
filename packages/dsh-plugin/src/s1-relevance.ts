@@ -14,11 +14,11 @@
  * A new segment s_j is paired with each of the `w` segments before it, and every one of those questions is
  * new: the graph scores each segment exactly once, in arrival order, so no pair it has already judged is asked
  * again - not within a session, and not after a restart, because the snapshot carries the `scored` cursor and
- * the `scores` map (`assoc-graph.ts`). Round `20261001-1300` confirms the arithmetic to the pair: the four
- * cells offered 6 670, 4 278, 3 321 and 22 791 pairs for 116, 93, 82 and 214 segments, which is T(T-1)/2 in
+ * the `scores` map (`assoc-graph.ts`). Round `20261001-1300` confirms the arithmetic to the pair: the four cells
+ * of that round offered 6 670, 4 278, 3 321 and 22 791 pairs for 116, 93, 82 and 214 segments, which is T(T-1)/2 in
  * every one of them, and each graph recorded exactly that many *distinct* pairs. One pair fewer than offered
  * would have meant a pair asked twice, because `scores` is keyed by pair; none of the four cells shows it. The
- * call count is that number divided by this cap, so C4's 22 791 pairs at 20 questions per call are the 1 155
+ * call count is that number divided by this cap, so C2's 22 791 pairs at 20 questions per call are the 1 155
  * calls it made (807 answered, 282 `503 server busy`, 66 at the 30 s transport guard).
  *
  * What follows for the window, and it is the part a reader should take away: `recall.window = w` is the only

@@ -197,7 +197,7 @@ export async function observeStep(
   // the direction was backwards, and the cost has now been measured. The graph IS a superset — which means
   // using the *payload* is the lossy choice, not the graph. At a turn-opening step the payload holds exactly one
   // new user message, so the pool is that message, `history` is empty, and there is nothing for relevance to
-  // select: a live C4 run delivered the state proxy on 4 steps, every one of them with `blocks.recalled = 0`,
+  // select: a live C2 run delivered the state proxy on 4 steps, every one of them with `blocks.recalled = 0`,
   // while the five steps that did have history (836 to 5243 tokens of it) were the steps the harness claims
   // nothing for — and an empty `decision.messages` means no request is made at all. Recall and delivery fired on
   // disjoint steps.

@@ -462,7 +462,7 @@ test('the scorer is the returned value itself, not a method hanging off it', asy
 });
 
 test('a growing session costs the new pairs and nothing else, so the call count is T(T-1)/2 over the cap', async () => {
-  // The measurement this pins, from round `20261001-1300`: C4 offered 22 791 pairs for its 214 segments, exactly
+  // The measurement this pins, from round `20261001-1300`: C2 offered 22 791 pairs for its 214 segments, exactly
   // T(T-1)/2, and made 1 155 calls at 20 questions per call. The suspicion that motivated the check was that the
   // whole window is re-scored at every arrival, which would make the question count grow faster than T(T-1)/2.
   // It does not: the graph's cursor scores each segment once, so a pair is asked once. The test drives the real
@@ -492,7 +492,7 @@ test('a growing session costs the new pairs and nothing else, so the call count 
 
   for (let i = 0; i < total; i += 1) {
     graph.addSegments([segment(`s${i}`, `text ${i}`)]);
-    // `w` wider than the session, which is the measured shape: C4 ran at w = 1024 against 214 segments.
+    // `w` wider than the session, which is the measured shape: C2 ran at w = 1024 against 214 segments.
     await graph.scoreNew({ windowN: 1024, threshold: 0.55, scoreBatch: relevance });
   }
 

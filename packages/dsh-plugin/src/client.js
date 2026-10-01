@@ -606,10 +606,10 @@ window.__ModuleLoader__.load({
          * The Off choice's own block — the only one with no fields, and the only one whose meaning cannot be read
          * off its label.
          *
-         * The text is load-bearing rather than decorative. A researcher who reads "Off" as "the C1 baseline" then
+         * The text is load-bearing rather than decorative. A researcher who reads "Off" as "the C0 baseline" then
          * measures something other than what they think: recall selection is decided by the cell preset
-         * (`cellPolicy`), not by this radio, and C1/C2 are the cells that switch it off (`recall.tier1 = 'off'`,
-         * which leaves the recalled block empty). Off inside a C3/C4 profile leaves recall selecting — from lexical
+         * (`cellPolicy`), not by this radio, and C0/C1 are the cells that switch it off (`recall.tier1 = 'off'`,
+         * which leaves the recalled block empty). Off inside a C2 profile leaves recall selecting — from lexical
          * edges, because with no client there is no System-1 judgement to score them with.
          */
         const offGroup = e(
@@ -621,9 +621,9 @@ window.__ModuleLoader__.load({
             'Off writes provider=none: no System-1 judgement happens at all, so relevance scoring falls back to the ' +
               'lexical scorer (shared tokens over the two segments) and the association graph keeps growing on ' +
               'lexical edges only. It does not turn recall selection off — which blocks recall may select is the ' +
-              'cell preset\u2019s decision (`cellPolicy` in @s1cap/core), and C1/C2 are the cells that disable it ' +
-              '(`recall.tier1 = \'off\'`, so their recalled block is empty). Off inside a C3/C4 profile is therefore ' +
-              '"no System-1, recall still selecting", which is not a cell: Off means no System-1, not C1. Both save ' +
+              'cell preset\u2019s decision (`cellPolicy` in @s1cap/core), and C0/C1 are the cells that disable it ' +
+              '(`recall.tier1 = \'off\'`, so their recalled block is empty). Off inside a C2 profile is therefore ' +
+              '"no System-1, recall still selecting", which is not a cell: Off means no System-1, not C0. Both save ' +
               'buttons carry the selection.',
           ),
         );

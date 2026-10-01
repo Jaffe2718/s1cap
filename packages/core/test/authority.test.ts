@@ -6,7 +6,7 @@ import { validatePolicy } from '../src/config.ts';
 import type { Cell } from '../src/types.ts';
 import { AttemptController, orderPlans } from '../src/plan-gate.ts';
 
-const CELLS: Cell[] = ['C1', 'C2', 'C3', 'C4'];
+const CELLS: Cell[] = ['C0', 'C1', 'C2'];
 
 test('the loop is model-owned and the hook is bounded, in every cell (policy literals)', () => {
   const p = defaultPolicy();
@@ -25,24 +25,27 @@ test('the loop is model-owned and the hook is bounded, in every cell (policy lit
 /**
  * The ablation has to be able to say what it measured.
  *
- * `xFirst` was left at the policy default in all four cells, so C1 and C3 - the two chronological cells - carried
- * the same position intervention as C2 and C4, the two ordered ones. The layout axis was therefore constant
- * across the whole 2x2 and no table could have attributed anything to it, which is invisible from the presets
- * alone: each cell looked individually correct.
+ * `xFirst` was left at the policy default in every cell, so C0 - the one chronological cell - carried the same
+ * position intervention as C1 and C2, the two ordered ones. The layout axis was therefore constant across the
+ * whole scheme and no table could have attributed anything to it, which is invisible from the presets alone:
+ * each cell looked individually correct.
  */
 test('the layout axis actually varies across the ablation, in the direction the cells are named for', () => {
-  const chronological: Cell[] = ['C1', 'C3'];
-  const ordered: Cell[] = ['C2', 'C4'];
+  const chronological: Cell[] = ['C0'];
+  const ordered: Cell[] = ['C1', 'C2'];
   for (const cell of chronological) {
     assert.equal(cellPolicy(cell).xFirst, false, `${cell} is a chronological cell: x belongs after the recalled block`);
   }
   for (const cell of ordered) {
     assert.equal(cellPolicy(cell).xFirst, true, `${cell} is an ordering cell: x-first is the intervention`);
   }
-  // And the two factors stay orthogonal: within each layout, the other axis still varies.
-  assert.equal(cellPolicy('C1').recall.tier1 !== cellPolicy('C3').recall.tier1, true, 'tier1 varies within the chronological pair');
-  assert.equal(cellPolicy('C2').tas.on !== cellPolicy('C4').tas.on, false, 'C2 and C4 both order by TAS');
-  assert.equal(cellPolicy('C2').planGate.on !== cellPolicy('C4').planGate.on, true, 'the gate varies within the ordered pair');
+  // And the factors stay orthogonal: the two ordered cells share the TAS half, so what separates them is S1
+  // governance, and the baseline has neither half on.
+  assert.equal(cellPolicy('C1').tas.on !== cellPolicy('C2').tas.on, false, 'C1 and C2 both order by TAS');
+  assert.equal(cellPolicy('C1').planGate.on !== cellPolicy('C2').planGate.on, true, 'the gate varies within the ordered pair');
+  assert.equal(cellPolicy('C1').recall.tier1 !== cellPolicy('C2').recall.tier1, true, 'and so does recall selection');
+  assert.equal(cellPolicy('C0').tas.on, false, 'while the baseline orders nothing');
+  assert.equal(cellPolicy('C0').planGate.on, false, 'and gates nothing');
 });
 
 test('every cell leaves the assembled layout readable, whichever side x lands on', () => {
@@ -58,46 +61,49 @@ test('every cell leaves the assembled layout readable, whichever side x lands on
  * worse than a cell that does not exist: it looks configured.
  *
  * `deliver` was added to `AssemblyPolicy` and to `cellPolicy` in the N6 commit, and to neither `BOOLEAN_PATHS`
- * nor the runtime's base policy. A live C4 session then reported `policy.deliver is off` on all twelve steps,
+ * nor the runtime's base policy. A live C2 session then reported `policy.deliver is off` on all twelve steps,
  * with 8 of 12 assemblies carrying a non-empty recalled block: the content was assembled, delivered nowhere, and
  * the record only said "off" because the cell name in the log is the cell *asked for*, not the policy that ran.
  */
 test('a cell preset is what the runtime actually starts from, and an override still wins', () => {
-  // C1 is the baseline: no TAS, no selection, no gate, chronological, and it delivers nothing.
+  // C0 is the baseline: no TAS, no selection, no gate, chronological, and it delivers nothing.
+  const c0 = validatePolicy({ cell: 'C0' });
+  assert.equal(c0.ok, true, JSON.stringify(c0.errors));
+  assert.equal(c0.policy.tas.on, false, 'C0 must not order by TAS');
+  assert.equal(c0.policy.recall.tier1, 'off', 'C0 must not select');
+  assert.equal(c0.policy.planGate.on, false, 'C0 has no gate');
+  assert.equal(c0.policy.xFirst, false, 'C0 is chronological');
+  assert.equal(c0.policy.deliver, false, 'C0 is the only cell that leaves history to the harness');
+
+  // C1 is TAS alone: it orders and delivers, and neither half of S1 governance runs.
   const c1 = validatePolicy({ cell: 'C1' });
   assert.equal(c1.ok, true, JSON.stringify(c1.errors));
-  assert.equal(c1.policy.tas.on, false, 'C1 must not order by TAS');
+  assert.equal(c1.policy.tas.on, true, 'C1 orders by TAS');
   assert.equal(c1.policy.recall.tier1, 'off', 'C1 must not select');
   assert.equal(c1.policy.planGate.on, false, 'C1 has no gate');
-  assert.equal(c1.policy.xFirst, false, 'C1 is chronological');
-  assert.equal(c1.policy.deliver, false, 'C1 is the only cell that leaves history to the harness');
 
-  // C3 is the arm that must be able to say "S1 governance only".
-  const c3 = validatePolicy({ cell: 'C3' });
-  assert.equal(c3.policy.recall.tier1, 'embed', 'C3 selects');
-  assert.equal(c3.policy.planGate.on, true, 'C3 gates');
-  assert.equal(c3.policy.tas.on, false, 'C3 does not order by TAS');
-  assert.equal(c3.policy.xFirst, false, 'C3 is chronological');
-  assert.equal(c3.policy.deliver, true, 'and it delivers what it selected, or it measures nothing');
-
-  // C2/C4: ordered, and delivering.
-  for (const cell of ['C2', 'C4'] as Cell[]) {
+  // C1/C2: ordered, and delivering. C2 additionally runs both halves of S1 governance, and it is the contrast
+  // C1 has to beat.
+  for (const cell of ['C1', 'C2'] as Cell[]) {
     const p = validatePolicy({ cell }).policy;
     assert.equal(p.tas.on, true, `${cell} orders by TAS`);
     assert.equal(p.xFirst, true, `${cell} is x-first`);
     assert.equal(p.deliver, true, `${cell} delivers`);
   }
+  const c2 = validatePolicy({ cell: 'C2' }).policy;
+  assert.equal(c2.recall.tier1, 'embed', 'C2 selects');
+  assert.equal(c2.planGate.on, true, 'C2 gates');
 
   // Precedence: the cell is the base, an explicit knob in the patch is the deviation, and it wins.
-  const deviated = validatePolicy({ cell: 'C3', deliver: false, xFirst: true });
-  assert.equal(deviated.policy.deliver, false, 'a patch may turn delivery off on purpose');
+  const deviated = validatePolicy({ cell: 'C0', deliver: true, xFirst: true });
+  assert.equal(deviated.policy.deliver, true, 'a patch may turn delivery on for a cell that leaves it off');
   assert.equal(deviated.policy.xFirst, true, 'and may reorder a cell it disagrees with');
-  assert.equal(deviated.policy.recall.tier1, 'embed', 'while the rest of the cell still applies');
+  assert.equal(deviated.policy.recall.tier1, 'off', 'while the rest of the cell still applies');
 
-  // A cell that is not a cell is an error, and falls back to C4 rather than to half a cell.
+  // A cell that is not a cell is an error, and falls back to C2 rather than to half a cell.
   const bogus = validatePolicy({ cell: 'C9' });
   assert.equal(bogus.ok, false);
-  assert.equal(bogus.policy.cell, 'C4', 'an unusable cell name costs the C4 defaults, not a partial cell');
+  assert.equal(bogus.policy.cell, 'C2', 'an unusable cell name costs the C2 defaults, not a partial cell');
 });
 
 test('the gate never invents a plan: an empty model plan list stays empty', () => {  const decision = orderPlans([], [], 0.5);

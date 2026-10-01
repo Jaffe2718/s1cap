@@ -84,7 +84,7 @@ function preStep(observer: StepObserver, overrides: Partial<PreStepOptions> = {}
     emitted,
     middleware: preStepMiddleware(harness().ctx, {
       observer,
-      cell: 'C4',
+      cell: 'C2',
       emit: (event) => emitted.push(event as never),
       deliver: () => SKIPPED,
       ...overrides,

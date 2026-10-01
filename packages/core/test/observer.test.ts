@@ -3,7 +3,7 @@
  *
  * These tests pin the two properties the milestone rests on — the observation is *deterministic* (so a
  * replay can be compared field by field) and *non-mutating* (so running it against a live session cannot
- * change what the model sees) — plus the adapter's translation table and the C1/C4 ablation behaviour.
+ * change what the model sees) — plus the adapter's translation table and the C0/C2 ablation behaviour.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -125,30 +125,30 @@ test('a message with no text is reported as empty, and an unknown part keeps its
   assert.ok(imageSegment!.text.length < 2100, 'raw payloads stay bounded');
 });
 
-test('the control-plane record carries the frozen schema and the full C1/C4 contrast', async () => {
-  const c4 = (await run()).observation;
-  assert.equal(c4.event.type, 'assembly');
-  assert.equal(c4.event.schema, TELEMETRY_SCHEMA_VERSION);
-  assert.equal(c4.event.seq, BASE.seq);
-  assert.deepEqual(Object.keys(c4.event.blocks).sort(), ['anchor', 'pinned', 'recalled', 'stateProxy', 'tail']);
-  assert.ok(c4.event.budgetUsed <= c4.event.budgetTotal);
-  assert.equal(c4.event.prefixTokensStable, c4.event.blocks['pinned'], 'the cache-stable prefix is the pinned block');
+test('the control-plane record carries the frozen schema and the full C0/C2 contrast', async () => {
+  const c2 = (await run()).observation;
+  assert.equal(c2.event.type, 'assembly');
+  assert.equal(c2.event.schema, TELEMETRY_SCHEMA_VERSION);
+  assert.equal(c2.event.seq, BASE.seq);
+  assert.deepEqual(Object.keys(c2.event.blocks).sort(), ['anchor', 'pinned', 'recalled', 'stateProxy', 'tail']);
+  assert.ok(c2.event.budgetUsed <= c2.event.budgetTotal);
+  assert.equal(c2.event.prefixTokensStable, c2.event.blocks['pinned'], 'the cache-stable prefix is the pinned block');
 
-  // C1 is the baseline cell: no System-1 selection at all, so nothing is recalled.
-  const c1Policy = cellPolicy('C1');
+  // C0 is the baseline cell: no System-1 selection at all, so nothing is recalled.
+  const c0Policy = cellPolicy('C0');
   const graph = new AssociationGraph();
-  const c1 = await observeStep({ ...BASE, policy: c1Policy, graph });
-  assert.equal(c1.event.selected, 0);
-  assert.deepEqual(c1.selectedIds, []);
-  assert.equal(c1.event.candidates, 0);
+  const c0 = await observeStep({ ...BASE, policy: c0Policy, graph });
+  assert.equal(c0.event.selected, 0);
+  assert.deepEqual(c0.selectedIds, []);
+  assert.equal(c0.event.candidates, 0);
 
-  // C4 still respects the budget it is given.
-  assert.ok(c4.event.budgetUsed <= c4.event.budgetTotal);
-  assert.ok(c4.wouldSaveTokens >= 0);
+  // C2 still respects the budget it is given.
+  assert.ok(c2.event.budgetUsed <= c2.event.budgetTotal);
+  assert.ok(c2.wouldSaveTokens >= 0);
 });
 
 test('the graph accumulates across steps, so a later step can recall an earlier one', async () => {
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   const graph = new AssociationGraph();
   const first = await observeStep({ ...BASE, policy, graph, messages: MESSAGES.slice(0, 2), step: 1 });
   const second = await observeStep({ ...BASE, policy, graph, step: 2 });
@@ -165,7 +165,7 @@ test('the tail block holds the newest turns, including the output produced after
   // and `tail` was empty in every real record - the k most recent verbatim turns were never in the prompt.
   // Exercised through the graph-window path (empty payload) because that is what production takes: `pre-step`
   // hands over an empty array after the first step.
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   policy.tail.k = 3;
   const graph = new AssociationGraph();
   // Seed the graph the way upkeep would: the anchor first, then the turns produced for it.
@@ -202,7 +202,7 @@ test('the tail block holds the newest turns, including the output produced after
  * reads it as part of the transcript either way. What is excluded is its use as a *recall candidate*.
  */
 test('a delivered block is never ingested, never recalled, and never in the token baseline', async () => {
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   policy.tail.k = 2;
   const graph = new AssociationGraph();
   await observeStep({ ...BASE, policy, graph, messages: MESSAGES, step: 1 });
@@ -250,7 +250,7 @@ test('a delivered block is never ingested, never recalled, and never in the toke
  * for a walk that found something and for one that found nothing.
  */
 test('the assembly record carries the recall walk as a nested tree of ids', async () => {
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   policy.tail.k = 1; // a2 is a tail turn, so it cannot also be a recalled one - it is still in the tree
   const graph = new AssociationGraph();
   const at = BASE.now;
@@ -291,7 +291,7 @@ test('the assembly record carries the recall walk as a nested tree of ids', asyn
 });
 
 test('a step whose recall found nothing records recallTree as {}, not as a missing field', async () => {
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   const graph = new AssociationGraph();
   graph.addSegments([
     {
@@ -324,7 +324,7 @@ test('a step whose recall found nothing records recallTree as {}, not as a missi
  * called, that it is called with the anchor's own id, and that it happens before `assemble()` reads the graph.
  */
 test('observeStep offers the anchor id to beforeAssemble, and only after the anchor is chosen', async () => {
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   const graph = new AssociationGraph();
   const seen: string[] = [];
   // The hook is called with the anchor's id *and* with the anchor already in the graph, which is what makes the
@@ -348,7 +348,7 @@ test('observeStep offers the anchor id to beforeAssemble, and only after the anc
 });
 
 test('a throwing beforeAssemble costs the wait, never the step or the observation', async () => {
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   const graph = new AssociationGraph();
   const observation = await observeStep({
     ...BASE,
@@ -370,7 +370,7 @@ test('a throwing beforeAssemble costs the wait, never the step or the observatio
 });
 
 test('a rejecting beforeAssemble is contained too: it is awaited, not left to reject the promise', async () => {
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   const graph = new AssociationGraph();
   const observation = await observeStep({
     ...BASE,
@@ -388,7 +388,7 @@ test('a rejecting beforeAssemble is contained too: it is awaited, not left to re
 test('a delivered block arriving on the session-event stream is dropped at ingestion', async () => {
   // The path production takes: upkeep folds the session-event stream into the graph, so the delivered message
   // comes back as a RawEvent rather than being added by hand. The ingestion gate is what keeps it out.
-  const policy = cellPolicy('C4');
+  const policy = cellPolicy('C2');
   const graph = new AssociationGraph();
   const obs = await observeStep({
     ...BASE,

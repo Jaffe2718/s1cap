@@ -1,0 +1,21 @@
+{
+  "_meta": {
+    "runSet": true,
+    "role": "baseline: chronological append, the harness manages history natively",
+    "status": "run set for the next round (C0, C1, C2)",
+    "note": "TAS off, recall selection off, plan gate off, chronological layout, and nothing delivered: the assembled layout is recorded, not injected. `xFirst: false` and `deliver: false` come from `cellPolicy('C0')` (packages/core/src/types.ts) and are not repeated here, because a value in this file would silently override the cell.",
+    "providerNone": "`s1.provider: none` because this arm is the no-System-1 control: `recall.tier1: 'off'` disables recall *selection* but association-graph upkeep is not gated on it, so without this key the arm still scores pairs and reports System-1 calls - 363 of them (134 answered, 229 refused) in round 20261001-1300 - and a no-System-1 control has to have the lane absent rather than merely unscoped, reporting zero System-1 calls, tokens and time. Run recipe: a live profile must pair `s1.provider: none` with `laya.enabled: false`, because `laya.enabled: true` beside `provider: none` is a reported conflict (`singleBackendIssues`, packages/s1-client/src/resolve.ts); `laya` is a profile key and is deliberately not carried by this preset."
+  },
+  "cell": "C0",
+  "tas": { "on": false, "tMaxChars": 8000, "updatePolicy": "perTask" },
+  "recall": {
+    "threshold": 0.55,
+    "depth": 2,
+    "fanout": 8,
+    "tier1": "off",
+    "budgetRatio": 0.35
+  },
+  "tail": { "k": 3 },
+  "planGate": { "on": false, "maxPlans": 3, "attemptCap": 2, "abstainConfidence": 0.5 },
+  "s1": { "provider": "none", "questionsPerCall": 20 }
+}

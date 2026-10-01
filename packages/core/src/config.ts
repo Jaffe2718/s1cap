@@ -27,7 +27,7 @@ export interface ValidationResult {
   policy: AssemblyPolicy;
 }
 
-const CELLS: readonly Cell[] = ['C1', 'C2', 'C3', 'C4'];
+const CELLS: readonly Cell[] = ['C0', 'C1', 'C2'];
 
 interface NumberRule {
   path: string;
@@ -80,7 +80,7 @@ export const ENUM_RULES: readonly { path: string; values: readonly string[] }[] 
  * Boolean policy paths a profile patch may set.
  *
  * `deliver` is here for a measured reason. It was added to the policy in the N6 commit and *not* here, and a
- * live run then reported `policy.deliver is off` on all twelve steps of a session whose cell was C4 — with 8 of
+ * live run then reported `policy.deliver is off` on all twelve steps of a session whose cell was C2 — with 8 of
  * 12 assemblies carrying a non-empty recalled block and 12 of 12 carrying a state proxy. The content was there and
  * the switch was off, because a knob missing from this list is not read from the cell preset, cannot be set
  * from a profile, and is reported as an unknown path. A flag that exists in the type and in the cell, and in
@@ -165,13 +165,13 @@ function looksLikeUrl(value: string): boolean {
  * @param extraAllowedKeys plugin-level keys that are not policy fields (e.g. `laya`)
  */
 /**
- * The starting policy for a raw config: the cell preset when the config names a real cell, else C4.
+ * The starting policy for a raw config: the cell preset when the config names a real cell, else C2.
  *
  * This was `defaultPolicy()` unconditionally, and that is a measurement bug, not a style choice. `defaultPolicy`
- * *is* C4, and `cellPolicy()` was called from tests only — so a profile patched to `cell: C1` ran C4's TAS,
- * tier1, plan gate and x-first layout while `/s1` reported the cell as C1. Nothing in the log said so, because
+ * *is* C2, and `cellPolicy()` was called from tests only — so a profile patched to `cell: C0` ran C2's TAS,
+ * tier1, plan gate and x-first layout while `/s1` reported the cell as C0. Nothing in the log said so, because
  * the record carries the cell name, not the policy that ran. A live run of this exact mistake is in N6: twelve
- * steps of a C4 session all reported `policy.deliver is off` because `deliver` had been added to the policy and
+ * steps of a C2 session all reported `policy.deliver is off` because `deliver` had been added to the policy and
  * to `cellPolicy`, but the runtime never consulted the cell.
  *
  * Precedence, unchanged and already the documented rule: cell preset < explicit config in the profile patch.
@@ -231,7 +231,7 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
     if (!present(source, rule.path)) continue;
     const value = getPath(source, rule.path);
     // The value must be a real cell; the preset itself was already applied by basePolicyFor() before this
-    // function looked at any override, so a bad value costs an error and falls back to C4 rather than a
+    // function looked at any override, so a bad value costs an error and falls back to C2 rather than a
     // half-applied cell.
     if (typeof value !== 'string' || !rule.values.includes(value)) {
       issues.push({
@@ -290,15 +290,17 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
     setPath(target, path, value);
   }
 
-  // The pairing a measured round found to be the worst of the four, warned about and never rejected.
+  // The pairing a measured round found to be the worst of the four arms it ran, warned about and never rejected.
   //
-  // C3 is `tas.on: false` with `recall.tier1: 'embed'`: recall selection running without the state proxy that
-  // keeps the head of the prompt byte-stable. Round `20261001-1300` measured that cell per step at 3 625 uncached
-  // input tokens against the baseline's 2 595, 2 574 output tokens against 1 523 and a 79.2% cache hit rate against
-  // 86.7%; its counterpart - the stabiliser on with recall off (C2) - measured 1 783 uncached input tokens per
-  // step, the fewest in the table, and 1 493 output tokens against the baseline's 1 523. So the pairing is one a
-  // cell may select on purpose and must not select by accident, and that is a warning rather than an error: `ok`
-  // stays true, no value is changed, and a session never fails over a combination of two legal settings.
+  // The pairing is `tas.on: false` with `recall.tier1: 'embed'`: recall selection running without the state proxy
+  // that keeps the head of the prompt byte-stable. Round `20261001-1300` measured that combination per step at
+  // 3 625 uncached input tokens against the baseline's 2 595, 2 574 output tokens against 1 523 and a 79.2% cache
+  // hit rate against 86.7%; its counterpart - the stabiliser on with recall off (cell C1) - measured 1 783 uncached
+  // input tokens per step, the fewest in the table, and 1 493 output tokens against the baseline's 1 523. No cell
+  // names this pairing any more - it was the fourth arm, dropped - so it is reachable only by setting the two knobs
+  // in a profile, which is where a warning earns its place: a combination no cell selects on purpose must not be
+  // selected by accident. It stays a warning rather than an error: `ok` stays true, no value is changed, and a
+  // session never fails over a combination of two legal settings.
   //
   // Stated as token counts per step, never as a share of a priced total: the three token types carry three prices
   // and the prices differ per model and per provider, so a weighted share of a bill describes a price list rather
@@ -312,7 +314,7 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
         `than the baseline in round 20261001-1300, per step: 79.2% cache hit against 86.7%, 3 625 uncached input ` +
         `tokens against 2 595 and 2 574 output tokens against 1 523. With the stabiliser on and recall off the ` +
         `same run measured 1 783 uncached input tokens per step against the baseline's 2 595 and 1 493 output ` +
-        `tokens against 1 523. Set tas.on true, or recall.tier1 "off", unless this cell is the pairing under test`,
+        `tokens against 1 523. Set tas.on true, or recall.tier1 "off", unless the pairing is what is under test`,
       severity: 'warning',
     });
   }

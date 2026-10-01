@@ -32,8 +32,8 @@ test('a tape round-trips through parse and replays identically every time', asyn
     [1, 2, 3],
   );
 
-  const first = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
-  const again = await replayTape(parseTape(tapeText), { ...OPTIONS, policy: cellPolicy('C4') });
+  const first = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C2') });
+  const again = await replayTape(parseTape(tapeText), { ...OPTIONS, policy: cellPolicy('C2') });
 
   assert.equal(first.records.length, 3);
   assert.deepEqual(again.records, first.records, 'records must be identical field for field');
@@ -64,22 +64,22 @@ test('a malformed tape fails at the offending line instead of producing a partia
   }
 });
 
-test('the cells behave as the ablation claims: C1 selects nothing, C4 accounts a real budget', async () => {
+test('the cells behave as the ablation claims: C0 selects nothing, C2 accounts a real budget', async () => {
   const tape = parseTape(tapeText);
-  const c1 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C1') });
-  const c4 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
+  const c0 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C0') });
+  const c2 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C2') });
 
-  for (const record of c1.records) {
+  for (const record of c0.records) {
     assert.equal(record.selected, 0, 'the baseline cell never recalls anything by design');
     assert.equal(record.candidates, 0);
     assert.equal(record.blocks['recalled'] ?? 0, 0);
   }
   assert.deepEqual(
-    c1.selectedIds.map((ids) => ids.length),
+    c0.selectedIds.map((ids) => ids.length),
     [0, 0, 0],
   );
-  assert.notEqual(c1.digest, c4.digest, 'the cells are distinguishable in the record stream');
-  for (const record of c4.records) {
+  assert.notEqual(c0.digest, c2.digest, 'the cells are distinguishable in the record stream');
+  for (const record of c2.records) {
     assert.ok(record.budgetUsed <= record.budgetTotal);
     assert.ok(record.prefixTokensStable <= record.budgetTotal);
   }
@@ -87,7 +87,7 @@ test('the cells behave as the ablation claims: C1 selects nothing, C4 accounts a
 
 test('a taped system prompt becomes the pinned block and never moves between steps', async () => {
   const tape = parseTape(tapeText);
-  const result = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C4') });
+  const result = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C2') });
 
   const pinned = result.records.map((r) => r.blocks['pinned'] ?? 0);
   assert.ok(

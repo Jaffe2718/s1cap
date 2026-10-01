@@ -53,7 +53,7 @@ export interface AssociationEdge {
   provenance: string;
 }
 
-export type Cell = 'C1' | 'C2' | 'C3' | 'C4';
+export type Cell = 'C0' | 'C1' | 'C2';
 
 export type S1ProviderName = 'jev' | 'laya-serve' | 'edgejev' | 'kev' | 'none';
 
@@ -136,7 +136,7 @@ export interface AssemblyPolicy {
      * The method's claim is that a small number of relevant turns beats a full recency window — that is, a good
      * selector uses *less* of the budget, not more. A floor at a quarter of the budget therefore rejects exactly
      * the behaviour that justifies the method, silently, before delivery ever sees the selection. Measured: with
-     * μ = 0.25 the floor fired on **9 of 9** steps of a live C4 session, so every System-1 selection was replaced
+     * μ = 0.25 the floor fired on **9 of 9** steps of a live C2 session, so every System-1 selection was replaced
      * by recency and `scoredPairs` described a ranking nothing downstream consumed.
      *
      * Kept, because an experiment may want it and because deleting a knob that was measured is how the
@@ -175,8 +175,8 @@ export interface AssemblyPolicy {
    * `context-delivery.ts` existed, and it is why the ablation cells had nothing to ablate — every cell produced a
    * layout record and the model saw the full history in all of them.
    *
-   * The baseline cell C1 keeps this off, which is what makes it a baseline: it is the only cell that lets the
-   * harness manage history natively. C2/C3/C4 turn it on, because "ordering only" and "S1 governance only" are
+   * The baseline cell C0 keeps this off, which is what makes it a baseline: it is the only cell that lets the
+   * harness manage history natively. C1 and C2 turn it on, because "TAS alone" and the full configuration are
    * claims about what the model is shown, and a delivered-nothing cell cannot support them.
    */
   deliver: boolean;
@@ -326,10 +326,14 @@ export interface PlanGateDecision {
   abstained: boolean;
 }
 
-/** Default policy = cell C4 (full system). Cells C1–C3 are derived by toggles. */
+/**
+ * Default policy = the full configuration (cell C2), which is also the base the other two cells are derived from
+ * by toggles. `deliver` is the one switch the base leaves off — a policy that assembles a layout nobody receives
+ * is the safe default — and each cell turns delivery on for itself.
+ */
 export function defaultPolicy(): AssemblyPolicy {
   return {
-    cell: 'C4',
+    cell: 'C2',
     termination: 'model-owned',
     assemblyDeadlineMs: 250,
     rgMaintenance: { mode: 'async', maxLagTurns: 2 },
@@ -355,41 +359,34 @@ export function defaultPolicy(): AssemblyPolicy {
   };
 }
 
-/** 2×2 ablation cell presets (docs/AGENT_BRIEF.md §9.1). */
+/** Ablation cell presets (docs/AGENT_BRIEF.md §9.1): C0 baseline, C1 TAS alone, C2 the full configuration. */
 export function cellPolicy(cell: Cell): AssemblyPolicy {
   const p = defaultPolicy();
   p.cell = cell;
   switch (cell) {
-    case 'C1': // baseline: chronological append, native compaction only
+    case 'C0': // baseline: chronological append, native compaction only
       p.tas.on = false;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
       // The baseline is the one cell that does not take history management away from the harness: it delivers
-      // nothing, so what it measures is the harness doing what it would have done anyway. Every other cell
-      // delivers its assembled view, because "ordering only" and "S1 governance only" are statements about what
+      // nothing, so what it measures is the harness doing what it would have done anyway. The other two cells
+      // deliver their assembled view, because "TAS alone" and the full configuration are statements about what
       // the model is shown - a cell that assembles a layout nobody receives is not an ablation arm.
       p.deliver = false;
-      // The baseline is chronological, so x goes last. Leaving this at the default made C1 and C3 carry the
-      // position intervention the ablation is meant to isolate, so the one knob that distinguishes them from
-      // C2 and C4 was pinned to the same value in all four cells and the layout axis could not be read at all.
+      // The baseline is chronological, so x goes last. Leaving this at the default made the baseline carry the
+      // position intervention the ablation is meant to isolate: the one knob that distinguishes it from the two
+      // ordering cells was pinned to the same value in every cell and the layout axis could not be read at all.
       p.xFirst = false;
       break;
-    case 'C2': // +TAS ordering only
+    case 'C1': // TAS alone: the state proxy exists and x sits before recalled history, no System-1 selection
       p.tas.on = true;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
       p.deliver = true;
       p.xFirst = true;
       break;
-    case 'C3': // +S1 governance only (selection + plan gate), chronological layout
-      p.tas.on = false;
-      p.recall.tier1 = 'embed';
-      p.planGate.on = true;
-      p.deliver = true;
-      p.xFirst = false;
-      break;
-    case 'C4':
-      // full method: TAS ordering, S1 governance, x-first layout
+    case 'C2':
+      // the full configuration: TAS ordering plus S1 governance (recall selection + plan gate), x-first layout
       p.deliver = true;
       p.xFirst = true;
       break;

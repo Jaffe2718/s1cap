@@ -43,7 +43,7 @@ export interface RawEvent {
  *
  * This exists because a delivered block is appended to the session log by the harness, the segmenter turns it
  * into an ordinary user segment like any other, and relevance then selects it as one of the most relevant
- * things in the conversation — because it is a summary of the conversation. A live C4 run showed exactly that:
+ * things in the conversation — because it is a summary of the conversation. A live C2 run showed exactly that:
  * the headers of one injection read `## state proxy T | ## recalled · user · s1cap-895b6ae1 | ## state proxy T |
  * ## recalled · trace · …`, the `s1cap-895b6ae1` being the *previous* injection, and by the last step of the run
  * one message carried 30 recalled blocks. The context was mostly S1CAP's own earlier output, which is not a

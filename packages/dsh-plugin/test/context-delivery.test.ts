@@ -64,7 +64,7 @@ test('the block lands after the last claimed message, where the question is alre
   assert.ok(injected.content[0].text.includes('scripts: build, test, dsh:add'), 'the recalled text is in there');
   assert.ok(
     !injected.content[0].text.includes('TASK: read three files'),
-    'and not the state proxy, even though C4 builds one: T is S1CAP-written text and the model must not see it',
+    'and not the state proxy, even though C2 builds one: T is S1CAP-written text and the model must not see it',
   );
 });
 

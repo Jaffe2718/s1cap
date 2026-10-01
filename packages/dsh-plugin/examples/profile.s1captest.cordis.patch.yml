@@ -17,7 +17,7 @@
   config:
     # master switch: without this the plugin registers nothing at all
     enabled: true
-    cell: C4
+    cell: C2
     assemblyDeadlineMs: 250
     s1:
       # exactly one System-1 backend is active at a time; enabling Laya requires this provider

@@ -183,5 +183,5 @@ test('a gate that is switched off never scores, even with a backend present', as
     },
   );
   assert.equal(await gate.consider('1. alpha\n2. beta', 'S', 1), undefined);
-  assert.equal(calls, 0, 'C1 runs with the gate off and must make no System-1 calls');
+  assert.equal(calls, 0, 'C0 runs with the gate off and must make no System-1 calls');
 });

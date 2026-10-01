@@ -374,9 +374,9 @@ test('a stored provider is applied at activation and re-resolved, so a switch su
   });
 });
 
-test('defaults: C4 policy, provider jev, two distinct sinks, no conflicts', () => {
+test('defaults: C2 policy, provider jev, two distinct sinks, no conflicts', () => {
   const resolved = resolvePluginConfig(undefined);
-  assert.equal(resolved.config.cell, 'C4');
+  assert.equal(resolved.config.cell, 'C2');
   assert.equal(resolved.config.termination, 'model-owned');
   assert.deepEqual(resolved.telemetry, DEFAULT_TELEMETRY);
   assert.deepEqual(resolved.conflicts, []);
@@ -499,7 +499,7 @@ test('every config problem is reported as a warning and the session keeps its de
   withEmptyHome(() => {
   apply(h.ctx, {
     enabled: true,
-    cell: 'C9' as unknown as 'C4',
+    cell: 'C9' as unknown as 'C2',
     termination: 'harness-owned' as unknown as 'model-owned',
     recall: { threshold: 3 } as never,
     laya: { enabled: true, autoStart: false, port: 99999 },
@@ -511,7 +511,7 @@ test('every config problem is reported as a warning and the session keeps its de
   assert.match(warns, /laya\.port: must be within/);
   const status = commandPayload(h.commands.get('s1')?.({})) as { recall: { threshold: number }; cell: string };
   assert.equal(status.recall.threshold, 0.55, 'invalid value falls back to the default');
-  assert.equal(status.cell, 'C4');
+  assert.equal(status.cell, 'C2');
   });
 });
 

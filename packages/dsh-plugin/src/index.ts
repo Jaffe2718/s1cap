@@ -1219,7 +1219,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       if (fromFile.layaWeightsEnvVar !== undefined) appliedTuning.layaWeightsEnvVar = fromFile.layaWeightsEnvVar;
       if (fromFile.provider !== undefined) appliedTuning.provider = fromFile.provider;
       // The cell preset values before the volatile layer touches them. A tuning file written during one live test
-      // silently overrode the cell it was not part of: C4 ran with xFirst=false and window=1200 for an entire
+      // silently overrode the cell it was not part of: C2 ran with xFirst=false and window=1200 for an entire
       // verification session - and nothing in any counter said so. The override itself is right (the panel owns
       // these knobs), but a *silent* one deforms an ablation run invisibly, which is this project's dominant
       // failure mode. Say it out loud at activation, and tell the reader how to get a cell-pure run.
@@ -1332,7 +1332,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // The only lifecycle hook we register, in the verified middleware shape. `agent/request-error`
   // is deliberately NOT registered: its contract is unverified, and an unverified hook is exactly
   // what took a round down before.
-  // The delivery path, wired once. `config.deliver` is the cell's own switch: the baseline cell (C1) leaves it
+  // The delivery path, wired once. `config.deliver` is the cell's own switch: the baseline cell (C0) leaves it
   // off, and `deliverContext` then answers "not delivered" with the reason, so a cell that assembles a layout
   // nobody receives says so in the control plane instead of looking identical to one that delivers.
   const emitControl = (event: TelemetryEvent): void => {

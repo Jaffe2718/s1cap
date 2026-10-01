@@ -223,7 +223,7 @@ function buildAssemblerFixture(): {
   return { graph: g, pinned, tail, current, history };
 }
 
-test('assemble (C4/TAS on): recalled block ordered by weight, x last, budget accounted', () => {
+test('assemble (C2/TAS on): recalled block ordered by weight, x last, budget accounted', () => {
   const fx = buildAssemblerFixture();
   const policy = defaultPolicy();
   policy.recall.threshold = 0.5;
@@ -350,7 +350,10 @@ test('the task joins the stable head only when it is placed first, and prefixTok
 
 test('assemble: TAS off drops the state proxy and orders recall chronologically', () => {
   const fx = buildAssemblerFixture();
-  const policy = cellPolicy('C3'); // selection on, TAS off
+  // Selection on with TAS off: the dropped fourth arm was the preset that named this pairing, so it is built
+  // here from the full configuration by turning the state proxy off.
+  const policy = cellPolicy('C2');
+  policy.tas.on = false;
   policy.recall.threshold = 0.5;
   policy.recall.budgetRatio = 0.5;
   const res = assemble({
@@ -371,9 +374,9 @@ test('assemble: TAS off drops the state proxy and orders recall chronologically'
   assert.deepEqual(res.layout.recalled.map((s) => s.id), ['a', 'b'], 'chronological order by seq');
 });
 
-test('assemble: tier1 off (C1/C2) leaves the recalled block empty by design', () => {
+test('assemble: tier1 off (C0/C1) leaves the recalled block empty by design', () => {
   const fx = buildAssemblerFixture();
-  const policy = cellPolicy('C1');
+  const policy = cellPolicy('C0');
   const res = assemble({
     graph: fx.graph,
     policy,
@@ -751,7 +754,7 @@ test('cost model: llm call, s1 call, task aggregate', () => {
     schema: 1,
     ts: 1000,
     sessionId: SESSION,
-    cell: 'C4',
+    cell: 'C2',
     model: 'deepseek-flash',
     seq: 1,
     promptTokens: 2_000_000,

@@ -19,8 +19,8 @@
         # result in the control-plane log with the prompt left untouched; off disables it. Rewriting the
         # model view is a later, separate switch that does not exist yet.
         observation: log
-        # 2x2 ablation cell: C1 baseline | C2 +TAS | C3 +S1 | C4 full
-        cell: C4
+        # ablation cell: C0 baseline | C1 +TAS | C2 full
+        cell: C2
         # Who owns the agent loop. Literal, not a toggle: the harness stops when the model
         # stops and S1CAP can neither prolong nor veto that (docs/ARCHITECTURE.md §4).
         termination: model-owned

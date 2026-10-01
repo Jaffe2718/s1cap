@@ -53,7 +53,7 @@ export const CORE_SCHEMA_VERSION = 1         ;
                      
  
 
-                                             
+                                      
 
                                                                                
 
@@ -176,7 +176,7 @@ export const CORE_SCHEMA_VERSION = 1         ;
                                                                      
     
                                                                                                               
-                                                                                                               
+                                                                                                              
                                                                                             
      
                    
@@ -326,10 +326,14 @@ export const CORE_SCHEMA_VERSION = 1         ;
                      
  
 
-/** Default policy = cell C4 (full system). Cells C1–C3 are derived by toggles. */
+/**
+ * Default policy = the full configuration (cell C2), which is also the base the other two cells are derived from
+ * by toggles. `deliver` is the one switch the base leaves off — a policy that assembles a layout nobody receives
+ * is the safe default — and each cell turns delivery on for itself.
+ */
 export function defaultPolicy()                 {
   return {
-    cell: 'C4',
+    cell: 'C2',
     termination: 'model-owned',
     assemblyDeadlineMs: 250,
     rgMaintenance: { mode: 'async', maxLagTurns: 2 },
@@ -355,41 +359,34 @@ export function defaultPolicy()                 {
   };
 }
 
-/** 2×2 ablation cell presets (docs/AGENT_BRIEF.md §9.1). */
+/** Ablation cell presets (docs/AGENT_BRIEF.md §9.1): C0 baseline, C1 TAS alone, C2 the full configuration. */
 export function cellPolicy(cell      )                 {
   const p = defaultPolicy();
   p.cell = cell;
   switch (cell) {
-    case 'C1': // baseline: chronological append, native compaction only
+    case 'C0': // baseline: chronological append, native compaction only
       p.tas.on = false;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
       // The baseline is the one cell that does not take history management away from the harness: it delivers
-      // nothing, so what it measures is the harness doing what it would have done anyway. Every other cell
-      // delivers its assembled view, because "ordering only" and "S1 governance only" are statements about what
+      // nothing, so what it measures is the harness doing what it would have done anyway. The other two cells
+      // deliver their assembled view, because "TAS alone" and the full configuration are statements about what
       // the model is shown - a cell that assembles a layout nobody receives is not an ablation arm.
       p.deliver = false;
-      // The baseline is chronological, so x goes last. Leaving this at the default made C1 and C3 carry the
-      // position intervention the ablation is meant to isolate, so the one knob that distinguishes them from
-      // C2 and C4 was pinned to the same value in all four cells and the layout axis could not be read at all.
+      // The baseline is chronological, so x goes last. Leaving this at the default made the baseline carry the
+      // position intervention the ablation is meant to isolate: the one knob that distinguishes it from the two
+      // ordering cells was pinned to the same value in every cell and the layout axis could not be read at all.
       p.xFirst = false;
       break;
-    case 'C2': // +TAS ordering only
+    case 'C1': // TAS alone: the state proxy exists and x sits before recalled history, no System-1 selection
       p.tas.on = true;
       p.recall.tier1 = 'off';
       p.planGate.on = false;
       p.deliver = true;
       p.xFirst = true;
       break;
-    case 'C3': // +S1 governance only (selection + plan gate), chronological layout
-      p.tas.on = false;
-      p.recall.tier1 = 'embed';
-      p.planGate.on = true;
-      p.deliver = true;
-      p.xFirst = false;
-      break;
-    case 'C4':
-      // full method: TAS ordering, S1 governance, x-first layout
+    case 'C2':
+      // the full configuration: TAS ordering plus S1 governance (recall selection + plan gate), x-first layout
       p.deliver = true;
       p.xFirst = true;
       break;

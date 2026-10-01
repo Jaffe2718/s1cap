@@ -41,29 +41,30 @@ The user-facing transcript stays **strictly chronological**; only the model view
 
 ## Evaluation design (pre-registered)
 
-2×2 within-task paired factorial — factor A: Trace-as-State ordering; factor B: S1 governance (selection + plan gate):
+2×2 within-task paired factorial — factor A: Trace-as-State ordering; factor B: S1 governance (selection + plan gate).
+Three cells are run; the fourth combination (governance without ordering) measured worse than the baseline per step
+and has been dropped (`bench/README.md` records the quantities):
 
 | Cell | A | B |
 |---|---|---|
-| C1 baseline | off | off (native compaction only) |
-| C2 | **on** | off |
-| C3 | off | **on** |
-| C4 full | **on** | **on** |
+| C0 baseline | off | off (native compaction only) |
+| C1 | **on** | off |
+| C2 full | **on** | **on** |
 
 Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified** (100/cell) · **Terminal-Bench 4.0** (66/cell) · **τ²-bench** (full base split). Model: `deepseek-flash` (DeepSeek-V4.1-Flash), temperature 0.
 
-**Success rule:** solve-rate **non-inferiority** vs C1 (paired McNemar, one-sided α=0.05, margin −2 pp) **AND** ≥10% improvement in cost/task or time/task (paired bootstrap 95% CI excluding 0, Holm-corrected). Winning cost while losing >2 pp solve rate is not a win.
+**Success rule:** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp) **AND** ≥10% improvement in cost/task or time/task (paired bootstrap 95% CI excluding 0, Holm-corrected). Winning cost while losing >2 pp solve rate is not a win.
 
 ## Status & roadmap
 
-Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `@s1cap/laya-runtime` (Python discovery + `laya-serve` launcher), `dsh-s1cap` skeleton, 2×2 cell presets; `node --test` **34/34 offline**, and a real `laya-serve` round trip verified (`/health` readiness + a `noul` decision over `/v1/systemone`). Remaining M0: live-backend smoke against Jev. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
+Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `@s1cap/laya-runtime` (Python discovery + `laya-serve` launcher), `dsh-s1cap` skeleton, three-cell presets (C0–C2); `node --test` **34/34 offline**, and a real `laya-serve` round trip verified (`/health` readiness + a `noul` decision over `/v1/systemone`). Remaining M0: live-backend smoke against Jev. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
 
 | M | Scope |
 |---|---|
 | M0 | monorepo scaffold, core + `s1-client`, telemetry v1, DSH plugin skeleton — **scaffold done**, live-backend smoke pending |
 | M1 | assembler/recall replay-correctness tests, proxy MVP, DSH hook wiring (`agent/pre-step`, surface ops) |
 | M2 | plan gate wiring, degradation paths, settings UI, Terminal-Bench 10-task cost pilot |
-| M3 | full 2×2 on SWE-bench Verified + τ²-bench (+ TB), optional Laya fine-tune |
+| M3 | three-cell ablation on SWE-bench Verified + τ²-bench (+ TB), optional Laya fine-tune |
 | M4 | Terminal-Bench cells, opencode transfer check, GLM model-swap check |
 | M5 | paper: Pareto + cache-waterfall figures, case studies, LaTeX draft |
 
