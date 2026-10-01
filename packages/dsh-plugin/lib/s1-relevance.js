@@ -1,5 +1,5 @@
 /**
- * S1 RELEVANCE — one System-1 call per new segment, scoring the whole window.
+ * S1 RELEVANCE — one question per *new* pair, batched `s1.questionsPerCall` to a request.
  *
  * This is the figure's "noul relevance" box: for a new segment s_j, decide how much reference value each
  * historical segment h_i carries for it, as a value in [0,1]. The question type is `noul` - a binary
@@ -10,10 +10,23 @@
  * box whose implementation asks a different question. The direction matters and is not symmetric - the
  * question is about h_i's usefulness *for s_j*, not about how similar the two strings are.
  *
- * Why one call and not one per pair: `recall.window = w` exists to bound this cost, and a per-pair scorer would
- * make the cost w calls per new segment instead of 1. The client takes any number of questions in a single
- * request, so the window is asked about in one round trip and the saving is real rather than rhetorical.
- * `scoredPairs` in the control plane still counts pairs - the graph is where that is decided, not here.
+ * The cost is the pair count, not the call count, and that was measured before anything here was changed.
+ * A new segment s_j is paired with each of the `w` segments before it, and every one of those questions is
+ * new: the graph scores each segment exactly once, in arrival order, so no pair it has already judged is asked
+ * again - not within a session, and not after a restart, because the snapshot carries the `scored` cursor and
+ * the `scores` map (`assoc-graph.ts`). Round `20261001-1300` confirms the arithmetic to the pair: the four
+ * cells offered 6 670, 4 278, 3 321 and 22 791 pairs for 116, 93, 82 and 214 segments, which is T(T-1)/2 in
+ * every one of them, and each graph recorded exactly that many *distinct* pairs. One pair fewer than offered
+ * would have meant a pair asked twice, because `scores` is keyed by pair; none of the four cells shows it. The
+ * call count is that number divided by this cap, so C4's 22 791 pairs at 20 questions per call are the 1 155
+ * calls it made (807 answered, 282 `503 server busy`, 66 at the 30 s transport guard).
+ *
+ * What follows for the window, and it is the part a reader should take away: `recall.window = w` is the only
+ * thing that bounds the marginal cost, and with w = 1024 against a 214-segment session it bounded nothing - the
+ * window was the whole history, and the pair count is therefore quadratic in segments. The lever is w or the
+ * cap, never a de-duplication of work that was never repeated. The client takes any number of questions in one
+ * request, so the batching saves round trips and not questions; `scoredPairs` in the control plane counts the
+ * pairs, and the graph is where that is decided.
  *
  * Failure policy: a System-1 call that errors or returns an answer we cannot read yields **no
  * weights**, and the graph's caller falls back to its lexical scorer. That is deliberate. A relevance backend
