@@ -188,9 +188,9 @@ test('s1CostUsd: Jev input-only pricing', () => {
 // ---- retry on refusal ----
 //
 // Laya answers `503 server busy` with `Retry-After` the moment its admission semaphore is full and never queues
-// (docs/LAYA_RUNTIME.md §6b), which cost a measured four-cell round 39% of its calls. The policy is off unless the
-// caller asks for it, and what it did is reported on both paths: `attempts`/`waitedMs` on the result, and the same
-// two fields on the error when the attempts run out.
+// (docs/LAYA_RUNTIME.md §6b), which cost the four cells of round `20261001-1300` 39% of their calls. The policy is
+// off unless the caller asks for it, and what it did is reported on both paths: `attempts`/`waitedMs` on the
+// result, and the same two fields on the error when the attempts run out.
 
 const okEnvelope = {
   model: 'laya-typed-decisions',

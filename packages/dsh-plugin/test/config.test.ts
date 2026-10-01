@@ -336,7 +336,7 @@ test('switching the backend off from the panel leaves the session with no client
     assert.match(commandText(ping), /no System-1 backend is active/);
 
     // Persisted, because the panel's only durable store is this file: a switch that lives in memory until the host
-    // exits is an Off that the next start contradicts — and the four-cell run restarts between cells.
+    // exits is an Off that the next start contradicts — and the run restarts between cells.
     const file = JSON.parse(readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tuning.json'), 'utf8')) as {
       provider?: string;
     };

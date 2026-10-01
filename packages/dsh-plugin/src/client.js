@@ -71,8 +71,9 @@ window.__ModuleLoader__.load({
      *
      * `none` is the third and it is not a backend: `resolveS1Backend` answers `{provider:'none', mode:'none'}`,
      * `buildBackend` then constructs no client at all, and every System-1 call site answers `undefined` — which is
-     * the lexical fallback, not an error. It is offered here because the four-cell run (`docs/CELLS-RUN.md`) needs a
-     * session with System-1 off per cell, and until now the only way to get one was to hand-edit a profile.
+     * the lexical fallback, not an error. It is offered here because an arm can need a session with System-1 off —
+     * the two control arms carry `s1.provider: none` in `bench/cells/` — and until now the only way to get one was
+     * to hand-edit a profile.
      *
      * The policy allows more names (`edgejev`, `kev`), and they stay out: a radio is a choice between the backends
      * this panel can configure, and an entry whose fields live nowhere would be a button that cannot be made to

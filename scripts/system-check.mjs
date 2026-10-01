@@ -19,7 +19,7 @@
  *
  * Usage:
  *   node scripts/system-check.mjs --base-url http://127.0.0.1:19487 [--token T]
- *                                 [--log <instance.log>] [--data <dir>] [--cell C4] [--expect-s1 N]
+ *                                 [--log <instance.log>] [--data <dir>] [--cell C2] [--expect-s1 N]
  *                                 [--allow-fallback]
  *
  * Defaults: --data ~/.dsh/.s1cap, --base-url none (then the log is used). Exit code 1 if any invariant fails.

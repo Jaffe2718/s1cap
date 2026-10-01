@@ -45,7 +45,8 @@
           # perTask keeps the state proxy byte-stable inside a task (cache-friendly)
           updatePolicy: perTask
         recall:
-          tau: 0.55
+          # τ is `recall.threshold`; this line used to spell it `tau`, which is not a config path and warned as an
+          # unknown key on every load. 0.55 is the default, so the value is not restated here.
           depth: 2
           fanout: 8
           # tier1: embed (local ANN) | s1 (noul batch) | off
@@ -53,7 +54,8 @@
           # "" = the tier-1 embedding model's own default
           embedModel: ""
           budgetRatio: 0.35
-          minRecalledShare: 0.25
+          # `recall.minRecalledShare` is absent on purpose: the default is 0, and at 0.25 the token-share floor
+          # fired on 9 of 9 steps of a live run and replaced every System-1 selection with recency.
         tail:
           k: 3
         planGate:
