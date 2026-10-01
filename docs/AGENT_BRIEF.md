@@ -218,7 +218,7 @@ interface AssociationEdge {
 interface AssemblyPolicy {
   cell: 'C0' | 'C1' | 'C2';                               // §9.1: C0 baseline, C1 TAS alone, C2 full
   tas: { on: boolean; tMaxChars: number; updatePolicy: 'perTask' | 'perTurn' };
-  recall: { tau: number; depth: number; fanout: number; tier1: 'embed' | 's1' | 'off';
+  recall: { threshold: number; depth: number; fanout: number; tier1: 'embed' | 's1' | 'off';
             embedModel?: string; budgetRatio: number; minRecalledShare: number };
   tail: { k: number };                                    // verbatim recent turns always kept
   planGate: { on: boolean; maxPlans: number; attemptCap: number; abstainConfidence: number };
@@ -245,7 +245,7 @@ interface AssemblyResult {
 }
 ```
 
-All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `recall.tau` (τ), `recall.depth` (d), fanout, tail K, T max chars, attempt cap, S1 provider.
+All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `recall.threshold` (τ), `recall.depth` (d), fanout, tail K, T max chars, attempt cap, S1 provider.
 
 ---
 
@@ -374,7 +374,7 @@ Report **cache-hit rate before/after each assembly change** per call — the TAS
 
 ## 9. Benchmark & experiment protocol
 
-### 9.1 Design — 2×2 within-task paired factorial
+### 9.1 Design — 2×2 crossing, three arms run (within-task pairing)
 
 | Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: selection + plan gate) | System-1 lane |
 |---|---|---|---|
@@ -400,10 +400,13 @@ record carry those names. Round `20261001-1300` ran under an earlier four-cell l
 The three rows of the design table above are the executed set; the fourth quadrant's arm was dropped rather than
 renamed, because per step it moved more uncached input and more output than the baseline at a lower hit rate and its
 backend coverage was below the 0.5 floor (`docs/CELLS-RUN.md` carries the per-step numbers and the mapping table).
-Names inside the hypotheses below (§9.3, §9.5) and the M2 acceptance line in §10 are left as the owner wrote them
-and still use the earlier labelling — read them through this table.
+Everything below — the hypotheses, the protocol lines and the milestones — uses today's names; where a figure is
+quoted it keeps the round it came from and the label it ran under.
 
-Same tasks, same model, temperature 0 (main), same harness version, same tool allowlist, randomized run order. Paired n per cell per benchmark: SWE-bench Verified 100 (stratified subset of the 500), Terminal-Bench 4.0 all 66, tau2-bench full `base` split (`[VERIFY]` exact count at M0; ~280 expected).
+Same tasks, same model with `reasoningEffort` pinned, same harness version, same tool allowlist, randomized run
+order. No sampling parameter is claimed — not a temperature and not a seed — because DSH's model configuration
+exposes none. Paired n per cell per benchmark: SWE-bench Verified 100 (stratified subset of the 500),
+Terminal-Bench 4.0 all 66, tau2-bench full `base` split (`[VERIFY]` exact count at M0; ~280 expected).
 
 ### 9.2 Benchmarks (verified)
 
@@ -415,17 +418,31 @@ Same tasks, same model, temperature 0 (main), same harness version, same tool al
 ### 9.3 Metrics, hypotheses, success rule
 
 - **Primary:** solve rate per benchmark. **Secondary:** $/task, tokens/task (hit/miss/out split), wall-clock/task (net LLM + S1 + tools), cache-hit rate, S1 calls & ms, tool errors, overflow/compaction events.
-- **H1** (selection): C3/C4 use fewer context tokens at non-inferior solve rate. **H2** (plan gate): C4 spends fewer wasted-attempt tokens. **H3** (cache penalty, cuts both ways): TAS layout changes hit-rate; net cost effect measured per `updatePolicy`. **H4** (transfer): C1→C4 deltas persist on a second harness (opencode) at 10% subsample.
-- **Success rule (replaces "win any of three"):** solve-rate **non-inferiority** vs C1 (paired McNemar, one-sided α=0.05, margin −2 pp absolute) **AND** ≥10% improvement in cost/task **OR** time/task with 95% CI excluding 0 (paired bootstrap, 10k resamples; Holm correction across the secondary family). A cell that wins cost but loses >2 pp solve rate is **not** a win. Report all cells + a quality-vs-cost Pareto figure.
+- **H2** (plan gate): `C2` spends fewer wasted-attempt tokens.
+- **H3** (selection, stabiliser and cache — one contrast, and it cuts both ways): the TAS layout changes the hit
+  rate and the net cost effect is measured per `updatePolicy`; the selection claim rides the same contrast and is
+  stated here rather than as a hypothesis of its own. With the recall-only arm dropped, `C2` is the only arm
+  that runs System-1 governance, so the claim that governance reduces context tokens at a non-inferior solve rate
+  can only be observed as `C1` vs `C2` — TAS alone against the full configuration — which is exactly where the
+  cache effect is measured; two hypotheses riding one contrast cannot be separated afterwards, which is why **H1
+  is retired, folded here, not renumbered**. The round's own numbers, where they still apply: the stabiliser
+  contrast (round `C2` vs `C1`, today's `C1` vs `C0`) moved 1 783 / 11 166 / 1 493 uncached / cached / output
+  tokens per step against 2 595 / 16 936 / 1 523, at 86.2% against 86.7% hit rate — about 0.69× on uncached input;
+  the selection contrast (round `C4` vs `C2`, today's `C2` vs `C1`) moved 3 363 / 42 372 / 2 318 per step against
+  1 783 / 11 166 / 1 493, at 92.6% against 86.2% — the best hit rate beside the largest counts on all three
+  components, which is why the counts are the measurement and the hit rate stays a mechanism diagnostic. The
+  dropped arm's figures (round `C3`) apply to no surviving cell and are recorded in `docs/CELLS-RUN.md`.
+- **H4** (transfer): `C0`→`C2` deltas persist on a second harness (opencode) at 10% subsample.
+- **Success rule (replaces "win any of three"):** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp absolute) **AND** ≥10% improvement in cost/task **OR** time/task with 95% CI excluding 0 (paired bootstrap, 10k resamples; Holm correction across the secondary family). A cell that wins cost but loses >2 pp solve rate is **not** a win. Report all cells + a quality-vs-cost Pareto figure.
 - `[VERIFY]` power analysis in `bench/stats` before the grid: with paired n=100 (SWE-V) McNemar at 80% power resolves ~14–15 pp differences; n=66 (TB) ~18 pp; report the minimal detectable effect honestly.
 
 ### 9.4 Validity controls
 
-Pin model versions + log call dates; 3 seeds on a 10% subsample for variance; automated scorers only (no LLM judges); contamination caveats stated (SWE-bench Verified is known-contaminated-adjacent — cite Don't-Break-the-Cache-style measurement care and SWE-bench-Live as the contamination-free fallback for a 20-task spot-check); the analysis script is **frozen and committed before** the first full run (pre-registration).
+Pin model versions + log call dates; repeat a 10% subsample three times for variance — no seed is available to vary, because DSH exposes no sampling parameters, so run-to-run variance is the variance there is; automated scorers only (no LLM judges); contamination caveats stated (SWE-bench Verified is known-contaminated-adjacent — cite Don't-Break-the-Cache-style measurement care and SWE-bench-Live as the contamination-free fallback for a 20-task spot-check); the analysis script is **frozen and committed before** the first full run (pre-registration).
 
 ### 9.5 Generality (kills the "DSH result engineering" suspicion)
 
-Re-run C1 vs C4 on **one additional harness through the proxy** (opencode first; Claude Code/pi stretch) on the same benchmark subset (10%); repeat a 10% subsample with the model swapped (GLM-5.3) to show provider-agnosticism. Same core package, same telemetry schema, only the adapter differs.
+Re-run C0 vs C2 on **one additional harness through the proxy** (opencode first; Claude Code/pi stretch) on the same benchmark subset (10%); repeat a 10% subsample with the model swapped (GLM-5.3) to show provider-agnosticism. Same core package, same telemetry schema, only the adapter differs.
 
 ### 9.6 Cost budget (deepseek-flash, peak; assumptions labeled)
 
@@ -439,8 +456,8 @@ Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Ter
 |---|---|---|---|
 | M0 | 1 | All `[VERIFY]` items closed; monorepo scaffold; `s1-client` against live Jev + laya-serve; telemetry v1; DSH plugin skeleton | `dsh --dump-config` shows the bundle; hardcoded assembly rewrites surface in a smoke session |
 | M1 | 2–3 | SEGMENTER + RG + ASSEMBLER; proxy MVP; replay-correctness tests | ≥90% core coverage; replay invariance green |
-| M2 | 3–4 | Plan gate; degradation paths; settings UI; **TB 10-task pilot** (pins the cost model); GAIA-free runner set up | Pilot report; C1 vs C4 smoke on 10 SWE-V tasks |
-| M3 | 5–6 | Full 2×2 on SWE-V + tau2 (+TB if pilot green); optional Laya fine-tune + calibration refit | 4 cells × n complete; frozen stats module emits the report |
+| M2 | 3–4 | Plan gate; degradation paths; settings UI; **TB 10-task pilot** (pins the cost model); GAIA-free runner set up | Pilot report; C0 vs C2 smoke on 10 SWE-V tasks |
+| M3 | 5–6 | Full 2×2 crossing on SWE-V + tau2 (+TB if pilot green); optional Laya fine-tune + calibration refit | 3 arms × n complete; frozen stats module emits the report |
 | M4 | 7–8 | Terminal-Bench cells; opencode transfer check (10%); GLM model-swap check (10%) | H4 evaluated |
 | M5 | 9–10 | Paper artifacts: Pareto + cache-waterfall figures, case studies (`/s1 why` traces), LaTeX draft per §11 | Full draft |
 
@@ -468,7 +485,7 @@ Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Ter
 - 1 Intro: agent-loop context economics (cache-hit ≈ 50× cheaper than miss); Trace-as-State principle; the arrival of decision models.
 - 2 Related work: agent memory (MemGPT, Mem0, Zep, A-Mem, HippoRAG 1/2, MemOS, MESA, GAAMA, EMem); in-loop folding (AgentFold); order sensitivity (Lost in the Middle, Re2, Ok&Lee, CoRe, Racing Thoughts); prompt compression (LLMLingua 1/2); caching (Prompt Cache, CacheGen, Don't Break the Cache); routing/cascades (RouteLLM, FrugalGPT, Hybrid LLM); harness prior art (dsh-command-context-trim, pi-system-one, hermes-jev-skills, dsh-typesafe, laya-jev-GraphRAG); decision models (Jev, Laya, Kev, JevBench). Full verified list: `docs/RELATED_WORK.md`.
 - 3 Method: S1CAP control-layer architecture; association graph; TAS assembly; plan gate; cost model.
-- 4 Setup: 2×2, benchmarks, telemetry.
+- 4 Setup: 2×2 crossing, three arms, benchmarks, telemetry.
 - 5 Results: quality/cost/time + Pareto; **cache-hit waterfall (H3)**; degradation; case studies.
 - 6 Analysis: when does TAS pay for its cache penalty; S1 decision quality vs outcome; failure modes (jaggedness, adversarial segments).
 - 7 Discussion: limits, ethics (black-box gating, bias in decision models — cite Jev's own bias discussion), generality.

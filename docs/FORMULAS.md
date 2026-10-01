@@ -329,7 +329,9 @@ The left-hand ratio counts removed tokens per invalidated **hit** token, i.e. th
 - Never let per-turn metadata (timestamps, turn ids, cache flags) into the prefix.
 - Measure $h$ per call (already in `llm_call` telemetry) and apply the test above with the measured $h$:
   the `C1`-vs-`C2` comparison — TAS alone against the full configuration, which round `20261001-1300` recorded
-  under the labels `C2` vs `C4` — isolates selection's cache effect, which is H3.
+  under the labels `C2` vs `C4` — isolates selection's cache effect, which is H3. It is also the only contrast the
+  selection claim has left, now that the recall-only arm is dropped and H1 is folded into H3 (AGENT_BRIEF §9.3):
+  the same comparison answers both, and the two cannot be separated afterwards.
 
 ## 7. Time model
 
