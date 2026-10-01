@@ -50,6 +50,14 @@ export const NUMBER_RULES                        = [
   { path: 'recall.fanout', min: 1, max: 64, integer: true },
   { path: 'recall.budgetRatio', min: 0.05, max: 0.95 },
   { path: 'recall.minRecalledShare', min: 0, max: 1 },
+  // the count floor under a recall selection (assembler.ts): fewer segments than this and the block falls back to
+  // the recency window. 1 is the least that is still a selection, and it is the floor rather than 0 because the
+  // type documents this rule as the guard against a *broken* selector - a value that switches the guard off is not
+  // a setting this harness supports. 8 is the ceiling for the reason the plan-gate caps stop there too: the guard
+  // exists to catch a selector that returned nothing, so a bound large enough to act as a selection quota would
+  // make the fallback the normal path and discard confident selections, which is what `minRecalledShare` did at
+  // 0.25 - it fired on 9 of 9 steps of a live run. Eight segments is already far past "nothing was selected".
+  { path: 'recall.minRecalledSegments', min: 1, max: 8, integer: true },
   { path: 'tail.k', min: 0, max: 20, integer: true },
   { path: 'planGate.maxPlans', min: 1, max: 8, integer: true },
   { path: 'planGate.attemptCap', min: 1, max: 8, integer: true },
@@ -280,6 +288,33 @@ export function validatePolicy(raw         , extraAllowedKeys                   
       continue;
     }
     setPath(target, path, value);
+  }
+
+  // The pairing a measured round found to be the worst of the four, warned about and never rejected.
+  //
+  // C3 is `tas.on: false` with `recall.tier1: 'embed'`: recall selection running without the state proxy that
+  // keeps the head of the prompt byte-stable. Round `20261001-1300` measured that cell per step at 3 625 uncached
+  // input tokens against the baseline's 2 595, 2 574 output tokens against 1 523 and a 79.2% cache hit rate against
+  // 86.7%; its counterpart - the stabiliser on with recall off (C2) - measured 1 783 uncached input tokens per
+  // step, the fewest in the table, and 1 493 output tokens against the baseline's 1 523. So the pairing is one a
+  // cell may select on purpose and must not select by accident, and that is a warning rather than an error: `ok`
+  // stays true, no value is changed, and a session never fails over a combination of two legal settings.
+  //
+  // Stated as token counts per step, never as a share of a priced total: the three token types carry three prices
+  // and the prices differ per model and per provider, so a weighted share of a bill describes a price list rather
+  // than the system. The pairs are also per step on purpose - the cells ran different numbers of steps, so their
+  // absolute totals rank differently and are not comparable.
+  if (policy.tas.on === false && policy.recall.tier1 !== 'off') {
+    issues.push({
+      path: 'recall.tier1',
+      message:
+        `recall selection is on ("${policy.recall.tier1}") while tas.on is off, and that pairing measured worse ` +
+        `than the baseline in round 20261001-1300, per step: 79.2% cache hit against 86.7%, 3 625 uncached input ` +
+        `tokens against 2 595 and 2 574 output tokens against 1 523. With the stabiliser on and recall off the ` +
+        `same run measured 1 783 uncached input tokens per step against the baseline's 2 595 and 1 493 output ` +
+        `tokens against 1 523. Set tas.on true, or recall.tier1 "off", unless this cell is the pairing under test`,
+      severity: 'warning',
+    });
   }
 
   return finish();

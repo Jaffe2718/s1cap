@@ -112,6 +112,27 @@ test('the bounded anchor wait has a default, a bound, and 0 as a real value', ()
   assert.equal(tooLong.policy.recall.anchorWaitMs, 10_000, 'and an out-of-range value falls back to the default');
 });
 
+test('the recalled-segment count floor is a settable path, bounded on both sides', () => {
+  // Found by the bench/ review: the field exists on `AssemblyPolicy` and the assembler reads it, but it was missing
+  // from `NUMBER_RULES` - so it was not in `KNOWN_PATHS`, no profile or preset could set it, and setting it was
+  // reported as an unknown config path while the default silently stood. The bounds are pinned here rather than in
+  // the rule table alone: 1 is the least that is still a selection, and the count guard is deliberately not
+  // switchable off (0), because the type documents it as the guard against a selector that returned nothing.
+  assert.equal(defaultPolicy().recall.minRecalledSegments, 1);
+  for (const accepted of [1, 8]) {
+    const result = validatePolicy({ recall: { minRecalledSegments: accepted } });
+    assert.equal(result.ok, true, `${accepted} is in bounds`);
+    assert.deepEqual(result.warnings, [], `${accepted} is a known path, not a typo`);
+    assert.equal(result.policy.recall.minRecalledSegments, accepted, 'and it is applied, not dropped');
+  }
+  for (const rejected of [0, 9, 2.5]) {
+    const result = validatePolicy({ recall: { minRecalledSegments: rejected } });
+    assert.equal(result.ok, false, `${rejected} is out of bounds or not an integer`);
+    assert.equal(result.errors[0]?.path, 'recall.minRecalledSegments');
+    assert.equal(result.policy.recall.minRecalledSegments, 1, `${rejected} falls back to the default`);
+  }
+});
+
 test('enums, booleans and strings are checked', () => {
   assert.equal(validatePolicy({ cell: 'C9' }).ok, false);
   assert.equal(validatePolicy({ cache: { reselectPolicy: 'never' } }).ok, false);
@@ -142,26 +163,32 @@ test('non-object config is an error, and the rule tables stay coherent', () => {
   assert.equal(new Set(NUMBER_RULES.map((r) => r.path)).size, NUMBER_RULES.length, 'no duplicate rules');
 });
 
-test('recall selection without the state proxy warns: that pairing measured worse than the baseline', () => {
+test('recall selection without the state proxy warns: that pairing measured worse than the baseline, per step', () => {
   // C3 is the combination, and it is reachable by naming one cell - which is exactly why it needs a warning
-  // rather than a paragraph in a run report. Measured in round `20261001-1300`: C3 at a 79.2% cache hit rate
-  // against C1's 86.7% and 3 625 uncached input tokens per step against 2 595, for 85% of the baseline's cost;
-  // TAS on with recall off (C2) was the best cell in the table at 1 783 uncached tokens per step and 58% of it.
+  // rather than a paragraph in a run report. Measured in round `20261001-1300`, per step: 3 625 uncached input
+  // tokens against the baseline's 2 595, 2 574 output tokens against 1 523, and a 79.2% cache hit rate against
+  // 86.7%; TAS on with recall off (C2) measured 1 783 uncached input tokens and 1 493 output tokens per step.
   const c3 = validatePolicy({ cell: 'C3' });
   assert.equal(c3.ok, true, 'a warning and never an error: a session must not fail over a combination');
   const warning = c3.warnings.find((issue) => issue.path === 'recall.tier1');
   assert.notEqual(warning, undefined, `the pairing must be reported: ${JSON.stringify(c3.issues)}`);
-  // Both numbers of both cells, because a warning that says "this is worse" and not "worse by how much" is the
+  // Both sides of both pairs, because a warning that says "this is worse" and not "worse by how much" is the
   // kind of claim this project keeps having to retract.
   for (const [what, needle] of [
-    ['the pairing cell hit rate', '79.2%'],
+    ['the pairing hit rate', '79.2%'],
     ['the baseline hit rate', '86.7%'],
     ['the pairing uncached input per step', '3 625'],
     ['the baseline uncached input per step', '2 595'],
+    ['the pairing output per step', '2 574'],
+    ['the baseline output per step', '1 523'],
     ['the counterpart uncached input per step', '1 783'],
+    ['the counterpart output per step', '1 493'],
   ] as const) {
     assert.ok(warning.message.includes(needle), `${what} (${needle}) belongs in the message: ${warning.message}`);
   }
+  // And the quantities are the whole of it: a warning reasoned from a price-weighted share of a bill is a
+  // statement about a price list, and the three token types carry three prices that differ by model and provider.
+  assert.equal(/\$|USD|bill|cost|price/i.test(warning.message), false, `no currency or price scalar: ${warning.message}`);
   assert.equal(c3.policy.tas.on, false, 'and nothing is changed: the warning is advice, not a correction');
   assert.equal(c3.policy.recall.tier1, 'embed', 'the configured tier is kept as written');
 
