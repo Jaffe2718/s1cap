@@ -29,25 +29,50 @@ it while paying more, which is what C4 did. An absolute number proves nothing he
 Presets live in `bench/cells/`; `cellPolicy(cell)` in `packages/core/src/types.ts` derives C1–C4 from toggles,
 with `termination: model-owned` and `rgMaintenance.mode: async` fixed in every cell.
 
-| Cell | `tas.on` / `xFirst` | S1 governance | Role |
-| --- | --- | --- | --- |
-| C1 | off / off | off | baseline: the harness manages history natively |
-| C2 | on / on | off | the TAS half alone |
-| C3 | off / off | on | the S1 half alone |
-| C4 | on / on | on | the project's own configuration |
+| Cell | `tas.on` / `xFirst` | S1 governance | Role | Next run |
+| --- | --- | --- | --- | --- |
+| C1 | off / off | off | baseline: the harness manages history natively | yes |
+| C2 | on / on | off | the TAS half alone | yes |
+| C3 | off / off | on | the S1 half alone | **no** (see below) |
+| C4 | on / on | on | the project's own configuration | yes |
 
 Two switches, not one: `tas.on` is whether the state proxy T exists at all, `xFirst` is whether the current task x
 sits before or after the recalled block, and `cellPolicy()` moves them together here (both off for C1/C3, both on for
 C2/C4) — which is why one column carries both.
 
+## Run set for the next round: three cells, and repeats
+
+**The next round runs three cells: C1, C2 and C4.** The names are unchanged and no `C0` is introduced —
+`cellPolicy()`, the presets in `bench/cells/`, the settings panel, the `cell` field on every telemetry record and
+this document all bind to C1–C4, and a renamed or invented cell is one more place for the same fact to be wrong.
+
+**C3 is not run this time.** C3 is recall selection with `tas.on: false`, and it measured worse than the baseline on
+every metric of round `20261001-1300`: a 79.2% cache hit rate against 86.7%, 3 625 uncached input tokens per step
+against 2 595, and 85% of the baseline's cost — 90% under the harsher price assumptions. It is also not the
+contrast the project's claim rests on. That contrast is **TAS alone against the full configuration**: C2 cost 58%
+of the baseline, so if C4 cannot beat C2 then the System-1 half has not earned its place in the configuration, and
+nothing about that argument needs a fourth arm. The combination is not lost by dropping the cell either —
+`validatePolicy` now emits a warning when `recall.tier1 !== 'off'` is configured with `tas.on: false`, naming the
+two measurements above, so the pairing has to be chosen on purpose rather than by accident. The full four-cell
+ablation stays the goal once the C2-vs-C4 contrast is established.
+
+**The budget that freed up goes to repeats.** One run per cell cannot separate an effect from noise, and the last
+round shows how much noise there is: C4's per-turn hit rates were 90.3 / 83.5 / 94.3% — a ±10 pp spread *within
+one cell*, across three turns, with no stable ordering — and the four cells' overall rates were not monotone in how
+much S1CAP each of them ran. So run C1, C2 and C4 several times each and report the repeats as a distribution per
+cell (min / median / max, and the count), not as one mean over runs that disagreed. Each repeat keeps its own salt
+directory and its own telemetry paths, exactly as the cells do now.
+
 ## Setup
 
-Four profiles, `C1test` … `C4test`, each a copy of the working `s1captest` profile with three changes:
+One profile per cell in the run set — `C1test`, `C2test`, `C4test` for the next round (see "Run set for the next
+round" below), `C3test` only when the four-cell ablation is run again — each a copy of the working `s1captest`
+profile with three changes:
 
 - `cell: C1` … `cell: C4`;
 - **separate telemetry paths per cell** — `telemetry.controlJsonl`, `sessionJsonl` and `tapeJsonl` must not
   collide across cells (the plugin rejects identical session and control paths, and a shared file would make the
-  per-cell numbers meaningless);
+  per-cell numbers meaningless); a repeat of a cell needs its own paths as well as its own salt;
 - **a pinned `s1.baseUrl`** for the already-running local endpoint. This is not cosmetic. With Laya selected and
   neither a `baseUrl` nor a `laya.pythonPath`, `singleBackendIssues` reports a conflict, and a conflict drops the
   session to `provider=none` — the cell then makes **no System-1 calls at all** while the panel merely says the
@@ -55,7 +80,8 @@ Four profiles, `C1test` … `C4test`, each a copy of the working `s1captest` pro
   showed `s1.provider: "none"` beside `configuredProvider: "laya-serve"`, until `baseUrl` was pinned. Pinning it
   changes nothing else: it is the address `laya.host`/`laya.port` derives anyway.
 
-Ports: **19491, 19492, 19493, 19494**. Each instance is a managed background job, never `Start-Process`; the UI
+Ports: **19491, 19492, 19493, 19494** (one per instance; a repeat uses the same port as its cell, since the
+instances do not overlap in time). Each instance is a managed background job, never `Start-Process`; the UI
 token comes from the job's own stdout.
 
 The shared backend is started **by hand, once**, and the profile keeps `laya.autoStart: false` so the plugin
@@ -96,7 +122,7 @@ a previous round into 191 failed S1 calls out of 281.
 - `~/.dsh/profiles/node_modules` is a farm of unresolvable junctions: a recursive `grep` there fails with
   thousands of `os error 3`s. Read the profile patch files directly.
 
-Round directories: four, one per cell, **different salts** — `node scripts/new-test-run.mjs --create` prints the
+Round directories: one per (cell, repeat), **different salts** — `node scripts/new-test-run.mjs --create` prints the
 salt and the messages with it substituted. The salt must differ per cell, or one cell's answers land in another
 cell's directory.
 
@@ -112,9 +138,11 @@ retyped is a stimulus that has changed.
 
 All four cells share one local Laya on `127.0.0.1:8008`. A measured round with whole-window scoring produced 281
 `s1_call` records of which **191 failed** — 97 `TypeError: fetch failed`, 57 `S1TimeoutError` after 30 s, and 37
-`503 server busy` returned by Laya itself — ending with **zero** `s1-noul` edges in the graph. Four cells at once
-will be worse. Either stagger C3/C4 or report the 503s, because they change what the numbers mean: a cell that
-received no System-1 judgements is not a cell that measured S1 governance.
+`503 server busy` returned by Laya itself — ending with **zero** `s1-noul` edges in the graph. Running the cells at
+once will be worse, and the next round's run set does not avoid it: `tier1: off` is not an S1-off switch (upkeep
+association scoring is not gated on it), so C1, C2 and C4 all make System-1 calls and C4 makes an order of
+magnitude more than the other two. Either stagger the cells into two waves or report the 503s, because they change
+what the numbers mean: a cell that received no System-1 judgements is not a cell that measured S1 governance.
 
 ### The S1 call volume is the pair count, not repeated work (measured 2026-10-01)
 
