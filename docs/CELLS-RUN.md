@@ -63,6 +63,32 @@ download the weights. **Confirm the device before the run, not after:** `GET /he
 `checkpoint_devices`, and `cpu_fallbacks` should be zero. A CPU backend under four concurrent cells is what turned
 a previous round into 191 failed S1 calls out of 281.
 
+### What this machine forces (measured 2026-10-01)
+
+- **Launch the cells with `DSH_PERMISSION_MODE=danger-full-access`.** Under the default `workspace-write`, the
+  Windows ACL sandbox cannot spawn a process for these instances at all: `pwsh` fails with `sandbox-local
+  windows-acl temp grant materialization failed and its cleanup also failed`, `glob` fails with `ripgrep launch
+  failed`, while `write` and `read` still work. The tested agent then asks to escalate, and with
+  `approval: ask` and nobody watching — the four cells are driven by an agent, not by a person — the turn hangs
+  forever. Three of the four cells of the first round died exactly there, and the fourth only finished because a
+  human clicked "allow once". The mode is read from `DSH_PERMISSION_MODE` by the `sandbox-policy` plugin, and
+  `danger-full-access` is the preset whose approval policy is `never`.
+  `dsh-sandbox-windows-acl`'s own diagnosis script classifies the workspace ACLs as **NOT_THIS_CLASS**
+  (`writeDac` and `writeOwner` both available, no package ACEs, `fixed: 0`), so this is not a repairable ACL
+  fault and repairing it is not the fix.
+- **Overwriting an existing file fails as well** (`SetFileSecurityW EACCES` on the sibling temp directory the
+  editor creates), in every mode. A stimulus that only ever creates *new* files never sees it; one that asks for
+  an existing file to be corrected does, and the cell stops and asks a human instead of finishing.
+- Prefer a stimulus that **writes nothing at all**. Files make the round depend on the sandbox rather than on
+  S1CAP: permissions, temp directories and security descriptors all become confounders, and the cell that hit them
+  needed two human interventions to finish. A conversation-only stimulus removes the salt directories too, since
+  nothing is written that a later round could read.
+- **Pick the cell model deliberately.** `bailian/qwen3.8-flash` over-thinks, which changes what a cell spends its
+  steps on; the owner's choice for the next round is `deepseek-v4.1-flash`, set through `agent-default-model` in
+  the copied profile.
+- `~/.dsh/profiles/node_modules` is a farm of unresolvable junctions: a recursive `grep` there fails with
+  thousands of `os error 3`s. Read the profile patch files directly.
+
 Round directories: four, one per cell, **different salts** — `node scripts/new-test-run.mjs --create` prints the
 salt and the messages with it substituted. The salt must differ per cell, or one cell's answers land in another
 cell's directory.
@@ -112,3 +138,10 @@ session content does not.
 If `recallTree` is absent from the control JSONL, the feature is unwired no matter what the tests say — that is
 the failure mode this repository has hit most often, and the reason each of these was committed with a grep
 proving it reaches the file.
+
+**Measured 2026-10-01 (round `20261001-1300`):** `recallTree` is present on **every** assembly record of all four
+cells — 19/19, 13/13, 11/11, 33/33 — and non-empty exactly where `tier1` selects (7/11 in C3, 13/33 in C4), empty
+in C1/C2 where recall selection is off. Both features are wired. The same run also shows what these counters are
+for: 698 of 1 880 System-1 calls came back `503 server busy` and 126 hit the 30 s transport guard, so only 17–32%
+of association pairs were judged by the backend and the rest fell back to the local lexical scorer. A cell's
+`judgedPairs / scoredPairs` belongs in every report beside its S1 columns.
