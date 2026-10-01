@@ -57,9 +57,10 @@ cell's directory.
 ## Messages
 
 The three-turn LeetCode stimuli live in `scripts/round-tasks.json` (ASCII-escaped, because no repository file may
-contain Chinese). **Known drift:** the owner revised turns 2 and 3 to create a new `.py` file and keep the
-previous one; the fixture still holds the older wording. Update the fixture before the next run rather than
-paraphrasing at the keyboard — a stimulus that is retyped is a stimulus that has changed.
+contain Chinese). Turns 2 and 3 carry the owner's revision: each asks for a **new `.py` file, keeping the
+previous one**, which is what makes the round a test of accumulation rather than of replacement. The fixture is
+the only copy of the stimulus — it is substituted, never retyped at the keyboard, because a stimulus that is
+retyped is a stimulus that has changed.
 
 ## Back-pressure
 
