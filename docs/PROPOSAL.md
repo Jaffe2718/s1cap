@@ -163,7 +163,7 @@ Suggested division of labor: one person leads core + the DSH plugin, one leads b
 
 1. Primary model: `deepseek-flash` (recommended: cheap, 1M ctx, has vision) vs GLM-5.3;
 2. The S1 backend the paper leads with: cloud Jev (quality, simple integration) vs. locally fine-tuned Laya/EdgeJev (offline story, with the work in M3);
-3. Budget ceiling for the full grid (recommended ≥$500);
+3. Budget ceiling for the **future full crossing** — all four quadrants, the four-arm basis of §4.6 (≈ $480/$240), not the ≈ $360/$180 three-arm run set that runs today: recommended ≥$500. A recommendation for the supervisor's decision, not a settled setting.
 4. Target venue and submission deadline (determines the scope of M5);
 5. Whether to release the Laya fine-tuned weights (the Apache-2.0 base permits it).
 

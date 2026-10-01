@@ -384,7 +384,9 @@ node scripts/cell-report.mjs --run <dir> --cells C0,C1,C2 --out <dir> --format a
 ```
 
 A run recorded under the old labels is reported the same way — `--cells C1,C2,C4` reads the cells the evidence
-actually holds, and `--label C1=baseline,C2=TAS,C4=full` gives the columns the display labels that round used. The
+actually holds, and `--label C1=baseline,C2=TAS,C4=full` gives the columns the display labels that round used.
+**Those arguments are the historical round's labels — round `20261001-1300` only. The current scheme is `C0`,
+`C1` and `C2`, so a run of the three cells in this document is read with the `--cells C0,C1,C2` line above.** The
 correspondence between those labels and today's scheme is the mapping table above, not the `--label` argument:
 that is exactly why the mapping has to be written down rather than remembered. The script also carries
 `--self-test`, which builds a synthetic run under the OS temp directory and asserts the arithmetic, the counting

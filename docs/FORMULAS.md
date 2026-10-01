@@ -238,9 +238,11 @@ node scripts/cell-report.mjs --run <dir> --cells C0,C1,C2 --out <dir> --format a
 ```
 
 A run recorded under the old labels is reported with `--cells C1,C2,C4` plus `--label C1=baseline,C2=TAS,C4=full`
-for the display labels that round used; the correspondence between those labels and today's cells is the mapping
-note at the head of this section, which is exactly why it matters. Three facts the generator had to handle, each of
-which belongs in the record so the next reader does not re-derive it:
+for the display labels that round used. **Those arguments are the historical round's labels — round
+`20261001-1300` only; the current scheme is `C0`, `C1` and `C2`, which is what the `--cells C0,C1,C2` line above
+reads.** The correspondence between those labels and today's cells is the mapping note at the head of this
+section, which is exactly why it matters. Three facts the generator had to handle, each of which belongs in the
+record so the next reader does not re-derive it:
 
 - **System-1 calls do not align to steps.** Association-graph upkeep ticks off the step clock, so calls are
   attributed by timestamp into a step window, then a turn window, and the remainder is printed as its own rows. In

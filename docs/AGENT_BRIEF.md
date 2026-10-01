@@ -499,7 +499,7 @@ Re-run C0 vs C2 on **one additional harness through the proxy** (opencode first;
 
 1. Primary model: `deepseek-flash` (recommended; cheap, 1M ctx, vision) vs GLM-5.3 — affects budget and cache fields.
 2. Headline S1 backend for the paper: cloud Jev (quality, trivial integration) vs local fine-tuned Laya/EdgeJev (offline story, more work, M3 risk).
-3. Hard budget cap for the full grid (recommended ≥ $500 to survive a frontier-scale TB surprise).
+3. Hard budget cap for the **future full crossing** — all four quadrants, the four-arm basis of §9.6 (≈ $480 peak / $240 off-peak), not the ≈ $360/$180 three-arm run set that runs today: recommended ≥ $500, to survive a frontier-scale TB surprise. A recommendation for the owner, not a settled setting.
 4. Target venue + deadline (scopes M5).
 5. Publish the Laya fine-tune weights? (Apache-2.0 base permits.)
 
