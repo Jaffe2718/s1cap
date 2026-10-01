@@ -171,6 +171,34 @@ $$
 
 Reference prices (per 1M tokens, verified 2026-09-28): `deepseek-flash` peak $p_{\mathrm{hit}}=0.006,\ p_{\mathrm{miss}}=0.30,\ p_{\mathrm{out}}=1.20$ (halved off-peak); GLM-5.3 at $0.26/1.40/4.40$; Jev $p_{\mathrm{s1}}=0.042$ (input only).
 
+### 5.1 What a report has to carry
+
+The three quantities inside $c_{\mathrm{call}}$ are the primary measurements, and they are reported **separately
+and per unit of work** — per turn and per step — because a hit rate is a ratio and a ratio hides scale. Round
+`20261001-1300` is the case in point: the cell with the best hit rate (C4, 92.6%) had the **largest** bill, 2.8×
+the baseline and 2.76–3.12× across the price assumptions tried, while the cell slightly *below* the baseline's rate
+(C2, 86.2%) had the smallest, 58% of it. So a report states $p_{\mathrm{hit}}, p_{\mathrm{miss}},
+p_{\mathrm{out}}$ explicitly rather than assuming them, prints $n_{\mathrm{miss}}, n_{\mathrm{hit}},
+n_{\mathrm{out}}$ per cell with their per-turn and per-step quotients, and treats $h$ as a **mechanism
+diagnostic** — it answers "did the prefix stay stable across steps", which is worth knowing and is not a cost.
+
+$C_{\mathrm{S1}}$ is a line of its own, with its call count and its own price. The claim that a cheap System-1
+saves an expensive LLM has to carry the System-1 bill: last round the lane spent 436 406 / 584 331 / 263 808 /
+3 722 310 input tokens over 363 / 257 / 241 / 1 155 calls, which is about \$0.018 / \$0.025 / \$0.011 / \$0.156 at
+$p_{\mathrm{s1}} = 0.042$ — priced with the reference rates above, that is more than the LLM bill of the cell it was
+meant to reduce (C4: about \$0.156 against \$0.134).
+
+Every System-1 column carries its coverage, $\mathrm{judgedPairs}/\mathrm{scoredPairs}$ from the association graph
+(`packages/core/src/assoc-graph.ts`), with the failure split beside it (503 refused / transport timeout / other).
+A cell counts as **S1-governed** only at coverage $\ge 0.5$; below that the majority of its graph was scored by the
+local lexical fallback and the cell is not a measurement of System-1 however it is labelled. Round
+`20261001-1300` measured 16.9 / 33.4 / 22.5 / 39.2% — no cell cleared the floor.
+
+Output length is part of the comparison or it is a confounder. $n_{\mathrm{out}}$ was 55–80% of
+$C_{\mathrm{task}}$ in every cell of that round, and C4 emitted 76 501 output tokens against C2's 19 410. A
+stimulus that does not constrain how long the answer may be has to report $n_{\mathrm{out}}$ as its own row with
+$p_{\mathrm{out}}$ applied to it, instead of folding it into a total that is then compared across cells.
+
 ## 6. Cache break-even analysis (hypothesis H3)
 
 For a given turn: the selection mechanism deletes $\Delta_s$ tokens (a proportion $h$ of which could have hit the cache), and TAS reordering turns $\Delta_i$ tokens from hits into misses. The cost change relative to the baseline is then:

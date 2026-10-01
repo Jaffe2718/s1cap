@@ -18,9 +18,11 @@ between those is `cache.reselectPolicy` — `perTask` freezes the selection insi
 default), `perTurn` does not.
 
 Which means the suspect is identifiable from the comparison rather than from the absolute number: three turns are
-three tasks, so three re-selections are *expected* and 86% may be unremarkable. **C1 has no S1CAP in it at all,
-so C1's hit rate is the baseline, and the C1-vs-C4 delta is the finding.** An absolute number proves nothing
-here.
+three tasks, so three re-selections are *expected* and 86% may be unremarkable. The baseline is C1 — the one cell
+that delivers nothing, so what it measures is the harness managing history by itself — and the finding is a
+difference between the measured token quantities of C1, C2 and C4 (see "Measurements, and where each comes from").
+The hit rate rides along as a mechanism diagnostic rather than as the finding: it is a ratio, and a cell can win on
+it while paying more, which is what C4 did. An absolute number proves nothing here.
 
 ## Cells
 
@@ -87,7 +89,7 @@ a previous round into 191 failed S1 calls out of 281.
   steps on; the owner's choice for the next round is `deepseek-v4.1-flash`, set through `agent-default-model` in
   the copied profile.
 - **Set `s1.retryAttempts` (2 is enough) for a four-cell run.** The shared backend refuses rather than queues at
-  its admission limit, and a measured round lost 732 of 1 880 calls to `503 server busy` — after which the S1
+  its admission limit, and a measured round lost 732 of its 2 016 calls to `503 server busy` — after which the S1
   columns are partly lexical ones, because a refused call falls back to the local scorer. With the retry on, a
   refused call waits the server's own `Retry-After` and is answered, and `attempts`/`waitedMs` on the `s1_call`
   record say how often that happened. Report `judgedPairs / scoredPairs` either way.
@@ -189,14 +191,75 @@ unmeasurable benefit.
 
 ## Measurements, and where each comes from
 
-| Metric | Source |
+**The primary quantities are three token counts, not a rate.** A cache hit rate is a ratio, and a ratio hides
+scale. Round `20261001-1300` is the demonstration: the cell with the best hit rate (C4, 92.6%) had the **largest**
+bill — 2.8× the baseline, and 2.76–3.12× across every price assumption tried — while the cell with a slightly
+*worse* hit rate than the baseline (C2, 86.2%) had the smallest, 58% of it. So report these, per cell and **per turn
+and per step**:
+
+| quantity | source |
 | --- | --- |
-| cache-hit / cache-miss / output tokens | `data.usage` on `assistant/message` events (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`) |
-| steps | assembly records in the cell's control JSONL, or `observation.steps` on the status route |
-| LLM duration | derived from session-event timestamps around each assistant message — state the derivation |
-| tool count / duration | `tool/call` → `tool/result` pairs and their timestamps |
-| S1 calls / duration | `s1_call` records in the control JSONL (`ms` summed, plus the ok/failed split and distinct error strings) |
-| cache hit rate | hit ÷ (hit + miss), reported **against C1** |
+| uncached input tokens | `data.usage.inputTokens` on `assistant/message` events — on this usage shape it counts the prompt tokens that *missed* the cache, not all prompt tokens |
+| cached input tokens | `data.usage.cacheReadTokens` |
+| output tokens | `data.usage.outputTokens` |
+| the price multipliers | **stated in the report**, never assumed: three quantities carry three prices, and the ordering of the cells moves with them |
+| steps, turns (the denominators) | `step/start` and `turn/start` counts in the harness session store, with the assembly-record count beside them as a cross-check |
+
+The shape was verified on every session of the last round: `totalTokens = inputTokens + cacheReadTokens +
+cacheWriteTokens + outputTokens`, and `cacheWriteTokens` was 0 in all four cells — which is what licenses reading
+`inputTokens` as the miss side. Per-turn numbers come free with the same events (`data.turn`), and they matter:
+C4's hit rate moved 90.3 / 83.5 / 94.3% across three turns, a ±10 pp spread with no stable ordering, so a per-run
+average is a summary of three different regimes rather than a property of the cell.
+
+That table, filled in from round `20261001-1300`, is what a report of this shape looks like:
+
+| cell | steps | turns | uncached in | cached in | output | per step (uncached / cached / output) | per turn |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| C1 | 19 | 3 | 49 306 | 321 792 | 28 936 | 2 595 / 16 936 / 1 523 | 16 435 / 107 264 / 9 645 |
+| C2 | 13 | 3 | 23 177 | 145 152 | 19 410 | 1 783 / 11 166 / 1 493 | 7 726 / 48 384 / 6 470 |
+| C3 | 11 | 3 | 39 871 | 151 552 | 28 314 | 3 625 / 13 777 / 2 574 | 13 290 / 50 517 / 9 438 |
+| C4 | 33 | 3 | 110 990 | 1 398 272 | 76 501 | 3 363 / 42 372 / 2 318 | 36 997 / 466 091 / 25 500 |
+
+Applying a price model to it — cached input at 0.1× an uncached token and output at 4×, the assumption stated in
+the report rather than left implicit — gives 100 / 58 / 85 / 282% of the baseline, and the ordering is stable under
+the other two assumptions tried (cached 0.25×: 100 / 56 / 78 / 312%; output 8×: 100 / 62 / 90 / 276%). What is *not*
+stable is which cell has the best hit rate, which is the point: C4 bought the largest bill with the best rate.
+
+**The System-1 lane carries its own bill, on its own line.** The claim "a cheap System-1 saves an expensive LLM"
+has to include what the System-1 lane cost: sum `inputTokens` over the cell's `s1_call` records and report it with
+the call count, beside the LLM bill rather than folded into it. Measured last round: 436 406 / 584 331 / 263 808 /
+3 722 310 System-1 input tokens for 363 / 257 / 241 / 1 155 calls. At the reference price in
+`docs/FORMULAS.md` §5 (Jev, input-only, \$0.042 per 1M) that is roughly \$0.018 / \$0.025 / \$0.011 / \$0.156,
+against LLM bills of roughly \$0.051 / \$0.031 / \$0.047 / \$0.134 at `deepseek-flash` peak prices — the System-1
+lane cost **more than the LLM it was meant to save** in C4. A cell whose S1 line is missing cannot support a cost
+claim in either direction, and the multipliers used for that line belong in the report beside the others.
+
+**Coverage goes beside every System-1 column**: `judgedPairs / scoredPairs`, with the failure split (`503 server
+busy` / transport timeout / other) next to it. `scoredPairs` is the pairs the window *offered*; `judgedPairs` is the
+ones the backend actually answered; a pair the backend did not answer was scored by the local lexical fallback, so
+a cell that looks S1-governed from its edge count may be reporting the fallback's work. **Floor: a cell counts as
+S1-governed only when `judgedPairs / scoredPairs` is at least 0.5.** Below half, the majority of the graph is the
+fallback's, and a comparison against the baseline is measuring something other than System-1. The last round
+measured 16.9 / 33.4 / 22.5 / 39.2% — **none of the four cells clears the floor**, which is the honest summary of
+that run and the reason the next one should carry `s1.retryAttempts` and staggered cells. Report the number even
+when it fails; especially then.
+
+**The hit rate is a mechanism diagnostic, not the headline.** It answers "did the prefix stay stable across steps",
+which is worth knowing and is not a cost: `h = cacheReadTokens / (cacheReadTokens + inputTokens)` — the derivation
+is kept here on purpose, and its label in the report is "mechanism", reported against C1's own `h` and never
+instead of the three quantities. A cell can win on `h` and lose on cost, which is exactly what C4 did.
+
+**Output length is not a free variable in a cost comparison.** C4 emitted 76 501 output tokens against C2's 19 410,
+and output was 55–80% of the modelled bill in every cell of the last round: at that share, a comparison measures
+how much the model chose to say unless the stimulus constrains it. Either bound the answer in the stimulus (a
+stated length or format the turn must respect) or report output tokens as a separate column with the cost model
+applied to it explicitly — but do not read a cost delta off cells whose output volumes differ by 4×.
+
+Derivations for the non-token columns, which stay as they were: LLM duration is derived from session-event
+timestamps around each assistant message (`assistant/message.time` minus its `step/start.time`) and the derivation
+is stated in the report; tool count and duration come from `tool/call` → `tool/result` pairs matched by `callId`;
+System-1 duration and failures come from the `s1_call` records (`ms` summed, plus the ok/failed split and the
+distinct error strings).
 
 **Correction, established after this document was first written: C1 and C2 are *not* S1-free.** Upkeep graph
 scoring is not gated on `recall.tier1`, so `tier1: 'off'` disables the recall *selection* and leaves the
@@ -220,6 +283,8 @@ proving it reaches the file.
 **Measured 2026-10-01 (round `20261001-1300`):** `recallTree` is present on **every** assembly record of all four
 cells — 19/19, 13/13, 11/11, 33/33 — and non-empty exactly where `tier1` selects (7/11 in C3, 13/33 in C4), empty
 in C1/C2 where recall selection is off. Both features are wired. The same run also shows what these counters are
-for: 732 of 1 880 System-1 calls came back `503 server busy` and 126 hit the 30 s transport guard, so only 17–33%
-of association pairs were judged by the backend and the rest fell back to the local lexical scorer. A cell's
-`judgedPairs / scoredPairs` belongs in every report beside its S1 columns.
+for: 732 of its 2 016 System-1 calls came back `503 server busy` and 126 hit the 30 s transport guard (the round
+report's denominator of 1 880 was read mid-run, before C4 had made its last 136 calls), so only 16.9 / 33.4 /
+22.5 / 39.2% of association pairs were judged by the backend and the rest fell back to the local lexical scorer —
+no cell clearing the 0.5 coverage floor. A cell's `judgedPairs / scoredPairs` belongs in every report beside its S1
+columns.
