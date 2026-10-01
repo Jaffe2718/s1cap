@@ -1722,6 +1722,139 @@ one:
 The cost is bounded by construction: recall already fills a block under `recall.budgetRatio`, so admitting
 unknown pairs can spend the recall budget and cannot overspend it.
 
+## 8. Round of 2026-10-01: short-turn token accounting is retired as a measurement, and the next phase is a long-horizon test/optimize loop
+
+Round `20261001-1414` was the first clean three-cell run, and reading it ended the short-task phase. Three decisions
+were taken, all the owner's, and they change what the next phase *measures* rather than what the system under test
+is:
+
+| # | decision | in practice |
+| --- | --- | --- |
+| 1 | **Short tasks are retired as a measurement instrument** and kept only as the harness's own smoke test. | The three-turn LeetCode stimulus in `scripts/round-tasks.json` still runs; what it certifies is that the environment works, not how a cell spends tokens. |
+| 2 | **Measurement draws one long-horizon task at random** from the pools `docs/AGENT_BRIEF.md` §9.2 names (their sizes are in §9.1) — SWE-bench Verified, Terminal-Bench 4.0, τ²-bench (`tau2-bench`) — runs it under `C0`/`C1`/`C2`, optimizes whatever the run exposes, then draws again. | A repeated test/optimize loop instead of one grid. An iteration is a round in the existing sense: one run directory, three cells, `docs/CELLS-RUN.md` for the procedure. |
+| 3 | **The loop is handed to a Collaborator, supervised with `GPT-6-Astra`.** | The system under test does not change: DSH with `deepseek-account/deepseek-flash` (DeepSeek V4.1 Flash, the model the instances display), `reasoningEffort` pinned, no sampling parameter available to set. |
+
+**Evidence paths in this section.** The ablation work area is a sibling of this repository — `s1cap/` and
+`.s1cap-ablation/` sit side by side, and the latter is not tracked here — so every path below that begins
+`.s1cap-ablation/` is relative to that parent directory, not to `docs/`.
+
+### Why short tasks cannot carry the measurement
+
+The numbers are the round's own, from `.s1cap-ablation/round-20261001-1414/ROUND-REPORT.md` and the tables and charts
+in its `report/`. Read the report rather than this summary.
+
+- **Three turns of a LeetCode stimulus produce 6–7 steps and about 20 s of LLM time per cell** — 7 steps and
+  22 448 ms in `C0`, 6 and 21 629 ms in `C1`, 7 and 17 854 ms in `C2`. The window in which a configuration can act
+  is tiny.
+- **Output tokens were 5 161 (`C0`) / 4 969 (`C1`) / 3 359 (`C2`)**, and output is the dominant term in a
+  price-weighted total: it was **55–80 %** of such a total in every cell of round `20261001-1300` (`docs/CELLS-RUN.md`,
+  "Output length is not a free variable in the comparison").
+- **The within-cell spread was ±10 pp across three turns of the same cell** in the earlier four-cell round — per-turn
+  cache hit rates 90.3 / 83.5 / 94.3 %, with no stable ordering (`docs/CELLS-RUN.md`, "Run set: three cells, and what
+  a round of the current phase measures").
+- **`C1` sits between `C0` and `C2` while being a different configuration.** `C0` → `C1` is 192 output tokens —
+  under 4 % — and reads as the first step of a dose-response; it is smaller than the noise it is being read against.
+  That ordering is the visible symptom, not a result.
+
+The owner's reason, in substance: **"a model that suddenly gets a bit more verbose and the whole picture changes."**
+A measurement whose noise is the same size as its effect measures verbosity, not context management.
+
+**This does not invalidate the round — it is the round that validated the harness end to end, and it remains the
+record that the environment works.** Pre-flight **10/10** in a throwaway `PROBE` instance before any measurement cell
+was touched; **three gates in every cell** (`real messages == turn/start == turn/end == k`); **nine pasted messages
+verified byte for byte** by SHA-256 against the fixture; **zero interventions** — no question asked, no approval
+prompt, no stall; and **25 of 25 System-1 calls answered on the first attempt**, because the serial schedule removed
+the admission pressure that cost round `20261001-1300` 732 of its 2 016 calls. It also produced the environment
+finding that made the round possible at all: an instance launched from a sandboxed parent shell inherits the
+restricted token into everything it spawns, which is what round `20261001-1300`'s two "interventions" actually were.
+
+**The round's own caveats travel with its numbers.** n = 1 per cell, so nothing in it separates a configuration
+effect from run-to-run variance. The two control arms' System-1 zeros are **constructive, not measured** (`C0` and
+`C1` carry `provider: "none"` and `laya.enabled: false`, so no lane exists; their coverage is *undefined*, not 0 %).
+Coverage is **cell-level only**, from a running-total snapshot, so `C2`'s 100.0 % is the cell's final ratio and not a
+per-turn series. And the cells ran at **different wall-clock times** by design, so provider-side load differs between
+them and cannot be controlled from here.
+
+### The loop
+
+**Draw one task at random, run it under all three cells, optimize what the run exposes, draw again.** The task comes
+from the pools `docs/AGENT_BRIEF.md` §9.2 names; the round is the three-cell round `docs/CELLS-RUN.md` already
+describes, with the drawn task in place of the three-turn stimulus.
+
+**Why one task at a time instead of the full grid.** The grid's price is what this phase avoids: `AGENT_BRIEF.md`
+§9.6's own estimate for the three-arm run set is ≈ **$360 peak / $180 off-peak** for ~1 340 episodes. One draw per
+iteration buys a signal for **optimization** at a fraction of that. What it cannot buy has to be said as plainly:
+**one draw supports optimization, not a claim.** A claim still needs the repeated grid of §9.1, §9.3 and §9.4 — and
+an iteration is an iteration only when **the same task has been run under all three cells**; one arm's pass is a
+partial observation, not something to optimize against.
+
+**The draw must be auditable.** The round's own record carries **which task, from which pool, and by what rule** (a
+seeded random pick, for instance) beside the evidence, so that a reader can tell *random* from *chosen because it
+looked good*. The rule itself is one of the questions left to the owner below; what is decided here is that an
+unrecorded draw is not a draw.
+
+**What the Collaborator inherits.** The operational knowledge is named rather than left to be rediscovered:
+
+- `docs/CELLS-RUN.md` — the cells and their presets, the prerequisites a round repeats if it skips them
+  (`DSH_PERMISSION_MODE=danger-full-access`; `s1.retryAttempts: 2` on the arm with a lane; `provider: "none"` *and*
+  `laya.enabled: false` on both controls; a pinned `s1.baseUrl`), the model row, and the metric specification the
+  report implements.
+- `.s1cap-ablation/RUNBOOK.md` — the operating order, one level above this repository. The parts that are not
+  optional: **one cell at a time, in the order `C0`, `C1`, `C2`**; **seed the workspace store before the instance
+  starts**, because the store is read at boot and a store written while the instance runs is ignored; **launch from
+  an unrestricted process**, because a sandboxed parent leaks its restricted token into everything the instance
+  spawns (`pwsh` dies with `spawn EPERM`, `glob` with `ripgrep launch failed`); **exactly three human inputs per cell
+  and no interventions after them**; **no slash commands**; **paste the stimulus from the fixture, never retype it**.
+- `scripts/cell-report.mjs` — the tables and the charts, one implementation of every metric; `--audit` reads the
+  finished SVGs back and verifies each panel's geometry.
+
+**What each iteration reports back.** The three cells' time / cost / completion tables and charts from
+`scripts/cell-report.mjs`; the System-1 lane facts (calls, refusals, tokens, coverage) read beside them; and **what
+was changed and why**. The point of the loop is optimization decisions that cite the run that motivated them — a
+change with no run behind it is not an iteration's output.
+
+**The two token accounts stay separate.** The System-1 lane's own tokens are Laya's account; the LLM's cached-hit,
+uncached and output tokens are the LLM's. They are never added and never conflated. Round `20261001-1414` is the
+worked example: `C2`'s lane spent **86 214** tokens while that cell's own LLM spent **67 992** (55 808 cached +
+8 835 uncached + 3 359 output), and, separately, ≈ **1 620** of the cell's uncached input was the price of
+*receiving* 8 recalled blocks — +350 at step 2.1 (2 blocks) and +1 270 at step 3.1 (6 blocks) over the control arms,
+measured per step rather than inferred, 175–212 tokens per block. Fresh content in the LLM's prompt is billed to the
+LLM as uncached input; the lane's consumption does not appear on the LLM's bill, and the LLM's uncached input is not
+the lane's consumption.
+
+### Handover, and the one thing not verified
+
+The loop goes to a **Collaborator** — a coding agent, not this session — supervised with **`GPT-6-Astra`**. The
+system under test is unchanged: DSH with `deepseek-account/deepseek-flash` (DeepSeek V4.1 Flash), the model row the
+cells of round `20261001-1414` ran, `reasoningEffort` pinned, no sampling parameter claimed.
+
+**`GPT-6-Astra`'s provider and model id are not verified on this machine** (being checked separately), so nothing
+here names a config value for it: the Collaborator's own profile must resolve the provider and the model id and
+verify them before the loop runs, rather than inheriting an assumed string from this document. The other half *is*
+verified — the cells' model row, which `preflight.mjs` reads, is what the instances will actually run.
+
+### Left to the owner
+
+`docs/AGENT_BRIEF.md` §9 is the owner's design, so these are the places the new phase touches it that were **not**
+changed here, listed as questions rather than as decisions:
+
+1. **§9.1's "randomized run order" against the fixed serial order.** The cells run `C0` → `C1` → `C2`, one at a
+   time, because the shared Laya refuses rather than queues; under the loop the *draw* is the randomized part.
+   Confirm that reading, and whether §9.1 should say so.
+2. **The draw rule.** §9.1 fixes the pools' sizes (SWE-bench Verified 100, Terminal-Bench 4.0 66, τ²-bench ~280) and
+   §9.2 names the pools, but nothing fixes how one is chosen or weighted, whether draws are stratified per pool, or
+   whether a task already drawn for optimization may later be counted in the registered grid's paired n. The
+   auditability requirement is recorded above; the rule is not.
+3. **What an iteration reports.** §9.3 defines the grid's metrics — solve rate per benchmark, $/task, tokens/task,
+   wall-clock/task — none of which a single draw can produce, and no per-iteration metric is defined in §9. The
+   iteration's report is described above instead.
+4. **The loop's budget.** §9.6 prices the run sets and §12.3 asks the owner for a cap on the future full crossing;
+   the loop that runs now has no cap and no iteration count of its own. Whether §9.6's "pilot 10 TB tasks first" is
+   simply the loop's first iterations is a decision, not a deduction.
+5. **§9.4's variance subsample.** "Repeat a 10 % subsample three times for variance" presumes the grid; the loop's
+   counter-discipline is instead "all three cells before moving on". Whether §9.4 stays as written until the grid
+   runs is for the owner.
+
 
 
 

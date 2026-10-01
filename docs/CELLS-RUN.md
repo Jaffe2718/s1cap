@@ -82,9 +82,9 @@ naming the hit-rate and per-step pairs above, so the pairing has to be chosen on
 The full 2×2 crossing — three arms run today, the dropped arm included — stays the goal once the `C1`-vs-`C2`
 contrast is established.
 
-## Run set for the next round: three cells, and repeats
+## Run set: three cells, and what a round of the current phase measures
 
-**The next round runs three cells: C0, C1 and C2.** The names are the code's — `cellPolicy()`, the presets in
+**A round runs three cells: C0, C1 and C2.** The names are the code's — `cellPolicy()`, the presets in
 `bench/cells/`, the settings panel, the `cell` field on every telemetry record and this document all bind to
 C0–C2 — and the old C3 is not run again (see above).
 
@@ -97,12 +97,22 @@ margin the thinnest of the three), and its uncached input per step, 1 783 agains
 if `C2` cannot beat `C1` then the System-1 half has not earned its place in the configuration, and nothing about
 that argument needs a fourth arm.
 
-**The budget that freed up goes to repeats.** One run per cell cannot separate an effect from noise, and round
+**What a round measures now: one long-horizon task, drawn at random.** Short-turn token accounting was retired as a
+measurement on 2026-10-01 — the three decisions, the evidence behind them and the loop that replaces the short-task
+round are recorded in `docs/STATUS.md` §8 and are not repeated here. What this document still owns is the
+**procedure**, and the draw does not change any of it: the cells and their presets, the prerequisites below, the
+pasting rules, the report generator and the metric specification all stay as written. What changes is the stimulus a
+measurement round runs — one task drawn from the pools `docs/AGENT_BRIEF.md` §9.2 names, run under all three cells
+before the next draw, instead of the three-turn fixture (see "Messages").
+
+**Repeats are still what a claim needs.** One run per cell cannot separate an effect from noise, and round
 `20261001-1300` shows how much noise there is: the full-configuration arm's per-turn hit rates were 90.3 / 83.5 /
 94.3% — a ±10 pp spread *within one cell*, across three turns, with no stable ordering — and the four arms' overall
 rates were not monotone in how much S1CAP each of them ran. So run C0, C1 and C2 several times each and report the
 repeats as a distribution per cell (min / median / max, and the count), not as one mean over runs that disagreed.
-Each repeat keeps its own workspace and its own telemetry paths, exactly as the cells do now.
+Each repeat keeps its own workspace and its own telemetry paths, exactly as the cells do now. The current phase
+spends its budget on single draws for **optimization** instead; the grid is what a **claim** waits for, and one draw
+supports optimization and not a claim.
 
 ## Setup
 
@@ -162,13 +172,18 @@ a previous round into 191 failed S1 calls out of 281.
   `dsh-sandbox-windows-acl`'s own diagnosis script classifies the workspace ACLs as **NOT_THIS_CLASS**
   (`writeDac` and `writeOwner` both available, no package ACEs, `fixed: 0`), so this is not a repairable ACL
   fault and repairing it is not the fix.
-- **Overwriting an existing file fails as well** (`SetFileSecurityW EACCES` on the sibling temp directory the
-  editor creates), in every mode. A stimulus that only ever creates *new* files never sees it; one that asks for
-  an existing file to be corrected does, and the cell stops and asks a human instead of finishing.
-- **The stimulus writes nothing at all**, which is the choice this round settled on. Files make the round depend on
-  the sandbox rather than on S1CAP: permissions, temp directories and security descriptors all become confounders,
-  and the cell that hit them needed two human interventions to finish. A conversation-only stimulus removes the
-  round directories too, since nothing is written that a later round could read.
+- **Overwriting an existing file failed** (`SetFileSecurityW EACCES` on the sibling temp directory the editor
+  creates), in every sandbox mode. What that measurement did not separate, and round `20261001-1414`'s pre-flight
+  did, is the launch parent: an instance launched from a **sandboxed parent shell** inherits the restricted token
+  into everything it spawns and fails this overwrite, while the same checks pass from an unrestricted launch. A
+  stimulus that only ever creates *new* files never sees it; one that asks for an existing file to be corrected
+  does, and the cell stops and asks a human instead of finishing.
+- **The smoke-test stimulus writes nothing at all**, which is the choice the three-turn fixture settled on. Files
+  make the round depend on the sandbox rather than on S1CAP: permissions, temp directories and security descriptors
+  all become confounders, and the cell that hit them needed two human interventions to finish. A conversation-only
+  stimulus removes the round directories too, since nothing is written that a later round could read. **A drawn
+  long-horizon task is the other case**: a benchmark instance is a repository in a workspace, so that round writes by
+  design and the launch environment above is what decides whether writing works.
 - **Pick the cell model deliberately.** `bailian/qwen3.8-flash` over-thinks, which changes what a cell spends its
   steps on; the owner's choice for the next round is `deepseek-v4.1-flash`, with `reasoningEffort` pinned, set
   through `agent-default-model` in the copied profile. No sampling parameter is claimed for the run: DSH exposes
@@ -189,7 +204,20 @@ later cell to inherit and no path for two cells to collide over. `node scripts/n
 opens a round directory and still substitutes `{salt}` where a stimulus contains it, so the mechanism stays
 available for a stimulus that does write; with the current fixture it prints the messages with nothing substituted.
 
-## Messages
+**A drawn task isolates the same way, with a copy per cell.** The rule is unchanged — no two cells may share a
+workspace — and the mechanism is not: a benchmark instance is a repository, so each cell needs its own copy of it
+under `<run>/ws/<cell>` instead of the empty directory above. How the instance is materialized belongs in the
+round's own record (SWE-bench Verified and Terminal-Bench 4.0 run theirs in docker containers, τ²-bench is pure
+Python and needs neither — `docs/AGENT_BRIEF.md` §9.2), and the copy has to be per cell: one two cells shared would
+let one cell's edits become the next cell's starting state.
+
+## Messages — the three-turn stimulus, kept as the harness smoke test
+
+**These three turns are the harness's smoke test, not the measurement.** A measurement round draws one long-horizon
+task at random and runs that (`docs/STATUS.md` §8); this fixture is what a round runs when the question is whether
+the environment works at all — pre-flight, the three gates, the paste discipline and the report path — and it is the
+stimulus that proved it end to end in round `20261001-1414`, which is both the first clean three-cell run and the
+last short-task round.
 
 The three-turn LeetCode stimuli live in `scripts/round-tasks.json` (ASCII-escaped, because no repository file may
 contain Chinese), and they ask for the answer **in the conversation**: the stimulus forbids creating, modifying or
@@ -213,6 +241,12 @@ new section** for the new problem — 121 → 122 → 123 (one transaction → a
 which is what makes the round a test of accumulation rather than of replacement. The fixture is still the only copy
 of the stimulus: the messages are read from it and sent as recorded, never retyped at the keyboard, because a
 stimulus that is retyped is a stimulus that has changed.
+
+**A drawn long-horizon task keeps the discipline without the fixture.** It does not come from
+`scripts/round-tasks.json`; it comes from its pool, and the round runs the instance as the pool ships it, records its
+id and its pool beside the evidence, and does not restate the task in its own words. A benchmark instance is also a
+workspace with a repository in it — the case this fixture was written to avoid — so a drawn round writes files by
+design and the launch prerequisites in "Setup" above stop being precautionary.
 
 ## Back-pressure
 
@@ -374,7 +408,7 @@ for turns, steps, per-step usage and tool durations, and `home/<cell>/.s1cap/rg/
 | --- | --- |
 | time | turns, steps, LLM calls, System-1 calls, other tool calls; LLM time, System-1 time, other tool time — with the frames they sit in printed beside them (`step frame` = `step/end − step/start`, `turn frame` = `turn/end − turn/start`, `between-step idle` = the difference), so that LLM + tool + residual = step frame can be checked rather than assumed |
 | cost | cached-hit input tokens, uncached input tokens, output tokens, plus the System-1 lane's own tokens |
-| completion | benchmark-only: turns completed and time to completion. The current stimulus completes in every cell, so the report prints it as one constant column and says so instead of printing a per-turn table of the same value |
+| completion | benchmark-only: turns completed and time to completion. The three-turn smoke-test stimulus completes in every cell, so for that fixture the report prints completion as one constant column and says so instead of printing a per-turn table of the same value |
 | mechanism diagnostics (not cost) | System-1 coverage beside every System-1 column, and the cache hit rate — it appears **once**, here, never in the cost table |
 
 Usage:

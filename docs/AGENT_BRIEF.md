@@ -450,6 +450,38 @@ Re-run C0 vs C2 on **one additional harness through the proxy** (opencode first;
 
 **Three arms run: ~446 episodes per arm** (SWE-V 100 + tau2 ~280 + TB 66), so ~1,340 episodes where the four-arm grid budgeted ~1,780. At that per-arm density: SWE-V 100/cell ≈ $16; tau2 ≈ $17; Terminal-Bench ≈ $330 **lean assumption** (5M in + 1M out per task; frontier-scale TB runs 20–65M tokens/episode → budget-buster) — **pilot 10 TB tasks first** to pin tokens/task; Artificial Analysis publishes per-model TB 4.0 cost/task for calibration. Total ≈ **$360 peak / $180 off-peak** — the same per-arm estimate that read $480/$240 at four arms, scaled by three quarters and printed so it can be checked ($16 + $17 + $330 ≈ $363) — off-peak = 50% discount outside 01:00–04:00 & 06:00–10:00 UTC weekdays, so schedule runs accordingly. Optional `deepseek-v4-pro` arm on SWE-V only: +$57 (was $76 at four arms). GLM-5.3 10% model-swap check: +$30 (was $40). This is an estimate at the same per-arm density and nothing else: the budget **cap** remains the owner's decision (§12.3).
 
+### 9.7 The optimization loop (the phase that runs now, from 2026-10-01)
+
+Everything above stands, and it is what a **claim** requires: the arms and the pairing of §9.1, the metrics and the
+registered success rule of §9.3, the validity controls of §9.4, the generality checks of §9.5 and the budget line of
+§9.6. What changed on 2026-10-01 is what the project does **next**, and it is deliberately not the grid: short-turn
+token accounting was retired as a measurement — the evidence is in `STATUS.md` §8 — and the phase that follows is a
+test/optimize loop.
+
+**The loop.** Draw one long-horizon task at random from the pools of §9.2, run it under `C0`, `C1` and `C2`, optimize
+whatever the run exposes, then draw again. Each iteration's record carries the task, its pool and the rule the draw
+followed, so that the draw is auditable rather than plausible; the three cells' time / cost / completion tables and
+the System-1 lane facts are reported per `STATUS.md` §8, and every optimization decision cites the run that
+motivated it.
+
+**Why not the grid yet.** §9.6 prices the three-arm run set at ≈ $360 peak / $180 off-peak (~1 340 episodes), and
+that is the cost this phase avoids while the configuration is still moving: one draw buys a signal for
+*optimization* at a fraction of it. It buys nothing else. **One draw supports optimization, not a claim** — a claim
+still needs the repeated grid, and an iteration is complete only when the *same task* has been run under all three
+cells, because §9.1's within-task pairing is the only thing that makes the three cells comparable at all.
+
+**Supervision.** The loop is run by a Collaborator supervised with `GPT-6-Astra`. The system under test does not
+change: DSH with `deepseek-account/deepseek-flash` (DeepSeek V4.1 Flash), `reasoningEffort` pinned, no sampling
+parameter claimed (§9.1). `GPT-6-Astra`'s provider and model id are **not verified on this machine**: they are to be
+resolved and verified in the Collaborator's own profile, not assumed from this document.
+
+**Left open against this section, because §9 is the owner's design** — none of the five was changed here:
+(a) §9.1's "randomized run order" against the run book's fixed serial cell order; (b) the draw rule itself, which no
+part of §9 fixes; (c) there is no per-iteration metric in §9.3, because none of its metrics can come from a single
+draw; (d) the loop has no budget cap or iteration count, while §9.6 prices the grid and §12.3 caps *that*; and
+(e) §9.4's variance subsample presumes the grid. All five are stated in full, with what each would change, in
+`STATUS.md` §8, "Left to the owner".
+
 ---
 
 ## 10. Milestones
