@@ -173,6 +173,15 @@ Reference prices (per 1M tokens, verified 2026-09-28): `deepseek-flash` peak $p_
 
 ### 5.1 What a report has to carry
 
+> **Cell labels in this section.** The measured figures quoted here come from round `20261001-1300`, which ran
+> **four** cells under labels that no longer exist. The mapping is: round `C1` (baseline) is today's **`C0`**;
+> round `C2` (TAS alone) is today's **`C1`**; round `C3` (recall selection with `tas.on: false`) is **dropped, no
+> successor**; round `C4` (the full configuration) is today's **`C2`**. Every figure below stays attributed to that
+> round and to the label it ran under, and none is silently re-labelled. `docs/CELLS-RUN.md` §"The names changed
+> after round `20261001-1300` ran" carries the same table, with the per-step reason the fourth arm was dropped
+> (3 625 uncached input tokens per step against the baseline's 2 595, 2 574 output against 1 523, a 79.2% hit rate
+> against 86.7%, and 22.5% coverage, below the 0.5 floor).
+
 The primary measurements are the three raw token counts inside $c_{\mathrm{call}}$ — the triple
 $(n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}})$: uncached input tokens, cached input tokens, output
 tokens — reported **separately and per unit of work**, per turn and per step, because a hit rate is a ratio and a
@@ -180,33 +189,70 @@ ratio hides scale. **No scalar is formed from the three.** $c_{\mathrm{call}}$ a
 triple, and prices differ per model and per provider: $p_{\mathrm{hit}}, p_{\mathrm{miss}}, p_{\mathrm{out}}$ are
 properties of a contract, not of the system under test, so a weighted total would rank cells by the rates assumed
 rather than by what ran. A cell that wins on one component and loses on another is a normal outcome, not a tie to be
-broken by weights — the table is read component by component. Round `20261001-1300` is the case in point: the cell
-with the best hit rate (C4, 92.6%) carried the **largest** count on all three components, and the cell slightly
-*below* the baseline's rate (C2, 86.2%) carried the smallest. So a report prints $n_{\mathrm{miss}},
-n_{\mathrm{hit}}, n_{\mathrm{out}}$ per cell with their per-turn and per-step quotients, and treats $h$ as a
-**mechanism diagnostic** — it answers "did the prefix stay stable across steps", which is worth knowing and is not a
-cost — and never reports it instead of the triple.
+broken by weights — the table is read component by component. Round `20261001-1300` is the case in point: the arm
+with the best hit rate (round `C4`, the full configuration, today's `C2`, 92.6%) carried the **largest** count on
+all three components, and the arm slightly *below* the baseline's rate (round `C2`, TAS alone, today's `C1`, 86.2%)
+carried the smallest. So a report prints $n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}}$ per cell with
+their per-turn and per-step quotients, and treats $h$ as a **mechanism diagnostic** — it answers "did the prefix stay
+stable across steps", which is worth knowing and is not a cost — and never reports it instead of the triple.
 
 $C_{\mathrm{S1}}$ is a line of its own, with its call count, and it is compared in tokens, never in currency. The
 claim that a cheap System-1 saves an expensive LLM has to carry the System-1 lane's own usage: last round the lane
-spent 436 406 / 584 331 / 263 808 / 3 722 310 input tokens over 363 / 257 / 241 / 1 155 calls. In C4 that is
-3 722 310 input tokens over 1 155 calls (807 of them answered), against the same cell's LLM usage of
+spent 436 406 / 584 331 / 263 808 / 3 722 310 input tokens over 363 / 257 / 241 / 1 155 calls (round labels `C1` /
+`C2` / `C3` / `C4`; i.e. today's `C0` / `C1` / dropped / `C2`). In the full configuration (round `C4`, today's `C2`)
+that is 3 722 310 input tokens over 1 155 calls (807 of them answered), against the same cell's LLM usage of
 $n_{\mathrm{hit}} = 1\,398\,272$, $n_{\mathrm{miss}} = 110\,990$, $n_{\mathrm{out}} = 76\,501$ — 1 585 763 tokens in
 all — so the System-1 lane moved about **2.35×** the tokens of the model it is meant to make cheaper. The two lanes
 are not interchangeable (one is a local GPU resource, the other a billed API), and the ratio is not a bill: pricing
-either lane would put a price list back in the middle of a quantity comparison.
+either lane would put a price list back in the middle of a quantity comparison. An arm with no System-1 lane at all
+— the two control arms of the current scheme, which pin `s1.provider: "none"` — has a $C_{\mathrm{S1}}$ of zero
+*by construction*, and a report has to say that rather than print a bare 0 beside a refused lane's real spend.
 
 Every System-1 column carries its coverage, $\mathrm{judgedPairs}/\mathrm{scoredPairs}$ from the association graph
 (`packages/core/src/assoc-graph.ts`), with the failure split beside it (503 refused / transport timeout / other).
 A cell counts as **S1-governed** only at coverage $\ge 0.5$; below that the majority of its graph was scored by the
 local lexical fallback and the cell is not a measurement of System-1 however it is labelled. Round
-`20261001-1300` measured 16.9 / 33.4 / 22.5 / 39.2% — no cell cleared the floor.
+`20261001-1300` measured 16.9 / 33.4 / 22.5 / 39.2% (round labels `C1` / `C2` / `C3` / `C4`) — no arm cleared the
+floor. Where a cell has no lane, coverage is **undefined** rather than 0: `judgedPairs` is 0 because the backend was
+never asked, which is a different claim from a backend that judged none of what it was shown.
 
 Output length is part of the comparison or it is a confounder. $n_{\mathrm{out}}$ was 55–80% of what a price-weighted
 total would have charged in every cell of that round — a statement about the quantities, since output dominates any
-weighting — and C4 emitted 76 501 output tokens against C2's 19 410. A stimulus that does not constrain how long the
-answer may be has to report $n_{\mathrm{out}}$ as its own row instead of folding it into a total that is then
-compared across cells.
+weighting — and the full configuration emitted 76 501 output tokens against TAS alone's 19 410. A stimulus that does
+not constrain how long the answer may be has to report $n_{\mathrm{out}}$ as its own row instead of folding it into
+a total that is then compared across cells.
+
+#### The report generator
+
+`scripts/cell-report.mjs` is committed and validates against round `20261001-1300` exactly. It reads a finished
+run's own evidence — `evidence/<cell>/control.jsonl`, `home/<cell>/sessions/**/session.v4.jsonl.zstd`, and
+`home/<cell>/.s1cap/rg/*.json` — and prints the metrics above **per cell, per turn and per step**: time (turns,
+steps, LLM calls, System-1 calls, other tool calls; LLM time, System-1 time, other tool time, with the step and turn
+frames printed beside them so the residual is visible instead of assumed), cost (cached-hit input tokens, uncached
+input tokens, output tokens, plus the System-1 lane's own tokens) and completion (benchmark-only — the current
+stimulus completes in every cell, and the report prints that as one constant column rather than a per-turn table of
+the same value). The cache hit rate appears once, under mechanism diagnostics, never in the cost table:
+
+```
+node scripts/cell-report.mjs --run <dir> --cells C0,C1,C2 --out <dir> --format all
+```
+
+A run recorded under the old labels is reported with `--cells C1,C2,C4` plus `--label C1=baseline,C2=TAS,C4=full`
+for the display labels that round used; the correspondence between those labels and today's cells is the mapping
+note at the head of this section, which is exactly why it matters. Three facts the generator had to handle, each of
+which belongs in the record so the next reader does not re-derive it:
+
+- **System-1 calls do not align to steps.** Association-graph upkeep ticks off the step clock, so calls are
+  attributed by timestamp into a step window, then a turn window, and the remainder is printed as its own rows. In
+  the baseline arm of round `20261001-1300` (round `C1`, today's `C0`) only **179 of 363** calls fell inside a step
+  window — 48 between steps of a turn, 108 between turns, 28 after the last `turn/end` — so a per-step-only table
+  would have dropped the other **184**, just over half of that arm's calls, while its total still read 363.
+- **System-1 time is concurrent, not additive.** In the full configuration (round `C4`, today's `C2`) turn 3 sums
+  **10 633 810 ms** of lane time inside a turn of **1 306 265 ms**, so it must never be added to LLM time.
+- **A lane-absent zero is not a refused zero.** The lane state is read from the plugin's own `kind:"wiring"` record
+  on the cell's tape (`<DSH_HOME>/.s1cap/tape.jsonl`), whose `s1` field is literally `"none"` for the Off choice. A
+  lane-absent cell prints `0 (no S1 lane)` with coverage *undefined*; a refused lane prints its
+  `ok / refused / total` split with a measured coverage.
 
 ## 6. Cache break-even analysis (hypothesis H3)
 
@@ -282,7 +328,8 @@ The left-hand ratio counts removed tokens per invalidated **hit** token, i.e. th
   cost a partial block.
 - Never let per-turn metadata (timestamps, turn ids, cache flags) into the prefix.
 - Measure $h$ per call (already in `llm_call` telemetry) and apply the test above with the measured $h$:
-  the C2-vs-C4 comparison isolates selection's cache effect, which is H3.
+  the `C1`-vs-`C2` comparison — TAS alone against the full configuration, which round `20261001-1300` recorded
+  under the labels `C2` vs `C4` — isolates selection's cache effect, which is H3.
 
 ## 7. Time model
 
@@ -293,21 +340,30 @@ $$
 
 $t_{\mathrm{approval}}$ = approval wait (the benchmark zeroes it out with an auto-approval sandbox; interactive sessions deduct it from tool_call events). S1 local path $t_{\mathrm{S1}} \approx 15.6\,\mathrm{ms}$ (EdgeJev INT8, 4 vCPU).
 
+**Measured caveat (2026-10-01).** $t_{\mathrm{S1}}$ is serial with the request only where it gates an assembly or a
+gate decision; the association-graph lane runs off the critical path and its calls run concurrently with the LLM
+request. In round `20261001-1300` the full-configuration arm's turn 3 summed **10 633 810 ms** of System-1 lane time
+inside a turn of **1 306 265 ms**, so lane time must never be added to $t_{\mathrm{LLM}}^{\mathrm{net}}$ in a
+report; it is printed as its own column (see §5.1).
+
 ## 8. Statistical protocol (pre-registered)
 
-**Primary metric (completion rate, non-inferiority)** — paired McNemar exact test, C4 vs C1 discordant pairs $(b,c)$:
+The full configuration is now `C2` and the baseline `C0` (see the mapping note in §5.1: round `20261001-1300`
+called them `C4` and `C1`). The protocol below is stated in today's names; the test and the margin are unchanged.
+
+**Primary metric (completion rate, non-inferiority)** — paired McNemar exact test, `C2` vs `C0` discordant pairs $(b,c)$:
 
 $$
 p = \min\Big(1,\ 2\sum_{i=0}^{\min(b,c)} \binom{b+c}{i} 2^{-(b+c)}\Big) \le \alpha = 0.05
 \quad\text{and}\quad
-\hat\Delta_{\mathrm{solve}} = \mathrm{solve}_{C4} - \mathrm{solve}_{C1} \ge -\delta,\ \delta = 0.02
+\hat\Delta_{\mathrm{solve}} = \mathrm{solve}_{C2} - \mathrm{solve}_{C0} \ge -\delta,\ \delta = 0.02
 $$
 
 **Secondary metrics (cost/time, superiority)** — paired bootstrap ($B=10^4$ task resamples):
 
 $$
-\bar\Delta = \overline{\mathrm{cost}}_{C4} - \overline{\mathrm{cost}}_{C1}, \qquad
-\mathrm{CI}_{95}\text{ (percentile)},\quad \text{success} \iff \mathrm{CI}_{95}^{\mathrm{upper}} < -0.10\,\overline{\mathrm{cost}}_{C1}
+\bar\Delta = \overline{\mathrm{cost}}_{C2} - \overline{\mathrm{cost}}_{C0}, \qquad
+\mathrm{CI}_{95}\text{ (percentile)},\quad \text{success} \iff \mathrm{CI}_{95}^{\mathrm{upper}} < -0.10\,\overline{\mathrm{cost}}_{C0}
 $$
 
 **Multiple-comparison correction** (secondary family $K=2$: cost, time) — Holm step-down:
@@ -369,11 +425,13 @@ Measured offline in `packages/core/test/window.test.ts` (`w = 64`, 400 segments)
 window, and **doubling w roughly doubles the cost** — the cost tracks `w`, not the session length.
 
 **Measured in a live round (`20261001-1300`), and the caveat that comes with it: the window did not bind.** The
-four cells offered 6 670 / 4 278 / 3 321 / 22 791 pairs for 116 / 93 / 82 / 214 segments — `T(T-1)/2` to the pair,
-i.e. the *full-history* row of the table above, because `w = 1024` is larger than any session the round produced.
-Each persisted graph (`<DSH_HOME>/.s1cap/rg/*.json`) held exactly that many **distinct** pairs by `from->to`, so
-no pair was ever scored twice: `scoredPairs` counts offers, `scores` is keyed by pair, and one repeated pair would
-show up as a difference of exactly one. The call count then follows from the pair count and not from any
-redundancy — 22 791 pairs at `s1.questionsPerCall = 20` are the 1 155 calls C4 made. The lever on this cost is
-`w` (or the cap), never de-duplication: at `w = 64` the same 214 segments would offer 11 616 pairs, half of them,
-in 732 full batches where the unbounded window needs 1 243.
+four arms of that round offered 6 670 / 4 278 / 3 321 / 22 791 pairs for 116 / 93 / 82 / 214 segments (their
+labels: `C1` / `C2` / `C3` / `C4`, i.e. today's `C0` / `C1` / dropped / `C2` — see the mapping note in §5.1) —
+`T(T-1)/2` to the pair, i.e. the *full-history* row of the table above, because `w = 1024` is larger than any
+session the round produced. Each persisted graph (`<DSH_HOME>/.s1cap/rg/*.json`) held exactly that many **distinct**
+pairs by `from->to`, so no pair was ever scored twice: `scoredPairs` counts offers, `scores` is keyed by pair, and
+one repeated pair would show up as a difference of exactly one. The call count then follows from the pair count and
+not from any redundancy — 22 791 pairs at `s1.questionsPerCall = 20` are the 1 155 calls the full-configuration arm
+(round `C4`, today's `C2`) made. The lever on this cost is `w` (or the cap), never de-duplication: at `w = 64` the
+same 214 segments would offer 11 616 pairs, half of them, in 732 full batches where the unbounded window needs
+1 243.

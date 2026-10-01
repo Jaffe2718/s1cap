@@ -64,7 +64,7 @@ This dossier serves paper §2 and the novelty audit. Axes: **(a)** association g
 
 | project | what it does | URL | relation to us |
 |---|---|---|---|
-| dsh-command-context-trim | Model-free `/trim`: drops oldest least-valuable balanced span, zero LLM calls; auto-trim on `CONTEXT_WINDOW_EXCEEDED` via `prepend` on `agent/request-error` | https://github.com/snailium/dsh-command-context-trim | Our C1 baseline's spirit (heuristic, model-free); it discards, we assemble. Also our template for DSH plugin mechanics |
+| dsh-command-context-trim | Model-free `/trim`: drops oldest least-valuable balanced span, zero LLM calls; auto-trim on `CONTEXT_WINDOW_EXCEEDED` via `prepend` on `agent/request-error` | https://github.com/snailium/dsh-command-context-trim | Our C0 baseline's spirit (heuristic, model-free); it discards, we assemble. Also our template for DSH plugin mechanics |
 | pi-system-one | Registers a `system_one` **tool** the pi agent may call (Jev/Reflex/Laya backends) | https://www.npmjs.com/package/pi-system-one | *System One as a tool* (agent-in-the-loop) vs ours *as governance* (infrastructure-in-the-loop, agent-invisible) |
 | hermes-jev-skills | Jev-powered routing, memory, compaction, skill selection for Hermes/Claude Code/Codex | https://github.com/kerpopule/hermes-jev-skills | Closest combination-axis prior work: Jev inside harnesses driving memory/compaction — but no association graph (a), no budgeted TAS assembly (b proper), no probability plan pre-ranking (c), no cache/latency telemetry (d); integration repo, no research evaluation |
 | dsh-typesafe | Jev decision layer for DSH: typed decisions, confidence-gated routing, cost meter | https://github.com/979569650/dsh-typesafe | (c)/(d)-lite, routing-only |

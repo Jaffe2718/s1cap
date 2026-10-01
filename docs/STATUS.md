@@ -8,6 +8,13 @@ rules this file assumes. Every claim below is either backed by a test in `packag
 round, or by the packaged DSH source read with `scripts/scan-dsh-asar.cjs`. Where something is *not*
 verified, it says so instead of guessing.
 
+> **Cell names.** The ablation is now three cells: `C0` (baseline), `C1` (TAS alone) and `C2` (the full
+> configuration). The entries below were written while it was a four-cell scheme, so they name cells with the old
+> labels: old `C1` = today's `C0`, old `C2` = today's `C1`, old `C3` (recall selection with `tas.on: false`) =
+> dropped, no successor, old `C4` = today's `C2`. They are the record of what was run and verified at the time, so
+> they are left as written — read their cell names through that mapping. `docs/CELLS-RUN.md` carries the mapping
+> table, the reason the fourth arm was dropped, and the run prerequisites.
+
 ---
 
 ## 1. Checklist

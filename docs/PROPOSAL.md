@@ -62,7 +62,7 @@ The cheap decision model runs as the **control layer** (the S1CAP control plane)
 
 ### 3.3 Native DSH Advantages (verified from the local installation and community plugins)
 
-DSH's session model separates a **persistent append-only event log (the human record, never rewritten) from the surface (the model's view)**, and `surfaceOp {op:'replace'}` allows changing only the context the model sees — **natively satisfying "present strictly in chronological order to the user, reorganize internally for the model"**. Interception points: `agent/pre-step` (assembly before the LLM call), `agent/request-error` (waterfall + prepend), `ctx.tokenMeter` (shadow-price accounting), `@deepseek-ai/dsh-compaction` (tool pairing integrity). The existing plugin `dsh-command-context-trim` (model-free oldest-first trimming) is precisely the spiritual prototype of the C1 baseline and the engineering template for the plugin mechanism.
+DSH's session model separates a **persistent append-only event log (the human record, never rewritten) from the surface (the model's view)**, and `surfaceOp {op:'replace'}` allows changing only the context the model sees — **natively satisfying "present strictly in chronological order to the user, reorganize internally for the model"**. Interception points: `agent/pre-step` (assembly before the LLM call), `agent/request-error` (waterfall + prepend), `ctx.tokenMeter` (shadow-price accounting), `@deepseek-ai/dsh-compaction` (tool pairing integrity). The existing plugin `dsh-command-context-trim` (model-free oldest-first trimming) is precisely the spiritual prototype of the C0 baseline and the engineering template for the plugin mechanism.
 
 ## 4. Experimental Design
 
@@ -70,12 +70,20 @@ DSH's session model separates a **persistent append-only event log (the human re
 
 | Cell | A: TAS ordering | B: S1 governance (recall selection + plan gate) |
 |---|---|---|
-| C1 baseline | off (chronological appending) | off (harness-native compaction only) |
-| C2 | **on** | off |
-| C3 | off | **on** |
-| C4 full | **on** | **on** |
+| C0 baseline | off (chronological appending) | off (harness-native compaction only) |
+| C1 | **on** | off |
+| C2 full | **on** | **on** |
 
-Same tasks, same model (`deepseek-flash`, temperature=0), same harness version, same tool allowlist, randomized order.
+Same tasks, same model, same harness version, same tool allowlist, randomized order. The runs pin
+`reasoningEffort` on `deepseek-v4.1-flash` and claim no sampling parameter, because DSH exposes none
+(`docs/CELLS-RUN.md` §Setup carries the run prerequisites).
+
+The fourth quadrant of the 2×2 — recall selection with TAS off — is **dropped from the run set and has no
+successor**: per step it moved more uncached input and more output than the baseline at a lower cache hit rate, and
+its System-1 coverage was below the 0.5 floor that makes a cell a measurement of System-1 at all (`docs/CELLS-RUN.md`
+carries the numbers and the mapping table). Round `20261001-1300` ran under an earlier labelling: `C1` (baseline) is
+today's **`C0`**, `C2` (TAS alone) is today's **`C1`**, `C3` (recall selection with `tas.on: false`) is **dropped,
+no successor**, and `C4` (the full configuration) is today's **`C2`**.
 
 ### 4.2 Benchmark Suite (all automatically scored, no GUI, no LLM judging)
 
@@ -101,7 +109,7 @@ Each LLM call records prompt/cacheHit/cacheMiss/output tokens, net latency, and 
 
 ### 4.5 Generalization (defusing the "result engineering for DSH" concern)
 
-- **Cross-harness**: C1 vs C4 retested through the proxy on opencode with a 10% subsample of the same benchmarks (Claude Code/pi are stretch goals); the same core package, the same telemetry schema, with only the adapter layer differing;
+- **Cross-harness**: C0 vs C2 retested through the proxy on opencode with a 10% subsample of the same benchmarks (Claude Code/pi are stretch goals); the same core package, the same telemetry schema, with only the adapter layer differing;
 - **Cross-model**: the 10% subsample retested with GLM-5.3;
 - All model versions and call dates are logged; the contamination risk of SWE-bench Verified is declared in the paper, with a 20-task SWE-bench-Live spot check as a control.
 
@@ -115,7 +123,7 @@ Full grid ≈ **$480 (peak) / $240 (off-peak)**; off-peak = 50% off everywhere o
 |---|---|---|
 | 1 | M0: close all `[VERIFY]` items; monorepo scaffolding; s1-client connected to real Jev/laya-serve; telemetry v1; DSH plugin skeleton | `dsh --dump-config` shows the bundle; a hard-coded assembly in a smoke session rewrites the surface |
 | 2–3 | M1: SEGMENTER+RG+ASSEMBLER; proxy MVP; replay consistency tests | core coverage ≥90%; replay invariants pass |
-| 3–4 | M2: plan gate; degradation paths; settings UI; **TB 10-task pilot** | the pilot report fixes the cost model; 10-task C1/C4 smoke |
+| 3–4 | M2: plan gate; degradation paths; settings UI; **TB 10-task pilot** | the pilot report fixes the cost model; 10-task C0/C2 smoke |
 | 5–6 | M3: full 2×2 on SWE-V + τ²; (optional) Laya fine-tuning + calibration | the frozen statistics module produces the report |
 | 7–8 | M4: TB cells; opencode migration check; GLM model-swap check | H4 reaches a conclusion |
 | 9–10 | M5: paper figures (Pareto, cache waterfall, `/s1 why` case study) + LaTeX first draft | full first draft |
@@ -137,7 +145,7 @@ Suggested division of labor: one person leads core + the DSH plugin, one leads b
 
 - **Type**: Technique paper (Novel Method) — porting the Trace-as-State principle and decision models into agent harness infrastructure, with measurements.
 - **Fatal-flaw audit**: no CRITICAL. F1 novelty was verified on the ground (three parallel verification passes + repository-level search): **nobody combines (a) association graph + (b) within-budget turn-by-turn assembly + (c) same-model plan pre-ranking + (d) cache/latency telemetry**; the nearest neighbors are hermes-jev-skills (integration with no evaluation), GAAMA (graph but embeddings + PPR, conversational memory), AgentFold (model self-folding, no external decision model), and Don't Break the Cache (measurement without a method). The risk is MAJOR (window movement), not fatal.
-- **Five-dimension scores** (5 is the default, mechanism arguments may raise it, all labeled "mechanism-based, not yet confirmed by data", validation experiment = the C4 vs C1 paired grid): Higher **6** (paper T's 26/27 win rate suggests the ordering gain transfers, but agent task shapes differ, so the claim is non-inferiority); Faster **8** (S1 at millisecond scale vs. LLM at second scale; parallel noul batching is 12.2× cheaper; the plan gate avoids wasted attempts); Stronger **6** (degradation paths + cross-harness checks, but the main grid uses a single provider); Cheaper **8** (the 50× price gap on hit rate is the biggest lever; TB dominates cost, calibrated by the pilot); Broader **7** (one proxy covers four harnesses; the protocol standard `/v1/systemone`; the decision model is swappable).
+- **Five-dimension scores** (5 is the default, mechanism arguments may raise it, all labeled "mechanism-based, not yet confirmed by data", validation experiment = the C2 vs C0 paired grid): Higher **6** (paper T's 26/27 win rate suggests the ordering gain transfers, but agent task shapes differ, so the claim is non-inferiority); Faster **8** (S1 at millisecond scale vs. LLM at second scale; parallel noul batching is 12.2× cheaper; the plan gate avoids wasted attempts); Stronger **6** (degradation paths + cross-harness checks, but the main grid uses a single provider); Cheaper **8** (the 50× price gap on hit rate is the biggest lever; TB dominates cost, calibrated by the pilot); Broader **7** (one proxy covers four harnesses; the protocol standard `/v1/systemone`; the decision model is swappable).
 - **Paradigm probes**: First principles ✓ (challenges "context must be appended chronologically"; paper T has both theory and empirics); Elephant in the room ✓ (everyone complains about agent cost and context rot); Technology cycle ✓ (the decision model category only appeared in 2026-09, suddenly making S1 governance nearly free); Hamming ✓ (if it holds, agent economics change). 4/4.
 - **Feasibility**: compute low (API + CPU); data low (all benchmarks open source); engineering medium (plugin + proxy + runner, all with templates); time medium (10 weeks is tight but staged, with the TB pilot up front to control risk).
 - **Verdict**: **Accept with Revisions** (worth pursuing, pending the validation experiment). The revision items have been absorbed: (1) the success rule changed to non-inferiority + superiority; (2) two-level recall replaces naive Laya scoring; (3) the H3 cache penalty is made explicit; (4) terminology corrections (§2); (5) the 2×2 factors are formalized.

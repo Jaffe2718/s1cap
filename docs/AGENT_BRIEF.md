@@ -185,7 +185,7 @@ s1cap/
   packages/dsh-plugin/  # "dsh-s1cap": cordis bundle, surface assembly, pre-step hook, /s1 commands
   bench/
     runners/            # swe-verified/ | terminal-bench/ | tau2/  (fetch, run cell, parse, score)
-    cells/              # the four ablation cell configs (JSON)
+    cells/              # the three ablation cell configs (JSON)
     stats/              # McNemar, paired bootstrap, effect sizes, Holm; frozen analysis script
     analysis/           # figure generation (Pareto, cache waterfall, case studies)
   docs/                 # PROPOSAL.md, ARCHITECTURE.md, AGENT_BRIEF.md, FORMULAS.md, RELATED_WORK.md, REPO_METADATA.md
@@ -216,7 +216,7 @@ interface AssociationEdge {
 }
 
 interface AssemblyPolicy {
-  cell: 'C1' | 'C2' | 'C3' | 'C4';
+  cell: 'C0' | 'C1' | 'C2';                               // §9.1: C0 baseline, C1 TAS alone, C2 full
   tas: { on: boolean; tMaxChars: number; updatePolicy: 'perTask' | 'perTurn' };
   recall: { tau: number; depth: number; fanout: number; tier1: 'embed' | 's1' | 'off';
             embedModel?: string; budgetRatio: number; minRecalledShare: number };
@@ -287,8 +287,8 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 [x + current state snapshot + instruction]     ← ALWAYS LAST (paper T: question-last required)
 ```
 
-- Factor TAS off (cells C1/C3): `[pinned | (selected or full) history chronological | x]`, no T block.
-- **T and the position of x are two switches, not one**: `tas.on` is whether the T block exists at all and `xFirst` is whether x sits before or after the recalled block, so the diagram above is paper T's arrangement (state first, question last) rather than the only TAS-on order — cells C2/C4 carry `xFirst` on, which places x before the recalled block (`[pinned | T | x | recalled | tail]`).
+- Factor TAS off (cell C0): `[pinned | (selected or full) history chronological | x]`, no T block.
+- **T and the position of x are two switches, not one**: `tas.on` is whether the T block exists at all and `xFirst` is whether x sits before or after the recalled block, so the diagram above is paper T's arrangement (state first, question last) rather than the only TAS-on order — cells C1/C2 carry `xFirst` on, which places x before the recalled block (`[pinned | T | x | recalled | tail]`).
 - **Fallback:** if recalled mass < `minRecalledShare` (25%), degrade to chronological last-N window; log event.
 - **Cache-awareness:** the pinned prefix is never reordered; T grows append-only; `updatePolicy: perTask` keeps T byte-stable within a task so the cache invalidation of `[T | recalled | tail | x]` happens at task boundaries, not per turn. The residual cache penalty is *measured*, not assumed (H3).
 - **DSH realization:** model-only rewrite via `surfaceOp {op:'replace'}` — the user-facing transcript is never touched. Non-DSH: the proxy rewrites the messages array before forwarding.
@@ -321,7 +321,7 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
   - token-meter integration → budget + fixed overhead; own usage events from response `usage`;
   - plan gate → assistant tool-call batch hook (ordering-only intervention, never alters semantics).
 - Commands: `/s1 status`, `/s1 config`, `/s1 graph` (RG stats), `/s1 why <seq>` (provenance: which question/answer pulled a segment in — doubles as paper case-study material).
-- Settings UI (`dsh.client` inject): the four cell presets (C1–C4), τ/d/fanout/K sliders, S1 provider picker (cloud Jev | local EdgeJev | laya-serve | none), telemetry export.
+- Settings UI (`dsh.client` inject): the three cell presets (C0–C2), τ/d/fanout/K sliders, S1 provider picker (cloud Jev | local EdgeJev | laya-serve | none), telemetry export.
 - Tests: `DSH_HOME` isolated profile; `dsh --dump-config` assertion; `node --test` units for SEGMENTER/RG/ASSEMBLER on synthetic sessions; **replay correctness** — rewrite a persisted session log, replay, totals must match tokenMeter exactly (the context-trim test pattern).
 
 ---
@@ -376,16 +376,32 @@ Report **cache-hit rate before/after each assembly change** per call — the TAS
 
 ### 9.1 Design — 2×2 within-task paired factorial
 
-| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: selection + plan gate) |
-|---|---|---|
-| C1 baseline | off / off (chronological, x last) | off (native compaction only) |
-| C2 | **on / on** (`[pinned\|T\|x\|history]`) | off |
-| C3 | off / off (chronological, selected blocks, x last) | **on** |
-| C4 full | **on / on** | **on** |
+| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: selection + plan gate) | System-1 lane |
+|---|---|---|---|
+| C0 baseline | off / off (chronological, x last) | off (native compaction only) | none (`s1.provider: "none"`) |
+| C1 | **on / on** (`[pinned\|T\|x\|history]`) | off | none (`s1.provider: "none"`) |
+| C2 full | **on / on** | **on** | live provider, `retryAttempts: 2` |
 
 `tas.on` and `xFirst` are independent switches that the presets here move together — `tas.on` is whether the state
 proxy T exists at all (the trace-as-state mechanism of paper T), `xFirst` is whether the current task x sits before
 or after the recalled block — so factor A is a pair of switches and not one, and TAS is not x-first.
+
+**Cell names, and the earlier labelling.** The executed scheme is three cells, `C0`/`C1`/`C2`, with
+`Cell = 'C0' | 'C1' | 'C2'` and `defaultPolicy()` on `C2`; the settings panel, the profiles and every telemetry
+record carry those names. Round `20261001-1300` ran under an earlier four-cell labelling, and the mapping is:
+
+| round `20261001-1300` label | what it ran | today |
+| --- | --- | --- |
+| `C1` | baseline | **`C0`** |
+| `C2` | TAS alone | **`C1`** |
+| `C3` | recall selection with `tas.on: false` | **dropped, no successor** |
+| `C4` | the full configuration | **`C2`** |
+
+The three rows of the design table above are the executed set; the fourth quadrant's arm was dropped rather than
+renamed, because per step it moved more uncached input and more output than the baseline at a lower hit rate and its
+backend coverage was below the 0.5 floor (`docs/CELLS-RUN.md` carries the per-step numbers and the mapping table).
+Names inside the hypotheses below (§9.3, §9.5) and the M2 acceptance line in §10 are left as the owner wrote them
+and still use the earlier labelling — read them through this table.
 
 Same tasks, same model, temperature 0 (main), same harness version, same tool allowlist, randomized run order. Paired n per cell per benchmark: SWE-bench Verified 100 (stratified subset of the 500), Terminal-Bench 4.0 all 66, tau2-bench full `base` split (`[VERIFY]` exact count at M0; ~280 expected).
 

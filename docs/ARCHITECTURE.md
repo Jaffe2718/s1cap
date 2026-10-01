@@ -72,13 +72,19 @@ agent's planning context-aware. It does that at exactly two points.
 
 ## 5. Ablation mapping (cells ↔ modules)
 
-| Module | C1 baseline | C2 +TAS | C3 +S1 | C4 full |
-|---|---|---|---|---|
-| Event intake / Segment | on | on | on | on |
-| S1 association + RG + recall | off | off | **on** | **on** |
-| ASSEMBLER layout (`tas.on` + `xFirst`) | off / off (chronological) | **on / on** | off / off (chronological) | **on / on** |
-| S1 decision + PLAN GATE | off | off | **on** | **on** |
-| Telemetry | on | on | on | on |
+| Module | C0 baseline | C1 +TAS | C2 full |
+|---|---|---|---|
+| Event intake / Segment | on | on | on |
+| S1 association + RG + recall | off | off | **on** |
+| ASSEMBLER layout (`tas.on` + `xFirst`) | off / off (chronological) | **on / on** | **on / on** |
+| S1 decision + PLAN GATE | off | off | **on** |
+| System-1 lane (`s1.provider`) | `"none"` (no lane) | `"none"` (no lane) | live provider, `retryAttempts: 2` |
+| Telemetry | on | on | on |
+
+Round `20261001-1300` ran four cells under an earlier labelling: `C1` (baseline) is today's **`C0`**, `C2` (TAS
+alone) is today's **`C1`**, `C3` (recall selection with `tas.on: false`) was **dropped, no successor**, and `C4` (the
+full configuration) is today's **`C2`**. `docs/CELLS-RUN.md` carries the mapping table with the measured reason the
+fourth arm was dropped.
 
 ## 6. Loop, authority and asynchrony
 
@@ -101,9 +107,9 @@ are enforced in code, not left to convention:
    `assemblyDeadlineMs` — on expiry the LLM call proceeds with the unmodified context instead of waiting.
 
 Degradation is therefore total: if Laya/Jev is slow, absent or wrong, the turn continues on the native path
-(tier-0 metadata + recency window), which is exactly the C1 behaviour the ablation compares against.
+(tier-0 metadata + recency window), which is exactly the `C0` (baseline) behaviour the ablation compares against.
 
-Cell presets: `bench/cells/C{1..4}.json`.
+Cell presets: `bench/cells/C{0..2}.json`.
 
 ## Parameter: `recall.window` = w
 

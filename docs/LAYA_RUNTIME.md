@@ -156,7 +156,8 @@ releases add CLI arguments.
 
 ## 6b. Admission control under load (measured 2026-10-01)
 
-The 503s a four-cell run produces are **not** a compute shortage. `laya/serve.py` admits like this:
+The 503s of round `20261001-1300` — a four-cell run against one shared backend — are **not** a compute shortage.
+`laya/serve.py` admits like this:
 
 ```python
 if admission.locked():                     # every one of LAYA_MAX_CONCURRENT slots taken
