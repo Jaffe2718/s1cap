@@ -22,7 +22,7 @@ three tasks, so three re-selections are *expected* and 86% may be unremarkable. 
 that delivers nothing, so what it measures is the harness managing history by itself — and the finding is a
 difference between the measured token quantities of C1, C2 and C4 (see "Measurements, and where each comes from").
 The hit rate rides along as a mechanism diagnostic rather than as the finding: it is a ratio, and a cell can win on
-it while paying more, which is what C4 did. An absolute number proves nothing here.
+it while moving more tokens on all three quantities, which is what C4 did. An absolute number proves nothing here.
 
 ## Cells
 
@@ -46,15 +46,23 @@ C2/C4) — which is why one column carries both.
 `cellPolicy()`, the presets in `bench/cells/`, the settings panel, the `cell` field on every telemetry record and
 this document all bind to C1–C4, and a renamed or invented cell is one more place for the same fact to be wrong.
 
-**C3 is not run this time.** C3 is recall selection with `tas.on: false`, and it measured worse than the baseline on
-every metric of round `20261001-1300`: a 79.2% cache hit rate against 86.7%, 3 625 uncached input tokens per step
-against 2 595, and 85% of the baseline's cost — 90% under the harsher price assumptions. It is also not the
-contrast the project's claim rests on. That contrast is **TAS alone against the full configuration**: C2 cost 58%
-of the baseline, so if C4 cannot beat C2 then the System-1 half has not earned its place in the configuration, and
-nothing about that argument needs a fourth arm. The combination is not lost by dropping the cell either —
-`validatePolicy` now emits a warning when `recall.tier1 !== 'off'` is configured with `tas.on: false`, naming the
-two measurements above, so the pairing has to be chosen on purpose rather than by accident. The full four-cell
-ablation stays the goal once the C2-vs-C4 contrast is established.
+**C3 is not run this time.** C3 is recall selection with `tas.on: false`, and per step it is worse than the baseline
+on the quantities of round `20261001-1300`: **3 625** uncached input tokens against 2 595, **2 574** output tokens
+against 1 523, and a hit rate of **79.2%** against 86.7%; its backend coverage was **22.5%**, below the 0.5 floor,
+so the cell was not a measurement of System-1 governance however it is labelled. It pays more per step on two of the
+three quantities and reuses less of what it sends (13 777 cached input tokens per step against 16 936), and it
+delivers no benefit the three-armed design needs. Its absolute totals are *lower* than the baseline's — 219 737
+tokens against 400 034 — and that difference is not evidence either way: C3 ran 11 steps against C1's 19, so
+absolute totals are not comparable across these cells, which is exactly why every quantity here is reported per
+step and per turn. C3 is also not the contrast the project's claim rests on. That contrast is **TAS alone against
+the full configuration**: per step C2 moved **14 441** tokens — 187 739 over 13 steps against the baseline's 400 034
+over 19, i.e. **21 054** per step — about 0.69×. It sits below the baseline on all three quantities (1 783 / 11 166
+/ 1 493 per step against 2 595 / 16 936 / 1 523, with the output margin the thinnest of the three), and its uncached
+input per step, 1 783 against 2 595, is also about 0.69×. So if C4 cannot beat C2 then the System-1 half has not
+earned its place in the configuration, and nothing about that argument needs a fourth arm. The combination is not
+lost by dropping the cell either — `validatePolicy` now emits a warning when `recall.tier1 !== 'off'` is configured
+with `tas.on: false`, naming the hit-rate and per-step pairs above, so the pairing has to be chosen on purpose
+rather than by accident. The full four-cell ablation stays the goal once the C2-vs-C4 contrast is established.
 
 **The budget that freed up goes to repeats.** One run per cell cannot separate an effect from noise, and the last
 round shows how much noise there is: C4's per-turn hit rates were 90.3 / 83.5 / 94.3% — a ±10 pp spread *within
@@ -192,8 +200,22 @@ The three-turn sessions of the last round are short enough that only `w ≤ 64` 
 roughly halves at the floor. A longer session is where the window bites: at `T = 1024` and `w = 64` the pairs are
 63 456 against 523 776 unbounded, and at `T = 4096` they are 260 064 against 8 386 560 — the Θ(T·w) row of
 `docs/FORMULAS.md` §"Recall window w". The floor of 64 in `NUMBER_RULES` is what makes `w = 64` the smallest
-setting available; a shorter window than that is not a config this repository supports, and lowering the floor is
-a separate decision with a recall-quality cost that nothing here has measured.
+setting available; a shorter window than that is not a config this repository supports, and lowering the floor is a
+separate decision whose cost is the edge density described next, which nothing in round `20261001-1300` measured.
+
+**What `w` touches, and what it does not.** `w` is the **System-1 scoring window only**: a new segment is scored
+against at most the most recent `w` segments, and that is its sole purpose — bounding the association cost at
+`O(w)` per new segment and `O(turns × w)` per session instead of the quadratic pair count. The code says so in
+three places: `packages/core/src/types.ts` ("S1 scoring window w (`recall.window`)"),
+`packages/core/src/assoc-graph.ts` ("one pass of `w` comparisons per new segment", "the pair count
+`recall.window` is meant to bound"), and `packages/core/src/observer.ts` ("Segments outside the window keep their
+edges and stay reachable"). **Recall is never bounded by `w`.** The BFS is bounded by `recall.depth = d` and
+`recall.threshold = r`; segments outside the window keep every edge they already have and are still traversed and
+recalled. What a smaller `w` actually costs is the **density of edges between new and old segments**: fewer pairs
+are offered, so the graph the BFS walks becomes sparser, and recall may reach fewer relevant segments *through those
+edges*. That is a real cost, it is not measured by anything in round `20261001-1300` — whose `w = 1024` never bound
+at all — and a run that lowers `w` must carry `fallback`, `unknownAdmitted` and `recallTree` beside it, or the loss
+stays invisible.
 
 #### The lever, quantified: `s1.questionsPerCall`, and the guard it must be argued against
 
@@ -211,26 +233,31 @@ every batch size sits against the guard, and that a larger cap has to be argued 
 (`LAYA_MAX_CONCURRENT`, cells staggered in two waves) rather than from these latency numbers. What the records do
 establish is the token side: `~323` input tokens per question, measured, not estimated.
 
-One thing the records do **not** establish, and it should not be guessed at: whether a smaller `w` costs recall
-quality. `scoredPairs` and `judgedPairs` say how much was judged, and nothing in this round measured how often the
-pairs a smaller window would have dropped were the pairs recall went on to use. A run that lowers `w` has to carry
-`fallback`, `unknownAdmitted` and `recallTree` read beside it, or it is trading a measurable cost for an
-unmeasurable benefit.
+One thing the records do **not** establish, and it should not be guessed at: how much edge density a smaller `w`
+costs. The window never removes segments from recall (see "The lever, quantified: `recall.window`"); what it removes
+is pairs, and therefore edges, that the BFS would otherwise have had to walk. `scoredPairs` and `judgedPairs` say
+how much was judged, and nothing in this round measured how often the pairs a smaller window would have dropped were
+the pairs recall went on to use. A run that lowers `w` has to carry `fallback`, `unknownAdmitted` and `recallTree`
+read beside it, or it is trading a measurable cost for an unmeasured loss.
 
 ## Measurements, and where each comes from
 
-**The primary quantities are three token counts, not a rate.** A cache hit rate is a ratio, and a ratio hides
-scale. Round `20261001-1300` is the demonstration: the cell with the best hit rate (C4, 92.6%) had the **largest**
-bill — 2.8× the baseline, and 2.76–3.12× across every price assumption tried — while the cell with a slightly
-*worse* hit rate than the baseline (C2, 86.2%) had the smallest, 58% of it. So report these, per cell and **per turn
-and per step**:
+**The primary measurement is a triple of raw token counts, not a rate and not a scalar.** For every cell, per turn
+and per step, a report states the triple `(n_miss, n_hit, n_out)` — uncached input tokens, cached input tokens,
+output tokens — as counts. **No scalar is formed from the three.** The three types carry three different prices,
+and those prices differ per model and per provider, so any weighted total is a property of a price list rather than
+of the system under test: the same four columns would rank differently against another provider's rates, and the
+ranking would say nothing about S1CAP. A cell that wins on one component and loses on another is a normal outcome,
+not a tie to be broken by weights; the table is read component by component. What a rate cannot do is stand in for
+the counts — round `20261001-1300` is the demonstration, because the cell with the best hit rate (C4, 92.6%) carried
+the **largest** count on all three components, while the cell with a slightly *worse* hit rate than the baseline
+(C2, 86.2%) carried the smallest. So report, per cell and **per turn and per step**:
 
 | quantity | source |
 | --- | --- |
 | uncached input tokens | `data.usage.inputTokens` on `assistant/message` events — on this usage shape it counts the prompt tokens that *missed* the cache, not all prompt tokens |
 | cached input tokens | `data.usage.cacheReadTokens` |
 | output tokens | `data.usage.outputTokens` |
-| the price multipliers | **stated in the report**, never assumed: three quantities carry three prices, and the ordering of the cells moves with them |
 | steps, turns (the denominators) | `step/start` and `turn/start` counts in the harness session store, with the assembly-record count beside them as a cross-check |
 
 The shape was verified on every session of the last round: `totalTokens = inputTokens + cacheReadTokens +
@@ -248,19 +275,23 @@ That table, filled in from round `20261001-1300`, is what a report of this shape
 | C3 | 11 | 3 | 39 871 | 151 552 | 28 314 | 3 625 / 13 777 / 2 574 | 13 290 / 50 517 / 9 438 |
 | C4 | 33 | 3 | 110 990 | 1 398 272 | 76 501 | 3 363 / 42 372 / 2 318 | 36 997 / 466 091 / 25 500 |
 
-Applying a price model to it — cached input at 0.1× an uncached token and output at 4×, the assumption stated in
-the report rather than left implicit — gives 100 / 58 / 85 / 282% of the baseline, and the ordering is stable under
-the other two assumptions tried (cached 0.25×: 100 / 56 / 78 / 312%; output 8×: 100 / 62 / 90 / 276%). What is *not*
-stable is which cell has the best hit rate, which is the point: C4 bought the largest bill with the best rate.
+Read component by component, that table says what a single number would have hidden: C4 is above the baseline on all
+three counts (2.25× the uncached input, 4.35× the cached input, 2.64× the output) and C2 is below it on all three
+(0.47× / 0.45× / 0.67×). Those are three separate results and not one weighted result: the ordering happens to agree
+here, and it need not in another round — a cell that wins on one component and loses on another is a normal outcome,
+not a tie to be broken by weights.
 
-**The System-1 lane carries its own bill, on its own line.** The claim "a cheap System-1 saves an expensive LLM"
-has to include what the System-1 lane cost: sum `inputTokens` over the cell's `s1_call` records and report it with
-the call count, beside the LLM bill rather than folded into it. Measured last round: 436 406 / 584 331 / 263 808 /
-3 722 310 System-1 input tokens for 363 / 257 / 241 / 1 155 calls. At the reference price in
-`docs/FORMULAS.md` §5 (Jev, input-only, \$0.042 per 1M) that is roughly \$0.018 / \$0.025 / \$0.011 / \$0.156,
-against LLM bills of roughly \$0.051 / \$0.031 / \$0.047 / \$0.134 at `deepseek-flash` peak prices — the System-1
-lane cost **more than the LLM it was meant to save** in C4. A cell whose S1 line is missing cannot support a cost
-claim in either direction, and the multipliers used for that line belong in the report beside the others.
+**The System-1 lane carries its own usage, on its own line.** The claim "a cheap System-1 saves an expensive LLM"
+has to include what the System-1 lane spent: sum `inputTokens` over the cell's `s1_call` records and report it with
+the call count, beside the LLM's own triple rather than folded into it. Measured last round: 436 406 / 584 331 /
+263 808 / 3 722 310 System-1 input tokens for 363 / 257 / 241 / 1 155 calls. In C4 that is **3 722 310 tokens over
+1 155 calls**, 807 of them answered, against the same cell's LLM usage of `1 398 272` hit + `110 990` miss +
+`76 501` output = **1 585 763 tokens** — the System-1 lane moved **~2.35×** the tokens of the model it is meant to
+make cheaper. It is stated in tokens on purpose: the two lanes are not interchangeable, and this comparison is not a
+bill. One is a local GPU resource, where the usage is what this line measures and the cost is the machine; the other
+is a billed API, where the price depends on the model and the provider. Converting either into currency would put a
+price list back in the middle of a quantity comparison. A cell whose S1 line is missing cannot support the claim in
+either direction.
 
 **Coverage goes beside every System-1 column**: `judgedPairs / scoredPairs`, with the failure split (`503 server
 busy` / transport timeout / other) next to it. `scoredPairs` is the pairs the window *offered*; `judgedPairs` is the
@@ -275,13 +306,16 @@ when it fails; especially then.
 **The hit rate is a mechanism diagnostic, not the headline.** It answers "did the prefix stay stable across steps",
 which is worth knowing and is not a cost: `h = cacheReadTokens / (cacheReadTokens + inputTokens)` — the derivation
 is kept here on purpose, and its label in the report is "mechanism", reported against C1's own `h` and never
-instead of the three quantities. A cell can win on `h` and lose on cost, which is exactly what C4 did.
+instead of the three quantities. A cell can win on `h` and still move more tokens on all three components, which is
+exactly what C4 did.
 
-**Output length is not a free variable in a cost comparison.** C4 emitted 76 501 output tokens against C2's 19 410,
-and output was 55–80% of the modelled bill in every cell of the last round: at that share, a comparison measures
-how much the model chose to say unless the stimulus constrains it. Either bound the answer in the stimulus (a
-stated length or format the turn must respect) or report output tokens as a separate column with the cost model
-applied to it explicitly — but do not read a cost delta off cells whose output volumes differ by 4×.
+**Output length is not a free variable in the comparison.** C4 emitted 76 501 output tokens against C2's 19 410 —
+4× the volume — and in every cell of round `20261001-1300` output was 55–80% of what a price-weighted total would
+have charged. That second figure is a statement about the quantities rather than about the prices: output dominates
+any weighting, so at that share a comparison measures how much the model chose to say unless the stimulus constrains
+it. Either bound the answer in the stimulus (a stated length or format the turn must respect) or report output
+tokens as their own row, `n_out` beside `n_hit` and `n_miss` — but do not read a difference between cells off a
+component whose volumes differ by 4×.
 
 Derivations for the non-token columns, which stay as they were: LLM duration is derived from session-event
 timestamps around each assistant message (`assistant/message.time` minus its `step/start.time`) and the derivation
