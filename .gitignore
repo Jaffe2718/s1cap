@@ -2,6 +2,15 @@
 node_modules/
 dist/
 lib/
+# These runtime artifacts are shipped to DSH profiles and must include new modules.
+!/packages/core/lib/
+!/packages/core/lib/*.js
+!/packages/dsh-plugin/lib/
+!/packages/dsh-plugin/lib/*.js
+!/packages/laya-runtime/lib/
+!/packages/laya-runtime/lib/*.js
+!/packages/s1-client/lib/
+!/packages/s1-client/lib/*.js
 build/
 *.tsbuildinfo
 coverage/
