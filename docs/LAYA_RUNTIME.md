@@ -185,9 +185,11 @@ Two conclusions, and they point opposite ways from the obvious fix:
   49 s, which the client's `S1_TRANSPORT_TIMEOUT_MS = 30_000` guard turns straight back into `S1TimeoutError`.
   A bigger cap does not make more System-1 available; it moves the loss from the server to the client.
 - **The shedding is a burst artifact, not a capacity shortage.** In round `20261001-1300` the four cells issued
-  1 880 calls over ~20 minutes — about 1.6 calls/s against a server that sustains several times that — yet 732 of
-  them (39%) came back 503 and 126 more hit the 30 s guard. The average was far under capacity; the *instantaneous*
-  bursts were far over it, and this server refuses rather than smooths.
+  2 016 calls over the ~36 minutes of the run — about 0.9 calls/s against a server that sustains several times that
+  — yet 732 of them (36%) came back 503 and 126 more hit the 30 s guard. (The 1 880 this sentence used to cite was
+  a mid-run snapshot; the count kept growing for minutes after the last turn, because association upkeep is
+  asynchronous.) The average was far under capacity; the *instantaneous* bursts were far over it, and this server
+  refuses rather than smooths.
 
 So the fix belongs on the client side of the deadline, not in the cap:
 
