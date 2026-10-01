@@ -1828,32 +1828,44 @@ The loop goes to a **Collaborator** — a coding agent, not this session — sup
 system under test is unchanged: DSH with `deepseek-account/deepseek-flash` (DeepSeek V4.1 Flash), the model row the
 cells of round `20261001-1414` ran, `reasoningEffort` pinned, no sampling parameter claimed.
 
-**`GPT-6-Astra`'s provider and model id are not verified on this machine** (being checked separately), so nothing
-here names a config value for it: the Collaborator's own profile must resolve the provider and the model id and
-verify them before the loop runs, rather than inheriting an assumed string from this document. The other half *is*
-verified — the cells' model row, which `preflight.mjs` reads, is what the instances will actually run.
+**`GPT-6-Astra` is the Collaborator's own model, not one this machine serves.** The owner has none of it here and
+none is configured in any profile on this machine (the four profiles declare `bailian` and `openrouter-custom`
+only), so nothing in this repository names a provider or a model id for it: the Collaborator's own environment
+resolves and verifies that pair before the loop runs, rather than inheriting an assumed string from this document.
+The half that *is* verified is the system under test — the cells' model row, which `preflight.mjs` reads, is what the
+instances actually run.
+
+**The loop's metrics and its execution are `GPT-6-Astra`'s to decide, not the owner's.** The owner has delegated
+them: how a task is drawn, what an iteration measures and reports, and how the optimization work is organised are
+the optimization engineer's calls, made and recorded by the Collaborator. What stays fixed regardless is the
+measurement discipline below it — one drawn task under **all three** cells before the next draw, the draw recorded
+with its pool and its rule, the operational constraints named above, and the two token accounts kept apart. The
+owner's remaining decisions are the ones about the *claim* (the registered grid's budget and its variance plan),
+which the loop does not touch.
 
 ### Left to the owner
 
 `docs/AGENT_BRIEF.md` §9 is the owner's design, so these are the places the new phase touches it that were **not**
-changed here, listed as questions rather than as decisions:
+changed here, listed as questions rather than as decisions. Items 1 to 3 are now answered by the delegation above
+and are kept here as the record of what was open when the phase turned over.
 
 1. **§9.1's "randomized run order" against the fixed serial order.** The cells run `C0` → `C1` → `C2`, one at a
-   time, because the shared Laya refuses rather than queues; under the loop the *draw* is the randomized part.
-   Confirm that reading, and whether §9.1 should say so.
+   time, because the shared Laya refuses rather than queues. **Answered:** under the loop the *draw* is the
+   randomized part and the cell order stays fixed.
 2. **The draw rule.** §9.1 fixes the pools' sizes (SWE-bench Verified 100, Terminal-Bench 4.0 66, τ²-bench ~280) and
    §9.2 names the pools, but nothing fixes how one is chosen or weighted, whether draws are stratified per pool, or
    whether a task already drawn for optimization may later be counted in the registered grid's paired n. The
-   auditability requirement is recorded above; the rule is not.
+   auditability requirement is recorded above; **the rule is delegated to `GPT-6-Astra`**, which must record it.
 3. **What an iteration reports.** §9.3 defines the grid's metrics — solve rate per benchmark, $/task, tokens/task,
-   wall-clock/task — none of which a single draw can produce, and no per-iteration metric is defined in §9. The
-   iteration's report is described above instead.
+   wall-clock/task — none of which a single draw can produce, and no per-iteration metric is defined in §9. **The
+   iteration's metric set is delegated to `GPT-6-Astra`**; the minimum the record must still carry is the three
+   cells' time/cost/completion tables, the System-1 lane facts, and what changed and why.
 4. **The loop's budget.** §9.6 prices the run sets and §12.3 asks the owner for a cap on the future full crossing;
    the loop that runs now has no cap and no iteration count of its own. Whether §9.6's "pilot 10 TB tasks first" is
-   simply the loop's first iterations is a decision, not a deduction.
+   simply the loop's first iterations is a decision, not a deduction. **Still the owner's.**
 5. **§9.4's variance subsample.** "Repeat a 10 % subsample three times for variance" presumes the grid; the loop's
-   counter-discipline is instead "all three cells before moving on". Whether §9.4 stays as written until the grid
-   runs is for the owner.
+   counter-discipline is instead "all three cells before moving on". **Still the owner's**, and it does not bind the
+   loop, which makes no claim.
 
 
 
