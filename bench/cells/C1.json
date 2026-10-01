@@ -1,9 +1,15 @@
 {
-  "_comment": "C1 baseline: chronological append, no System-1 governance (native compaction only).",
+  "_meta": {
+    "runSet": true,
+    "role": "baseline: chronological append, the harness manages history natively",
+    "status": "run set for the next round (C1, C2, C4)",
+    "note": "TAS off, recall selection off, plan gate off, chronological layout, and nothing delivered: the assembled layout is recorded, not injected. `xFirst: false` and `deliver: false` come from `cellPolicy('C1')` (packages/core/src/types.ts) and are not repeated here, because a value in this file would silently override the cell.",
+    "retry": "`s1.retryAttempts: 2` is set below per docs/CELLS-RUN.md's setup: the shared Laya refuses rather than queues at its admission limit, and a measured round lost 732 of 2 016 System-1 calls to `503 server busy`, after which the S1 columns are partly the local lexical fallback's and the cell is no longer a measurement of System-1 governance. The retry waits the server's own `Retry-After` and is answered, and `attempts`/`waitedMs` on the `s1_call` record report how often it was needed."
+  },
   "cell": "C1",
   "tas": { "on": false, "tMaxChars": 8000, "updatePolicy": "perTask" },
   "recall": {
-    "tau": 0.55,
+    "threshold": 0.55,
     "depth": 2,
     "fanout": 8,
     "tier1": "off",
@@ -12,5 +18,5 @@
   },
   "tail": { "k": 3 },
   "planGate": { "on": false, "maxPlans": 3, "attemptCap": 2, "abstainConfidence": 0.5 },
-  "s1": { "provider": "jev", "timeoutMs": 2500, "questionsPerCall": 20 }
+  "s1": { "provider": "jev", "questionsPerCall": 20, "retryAttempts": 2 }
 }

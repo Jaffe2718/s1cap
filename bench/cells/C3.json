@@ -1,9 +1,18 @@
 {
-  "_comment": "C3: System-1 governance only — association-graph selection + plan gate, chronological layout.",
+  "_meta": {
+    "runSet": false,
+    "role": "S1 governance alone: recall selection + plan gate, chronological layout (the fourth arm of the 2x2)",
+    "status": "not run - retired from the run set after round 20261001-1300",
+    "measured": "Per step: 3 625 uncached input tokens against the baseline's 2 595, 2 574 output tokens against 1 523, and a 79.2% cache hit rate against 86.7%; backend coverage 22.5%, below the 0.5 floor. Every comparison here is per step and none is an absolute total: this cell's absolute totals are lower than the baseline's (219 737 tokens against 400 034) only because it ran 11 steps against the baseline's 19, so an absolute total is not evidence either way. Its counterpart C2 - the stabiliser on with recall off - measured 14 441 tokens per step against the baseline's 21 054, of which 1 783 uncached input tokens per step against 2 595, with 1 493 output tokens against 1 523.",
+    "why": "C3 measured worse than the baseline on every metric of that round, and the project's claim does not rest on it: the decisive contrast is C2 (TAS alone) against C4 (the full configuration) - if C4 cannot beat C2, the System-1 half has not earned its place, and nothing about that argument needs a fourth arm. The preset is kept so the fourth arm and the reason it is not run stay where the preset lives; the cell names are unchanged, no C0 is introduced, and `cellPolicy()`, the panel and the telemetry `cell` field still bind to C1-C4. The four-cell ablation is the goal again once the C2-vs-C4 contrast is established.",
+    "loading": "Loadable, and `validatePolicy` (packages/core/src/config.ts) reports no error for it: `ok` stays true. It does emit its deliberate warning for this pairing (`recall.tier1 !== 'off'` with `tas.on: false`), naming the same measurements - the combination is one a cell may select on purpose, never by accident. A future four-cell round gets its C3 back by copying this file as it stands.",
+    "note": "TAS off, recall selection on, plan gate on, chronological layout; `xFirst: false` and `deliver: true` come from `cellPolicy('C3')` (packages/core/src/types.ts) and are not repeated here, because a value in this file would silently override the cell.",
+    "caveat": "`recall.minRecalledShare` is set to 0.25 below while the policy default is 0, and in this preset the knob is live (recall selection runs). types.ts records why 0 is the default: at 0.25 the token-share floor fired on 9 of 9 steps of a live C4 session, so every System-1 selection was replaced by recency. Left unchanged here - choosing the value back is a run decision, not a schema one."
+  },
   "cell": "C3",
   "tas": { "on": false, "tMaxChars": 8000, "updatePolicy": "perTask" },
   "recall": {
-    "tau": 0.55,
+    "threshold": 0.55,
     "depth": 2,
     "fanout": 8,
     "tier1": "embed",
@@ -12,5 +21,5 @@
   },
   "tail": { "k": 3 },
   "planGate": { "on": true, "maxPlans": 3, "attemptCap": 2, "abstainConfidence": 0.5 },
-  "s1": { "provider": "jev", "timeoutMs": 2500, "questionsPerCall": 20 }
+  "s1": { "provider": "jev", "questionsPerCall": 20 }
 }
