@@ -214,6 +214,106 @@ function escapeXml(s) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 2b. The round's software identity
+//
+// The project never recorded which DSH release produced a round, and the machine has since moved
+// past the one release the plugin declares as supported. A number quoted without its release is a
+// number nobody can place, so the release and the model are read from `<run>/manifest.json`'s `_dsh`
+// block and carried on the report header and on every chart.
+//
+// Read, never inferred. A round that predates the record is not a blank and not a guess: it prints
+// the same sentence the harness prints, so the wrapper's line, the report and the charts agree.
+// ---------------------------------------------------------------------------------------------
+
+const UNKNOWN_RELEASE =
+  'UNKNOWN RELEASE - this round predates the release record; quote that fact with any number from it.';
+
+/**
+ * Read `<run>/manifest.json` `_dsh`.
+ *
+ * Returns `{ present: false, reason }` for every way the record can be absent - no manifest at all
+ * (a round provisioned before the manifest existed), an unparseable manifest, a manifest with no
+ * `_dsh`, or a `_dsh` with no version. The harness's own `readRoundRecord` treats the last of those
+ * as "no record" and the first as an error; here they are all the same stated fact, because a report
+ * must still be able to describe a historical round rather than refuse to run on one.
+ */
+function readDshRecord(runDir) {
+  const path = join(runDir, 'manifest.json');
+  if (!existsSync(path)) return { present: false, reason: 'no manifest.json', path };
+  let doc;
+  try {
+    doc = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    return { present: false, reason: `manifest.json is not valid JSON (${err.message})`, path };
+  }
+  const d = doc ? doc._dsh : null;
+  if (!d || typeof d !== 'object') return { present: false, reason: 'manifest.json records no _dsh block', path };
+  if (typeof d.version !== 'string' || d.version === '') {
+    return { present: false, reason: 'manifest.json records no _dsh.version', path };
+  }
+  return {
+    present: true,
+    path,
+    version: d.version,
+    executable: typeof d.executable === 'string' && d.executable !== '' ? d.executable : null,
+    command: typeof d.command === 'string' ? d.command : null,
+    probedAt: typeof d.probedAt === 'string' && d.probedAt !== '' ? d.probedAt : null,
+    provider: d.model && typeof d.model.provider === 'string' ? d.model.provider : null,
+    model: d.model && typeof d.model.model === 'string' ? d.model.model : null,
+    plugin: d.plugin && typeof d.plugin === 'object' ? d.plugin : null,
+  };
+}
+
+/**
+ * The identity as the harness words it, in its own order:
+ *   `dsh <v> (<exe>, provisioned <at>) [| model <p>/<m>] [| NOT declared supported by <plugin> (declares …)]`
+ * The report splits this at the ` | ` separators into the release row and the model row; concatenating
+ * those rows back with ` | ` reproduces this sentence exactly, which the self-test asserts.
+ */
+function dshReleaseParts(dsh) {
+  if (!dsh.present) return null;
+  const parts = [`dsh ${dsh.version} (${dsh.executable ?? 'executable not recorded'}, provisioned ${dsh.probedAt ?? 'time not recorded'})`];
+  const declared = dsh.plugin && dsh.plugin.declaredDshReleases;
+  if (declared && typeof declared === 'object' && !Object.hasOwn(declared, dsh.version)) {
+    parts.push(`NOT declared supported by ${dsh.plugin.name ?? 'the plugin'} (declares ${Object.keys(declared).join(', ')})`);
+  }
+  return parts;
+}
+
+/** The model row, only when the record carries one. Never guessed. */
+function dshModelLine(dsh) {
+  if (!dsh.present) return null;
+  if (dsh.provider === null && dsh.model === null) return null;
+  return `${dsh.provider ?? 'provider not recorded'}/${dsh.model ?? 'model not recorded'}`;
+}
+
+/** The one-line form, byte-for-byte the harness's, used where only one line fits. */
+function dshHarnessLine(dsh) {
+  if (!dsh.present) return UNKNOWN_RELEASE;
+  const release = dshReleaseParts(dsh);
+  const model = dshModelLine(dsh);
+  const head = release[0] + (model ? ` | model ${model}` : '');
+  return release.length > 1 ? `${head} | ${release.slice(1).join(' | ')}` : head;
+}
+
+/**
+ * The same identity cut at its ` | ` clause boundaries, for a caption that wraps.
+ *
+ * Handed to the wrapper as one string, the sentence broke *inside* a clause and continued on a line
+ * beginning with a bare `| `. Each clause is short enough to fit a caption line on its own, so the
+ * identity is passed as groups and the wrapper breaks only where the harness itself breaks.
+ */
+function dshCaptionGroups(dsh) {
+  if (!dsh.present) return [UNKNOWN_RELEASE];
+  const release = dshReleaseParts(dsh);
+  const model = dshModelLine(dsh);
+  return [
+    release[0],
+    [`model ${model ?? 'not recorded'}`, ...release.slice(1)].join(' | '),
+  ];
+}
+
+// ---------------------------------------------------------------------------------------------
 // 3. The metric specification - the single source of truth for every renderer
 //
 // One entry per quantity the owner specified. `scopes` says at which levels the quantity is
@@ -957,7 +1057,7 @@ function renderValue(metric, v) {
 }
 
 function renderMarkdown(analysis) {
-  const { cells, runDir, snapshotAt, warnings } = analysis;
+  const { cells, runDir, snapshotAt, warnings, dsh } = analysis;
   const out = [];
   const cellNames = cells.map((c) => c.name);
   const headers = cells.map((c) => c.display);
@@ -967,6 +1067,18 @@ function renderMarkdown(analysis) {
   out.push(`- run: \`${runDir}\``);
   out.push(`- cells: ${cells.map((c) => `\`${c.name}\`${c.label !== c.name ? ` = ${c.label}` : ''}`).join(' · ')}`);
   out.push(`- snapshot taken: ${snapshotAt} (all counts are of the artifacts as read at this instant)`);
+  // Provenance, beside the snapshot: a number cannot be placed without knowing which release produced
+  // it. Both rows are read from the manifest's `_dsh` block; when it is absent the release row states
+  // that fact in the harness's own words rather than going blank or guessing.
+  if (dsh.present) {
+    const parts = dshReleaseParts(dsh);
+    const model = dshModelLine(dsh);
+    out.push(`- DSH release: ${[parts[0], ...parts.slice(1)].join(' | ')}`);
+    out.push(`- model: ${model ?? 'not recorded in this round\'s _dsh block'}`);
+  } else {
+    out.push(`- DSH release: ${UNKNOWN_RELEASE}`);
+    out.push(`- model: not recorded (${dsh.reason})`);
+  }
   out.push(`- System-1 lane: ${laneHeaderLine(cells)}`);
   out.push('');
   out.push('Every figure below is derived from the three sources named in `scripts/cell-report.mjs`: the');
@@ -1338,10 +1450,13 @@ function niceStep(range, ticks) {
  * the unit in the axis label. Returns { svg, height }.
  */
 function barPanel({ title, note, unit, metrics, cells, valueOf, labelFor, y, width }) {
-  // pad.top carries the panel title, the note (up to two lines), and the headroom the rotated value
-  // labels need above the tallest bar: a label anchored at the top of a full-height bar must still
-  // clear the note.
-  const pad = { left: 118, right: 30, top: 124, bottom: 96 };
+  // `pad.top` carries the panel title, the note, and the headroom the rotated value labels need above
+  // the tallest bar: a label anchored at the top of a full-height bar must still clear the note. It
+  // grows with the note rather than the note being clipped to fit it - a caption that is cut off is
+  // the failure this whole geometry pass exists to stop, and the band is the thing that can move.
+  const noteLines = note ? wrapCaption(note, 132) : [];
+  const padTop = 108 + (noteLines.length - 1) * 15;
+  const pad = { left: 118, right: 30, top: padTop, bottom: 96 };
   const plotW = width - pad.left - pad.right;
   const plotH = 250;
   // Every coordinate below is PANEL-LOCAL: the panel's group carries `translate(0,y)` and is the one
@@ -1349,7 +1464,6 @@ function barPanel({ title, note, unit, metrics, cells, valueOf, labelFor, y, wid
   // invisible for panel 1, where y is 0, and wrong for every panel after it.
   const top = pad.top;
   const bottom = top + plotH;
-  const noteLines = note ? wrapCaption(note, 132, 2) : [];
   const unitSpec = SVG_PANEL_UNIT[unit];
   const out = [];
 
@@ -1445,12 +1559,17 @@ function barPanel({ title, note, unit, metrics, cells, valueOf, labelFor, y, wid
   return { svg: out.join('\n'), height: pad.top + plotH + pad.bottom };
 }
 
-function svgDocument({ title, subtitle, panels, width }) {
+function svgDocument({ title, subtitleGroups, panels, width }) {
   // The document is a header block, then the panels stacked with no gap and no overlap, then a footer
-  // margin. `HEAD` depends on how many lines the subtitle wrapped to, and is emitted as the wrapper's
+  // margin. `HEAD` depends on how many lines the caption wrapped to, and is emitted as the wrapper's
   // own offset so the audit can read it back rather than assume it.
+  //
+  // The caption arrives as groups rather than one string, and each group is wrapped on its own. That
+  // is what keeps the release record readable: wrapped together with the rest, the harness's sentence
+  // was split across a line break mid-sentence, so it neither read as one statement nor could be
+  // matched against the wrapper's output as one.
   const FOOT = 40;
-  const subLines = wrapCaption(subtitle, 138, 2);
+  const subLines = subtitleGroups.flatMap((g) => wrapCaption(g, 138));
   const HEAD = 52 + (subLines.length - 1) * 15;
   let y = 0;
   let body = '';
@@ -1526,10 +1645,49 @@ function styleFontSizes(text) {
   return sizes;
 }
 
+/**
+ * What kind of SVG is this?
+ *
+ * The audit owns the metric charts this tool writes, and only those. `cell-figure.mjs` writes a fourth
+ * file into the same directory - a composition of a `foreignObject` header plus the three charts
+ * nested inside it - which legitimately has no top-level panels. Counting it as a failure made the
+ * documented order (`report` -> `figure` -> `audit`) report a false alarm, so a composition is
+ * recognised and skipped with a note instead. An SVG that is neither is still a failure: a chart the
+ * audit cannot place is exactly what it must not wave through.
+ */
+function classifySvg(text) {
+  // A composition is tested for first, and decisively: it embeds whole chart documents, so it contains
+  // their `class="panels"` wrappers too. Only a `foreignObject` plus nested `<svg>` children rules it
+  // out as a chart, and no metric chart this tool writes has either.
+  const nestedSvg = (text.match(/<svg[\s>]/g) || []).length;
+  if (/<foreignObject[\s>]/.test(text) && nestedSvg >= 2) return 'composition';
+  const hasPanelWrapper = /<g class="panels" transform="translate\(0,-?[\d.]+\)">/.test(text);
+  const legacyGroups = [...text.matchAll(/<g(?: class="panel")? transform="translate\(0,(-?[\d.]+)\)">/g)].length;
+  if (hasPanelWrapper || legacyGroups >= 2) return 'chart';
+  return 'unknown';
+}
+
 function auditSvg(text) {
   const violations = [];
   const docHeight = Number(/<svg[^>]*\sheight="([\d.]+)"/.exec(text)?.[1]);
   const docWidth = Number(/<svg[^>]*\swidth="([\d.]+)"/.exec(text)?.[1]);
+  const kind = classifySvg(text);
+  if (kind === 'composition') {
+    return {
+      docHeight,
+      docWidth,
+      origin: null,
+      bands: [],
+      violations: [],
+      ok: true,
+      skipped: true,
+      kind,
+      texts: 0,
+      legacy: false,
+      reason: 'a composed figure: a foreignObject header with the metric charts nested inside it, so it has no '
+        + 'top-level panels of its own - its panels are the charts it embeds, audited as the files beside it',
+    };
+  }
   if (!Number.isFinite(docHeight)) violations.push('document has no readable height attribute');
 
   // Panels carry `class="panel"` and the wrapper `class="panels"`. A chart written before those
@@ -1563,7 +1721,9 @@ function auditSvg(text) {
     const plain = [...text.matchAll(/<g(?: class="panel")? transform="translate\(0,(-?[\d.]+)\)">/g)]
       .map((m) => ({ at: m.index, end: m.index + m[0].length, y: Number(m[1]), title: null, metrics: null, cells: null, declaredHeight: null }));
     if (plain.length < 2) {
-      violations.push('document has no readable panel structure');
+      violations.push(modern.length > 1
+        ? `document embeds ${modern.length} panel wrappers and has no foreignObject - it is neither a single chart nor a recognisable composition`
+        : 'document has no readable panel structure');
       return { docHeight, docWidth, origin: null, bands: [], violations, ok: false, legacy };
     }
     origin = plain[0].y;
@@ -1689,11 +1849,14 @@ function auditSvg(text) {
     }
   }
 
-  return { docHeight, docWidth, origin, bands, violations, ok: violations.length === 0, legacy, texts: horiz.length };
+  return { docHeight, docWidth, origin, bands, violations, ok: violations.length === 0, legacy, kind, skipped: false, texts: horiz.length };
 }
 
 /** Human-readable audit, used by `--audit` and quoted in the self-test output. */
 function formatAudit(name, audit) {
+  if (audit.skipped) {
+    return `${name}: SKIPPED  ${audit.reason}`;
+  }
   const lines = [`${name}: ${audit.ok ? 'OK' : `FAIL (${audit.violations.length})`}  doc ${audit.docWidth}x${audit.docHeight}, origin ${audit.origin}, ${audit.bands.length} panel(s)${audit.legacy ? ' [pre-band-attribute chart: heights derived from the offsets]' : ''}`];
   for (const b of audit.bands) {
     lines.push(
@@ -1708,7 +1871,7 @@ function formatAudit(name, audit) {
 }
 
 function renderSvgs(analysis) {
-  const { cells, runDir, snapshotAt } = analysis;
+  const { cells, runDir, snapshotAt, dsh } = analysis;
   const width = 1120;
   const svgCells = cells.map((c, i) => ({
     name: c.name,
@@ -1716,8 +1879,11 @@ function renderSvgs(analysis) {
     colour: CELL_COLOURS[i % CELL_COLOURS.length],
     laneAbsent: c.a.diagnostics.laneAbsent,
   }));
-  const sub = (group) =>
-    `run ${runDir} · group: ${group} · one group per metric, one bar per cell · snapshot ${snapshotAt}`;
+  // A chart gets screenshotted and forwarded on its own, so the release and the model travel with it
+  // as their own caption group, second - after the run directory and before anything else - where no
+  // wrap can push them off the end and where the harness's sentence stays on one line.
+  const sub = () => `run ${runDir}`;
+  const prov = () => dshCaptionGroups(dsh);
   /**
    * A System-1 bar of zero is labelled with why it is zero, exactly as in the tables: a bar that says
    * `0 (no lane)` and a bar that says `0 (lane, 0 ok)` are different findings and must not be drawn
@@ -1756,7 +1922,12 @@ function renderSvgs(analysis) {
 
   const timeSvg = svgDocument({
     title: 'S1CAP cell report - time',
-    subtitle: `${sub('time')} · ${laneSummary}`,
+    subtitleGroups: [
+      sub(),
+      ...prov(),
+      `group: time · one group per metric, one bar per cell · snapshot ${snapshotAt}`,
+      laneSummary,
+    ],
     width,
     panels: [
       {
@@ -1791,7 +1962,13 @@ function renderSvgs(analysis) {
 
   const costSvg = svgDocument({
     title: 'S1CAP cell report - cost',
-    subtitle: `${sub('cost')} · ${laneSummary} · cache hit rate is a mechanism diagnostic and is deliberately NOT in this chart`,
+    subtitleGroups: [
+      sub(),
+      ...prov(),
+      `group: cost · one group per metric, one bar per cell · snapshot ${snapshotAt}`,
+      `cache hit rate is a mechanism diagnostic and is deliberately NOT in this chart`,
+      laneSummary,
+    ],
     width,
     panels: [
       {
@@ -1808,7 +1985,13 @@ function renderSvgs(analysis) {
 
   const governanceSvg = svgDocument({
     title: 'S1CAP cell report - System-1 governance (mechanism, not cost)',
-    subtitle: `${sub('mechanism')} · coverage = judgedPairs / scoredPairs from the association-graph snapshot · ${laneSummary}`,
+    subtitleGroups: [
+      sub(),
+      ...prov(),
+      `group: mechanism · one group per metric, one bar per cell · snapshot ${snapshotAt}`,
+      `coverage = judgedPairs / scoredPairs from the association-graph snapshot`,
+      laneSummary,
+    ],
     width,
     panels: [
       {
@@ -1861,13 +2044,14 @@ const USAGE = `Usage:
 `;
 
 /**
- * Wrap a caption into at most `maxLines` lines of at most `maxChars` characters, breaking on spaces.
+ * Wrap a caption into lines of at most `maxChars` characters, breaking on spaces.
  *
  * Captions used to be emitted as one line and simply ran off the right edge of the document, where a
- * viewer clips them silently. A character budget rather than a measured width keeps this dependency
- * free; the audit measures the result and rejects anything that still overflows.
+ * viewer clips them silently. This returns as many lines as the text needs and never drops any: an
+ * earlier version stopped at a fixed line cap, which would now quietly delete the release record off
+ * the end of a long subtitle. The audit measures every line and rejects anything that still overflows.
  */
-function wrapCaption(text, maxChars, maxLines) {
+function wrapCaption(text, maxChars) {
   const words = String(text).split(' ');
   const lines = [];
   let line = '';
@@ -1875,13 +2059,12 @@ function wrapCaption(text, maxChars, maxLines) {
     if (line !== '' && (line + ' ' + w).length > maxChars) {
       lines.push(line);
       line = w;
-      if (lines.length === maxLines) break;
     } else {
       line = line === '' ? w : `${line} ${w}`;
     }
   }
-  if (lines.length < maxLines && line !== '') lines.push(line);
-  return lines;
+  if (line !== '') lines.push(line);
+  return lines.length > 0 ? lines : [''];
 }
 
 function parseArgs(argv) {
@@ -1944,7 +2127,11 @@ function analyseRun(runDir, cellNames, labelMap, snapshotAt) {
     return { ...cell, a: aggregate(cell) };
   });
   const warnings = cells.flatMap((c) => c.warnings.concat(c.a.warnings));
-  return { runDir, snapshotAt, cells, warnings };
+  // The round's software identity is a property of the round, not of a cell: it is read once here and
+  // carried on the report header and on every chart subtitle.
+  const dsh = readDshRecord(runDir);
+  if (!dsh.present) warnings.push(`round release record unavailable (${dsh.reason}): ${UNKNOWN_RELEASE}`);
+  return { runDir, snapshotAt, cells, warnings, dsh };
 }
 
 function main() {
@@ -2032,12 +2219,21 @@ function runAudit(paths) {
     process.exit(1);
   }
   let bad = 0;
+  let skipped = 0;
+  let charts = 0;
   for (const f of files.sort()) {
     const audit = auditSvg(readFileSync(f, 'utf8'));
-    if (!audit.ok) bad += 1;
+    if (audit.skipped) skipped += 1;
+    else {
+      charts += 1;
+      if (!audit.ok) bad += 1;
+    }
     process.stdout.write(`${formatAudit(f, audit)}\n`);
   }
-  process.stdout.write(`cell-report --audit: ${files.length - bad}/${files.length} chart(s) OK\n`);
+  const skipNote = `${skipped} skipped (not a metric chart - see the note above)`;
+  process.stdout.write(charts === 0
+    ? `cell-report --audit: nothing to audit, ${skipNote}\n`
+    : `cell-report --audit: ${charts - bad}/${charts} chart(s) OK${skipped > 0 ? `, ${skipNote}` : ''}\n`);
   process.exit(bad === 0 ? 0 : 1);
 }
 
@@ -2215,7 +2411,50 @@ function buildSyntheticRun(root) {
   mkCell('B', B, controlB, rgB);
   mkCell('E', E, controlE, rgE, tapeE);
   mkCell('F', F, controlF, rgF, tapeF);
+  // The round's software identity, exactly as the harness writes it, including the plugin that does
+  // *not* declare this release as supported - the case that motivated recording it at all.
+  writeFileSync(join(root, 'manifest.json'), `${JSON.stringify({
+    _run: root,
+    _dsh: {
+      version: '0.2.0-rc.2',
+      executable: 'C:\\Users\\lfkex\\AppData\\Roaming\\npm\\dsh.cmd',
+      command: 'dsh --version',
+      probedAt: '2026-10-01T09:35:32.648Z',
+      profileSource: 'profile.default',
+      plugin: { name: 'dsh-s1cap', version: '0.1.0', declaredDshReleases: { '0.1.7-rc.2': 'supported' }, peerDependencies: null },
+      model: { provider: 'deepseek-account', model: 'deepseek-flash' },
+    },
+  }, null, 1)}\n`);
   return { builtA, eventsA: A };
+}
+
+/**
+ * A second, minimal run directory whose manifest carries no `_dsh` block - the shape every round on
+ * disk has today, because the record was introduced after them. One cell is enough: the release row is
+ * a property of the round and must reach the header and the charts whether or not any cell has a lane.
+ */
+function buildRunWithoutDshRecord(root, manifestBody) {
+  const events = [
+    { type: 'session', version: 4, id: 'session-nnnn', createdAt: 900 },
+    { type: 'turn/start', time: 1000, seq: 1, data: { turn: 1 } },
+    { type: 'user/message', time: 1001, seq: 2, data: { content: [{ type: 'text', text: 'human' }], source: { kind: 'user' } } },
+    { type: 'step/start', time: 1010, seq: 3, data: { turn: 1, step: 1 } },
+    { type: 'assistant/message', time: 1030, seq: 4, data: { turn: 1, step: 1, message: { role: 'assistant', content: [] }, usage: { inputTokens: 2, cacheReadTokens: 10, outputTokens: 1 } } },
+    { type: 'step/end', time: 1035, seq: 5, data: { turn: 1, step: 1 } },
+    { type: 'turn/end', time: 1040, seq: 6, data: { turn: 1, reason: { kind: 'completed' } } },
+  ];
+  const home = join(root, 'home', 'N');
+  const storeDir = join(home, 'sessions', '--workspace--', 'session-n');
+  mkdirSync(storeDir, { recursive: true });
+  mkdirSync(join(home, '.s1cap', 'rg'), { recursive: true });
+  writeFileSync(join(storeDir, 'session.v4.jsonl.zstd'), zstdFrames(events.map((e) => JSON.stringify(e)).join('\n'), 3));
+  const evDir = join(root, 'evidence', 'N');
+  mkdirSync(evDir, { recursive: true });
+  writeFileSync(join(evDir, 'control.jsonl'), `${JSON.stringify({ type: 'assembly', schema: 1, ts: 1005, sessionId: 'session-nnnn', seq: 0 })}\n`);
+  writeFileSync(join(home, '.s1cap', 'rg', 'rg-session-nnnn-deadbeef.json'), JSON.stringify({
+    schema: 2, sessionId: 'session-nnnn', scoredPairs: 2, judgedPairs: 1, order: ['a'], segments: [], edges: [], scores: [],
+  }));
+  if (manifestBody !== null) writeFileSync(join(root, 'manifest.json'), manifestBody);
 }
 
 function runSelfTest() {
@@ -2510,6 +2749,111 @@ function runSelfTest() {
         `<text x="118" y="56" class="panel-note">${'W'.repeat(300)}</text>`));
       assertTrue(!wide.ok, 'the audit must reject a caption wider than the document');
     }, 'svg geometry: bars and value labels lie inside the owning panel band, bands are contiguous, height is exact');
+
+    check(() => {
+      // The audit owns the metric charts and nothing else. `cell-figure.mjs` writes a composition into
+      // the same directory, and counting it as a failure made `report -> figure -> audit` - the
+      // documented order - report a false alarm. It is skipped with a reason; an SVG that is neither a
+      // chart nor a recognisable composition is still a failure, so the skip cannot swallow a broken
+      // chart.
+      const composition = `<svg xmlns="http://www.w3.org/2000/svg" width="1168" height="3761" viewBox="0 0 1168 3761">
+  <rect x="0" y="0" width="1168" height="3761" fill="#ffffff"/>
+  <foreignObject x="0" y="0" width="1168" height="900"><div xmlns="http://www.w3.org/1999/xhtml">header</div></foreignObject>
+  <svg x="24" y="900" width="1120" height="546" viewBox="0 0 1120 546"><g class="panels" transform="translate(0,52)"></g></svg>
+  <svg x="24" y="1476" width="1120" height="546" viewBox="0 0 1120 546"><g class="panels" transform="translate(0,52)"></g></svg>
+  <svg x="24" y="2052" width="1120" height="546" viewBox="0 0 1120 546"><g class="panels" transform="translate(0,52)"></g></svg>
+</svg>`;
+      assertEqual(classifySvg(composition), 'composition', 'a composed figure is recognised');
+      const a = auditSvg(composition);
+      assertTrue(a.skipped && a.ok, 'a composition is skipped, not failed');
+      assertTrue(a.reason.includes('composed figure'), 'the skip carries a readable reason');
+      assertTrue(formatAudit('summary.svg', a).startsWith('summary.svg: SKIPPED'), 'the audit prints the skip');
+
+      // a chart is still a chart, and a document that is neither is still a failure
+      assertEqual(classifySvg(svgs['time.svg']), 'chart', 'the real charts classify as charts');
+      const junk = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect x="0" y="0" width="100" height="100"/></svg>';
+      assertEqual(classifySvg(junk), 'unknown', 'an unrecognisable svg is not a composition');
+      const j = auditSvg(junk);
+      assertTrue(!j.ok && !j.skipped, 'an unrecognisable svg still fails the audit');
+      assertTrue(j.violations.includes('document has no readable panel structure'), 'and says why');
+    }, 'the audit skips a composed figure with a note, and still fails an svg it cannot place');
+
+    check(() => {
+      // The release and the model are read from the manifest's `_dsh` block and must reach the header...
+      assertEqual(analysis.dsh.present, true, 'the fixture manifest records _dsh');
+      assertEqual(analysis.dsh.version, '0.2.0-rc.2', 'recorded release');
+      const mdDsh = renderMarkdown(analysis);
+      const releaseRow = mdDsh.split('\n').find((l) => l.startsWith('- DSH release:')) || '';
+      const modelRow = mdDsh.split('\n').find((l) => l.startsWith('- model:')) || '';
+      assertTrue(releaseRow.includes('dsh 0.2.0-rc.2'), 'header carries the release');
+      assertTrue(releaseRow.includes('C:\\Users\\lfkex\\AppData\\Roaming\\npm\\dsh.cmd'), 'header carries the executable');
+      assertTrue(releaseRow.includes('provisioned 2026-10-01T09:35:32.648Z'), 'header carries the probe time');
+      assertTrue(releaseRow.includes('NOT declared supported by dsh-s1cap (declares 0.1.7-rc.2)'),
+        'header says the plugin does not declare this release supported');
+      assertEqual(modelRow, '- model: deepseek-account/deepseek-flash', 'header model row');
+      // ...and the two rows must reassemble into the harness's own single line, so the wrapper's
+      // output, the report and the charts cannot drift apart
+      const harness = dshHarnessLine(analysis.dsh);
+      assertEqual(harness, 'dsh 0.2.0-rc.2 (C:\\Users\\lfkex\\AppData\\Roaming\\npm\\dsh.cmd, provisioned 2026-10-01T09:35:32.648Z)'
+        + ' | model deepseek-account/deepseek-flash'
+        + ' | NOT declared supported by dsh-s1cap (declares 0.1.7-rc.2)', 'harness wording');
+      assertTrue(harness === `${releaseRow.replace('- DSH release: ', '').split(' | ')[0]} | model ${modelRow.replace('- model: ', '')} | ${releaseRow.split(' | ').slice(1).join(' | ')}`,
+        'the release and model rows reassemble into the harness sentence');
+      for (const [name, text] of Object.entries(renderSvgs(analysis))) {
+        assertTrue(text.includes('dsh 0.2.0-rc.2'), `${name} subtitle carries the release`);
+        assertTrue(text.includes('deepseek-account/deepseek-flash'), `${name} subtitle carries the model`);
+        const captionLines = [...text.matchAll(/class="doc-sub">([^<]*)</g)].map((m) => m[1]);
+        // the release clause itself must not be split, and the clauses must reassemble into the
+        // harness's sentence - a split inside a clause would leave a line starting with a bare `|`
+        assertTrue(captionLines.some((l) => l.trim() === dshReleaseParts(analysis.dsh)[0]),
+          `${name} carries the release clause unbroken`);
+        assertTrue(!captionLines.some((l) => l.trim().startsWith('|')), `${name} has a caption line starting with "|"`);
+        // Read back with the harness's own separator, the caption lines contain its sentence verbatim:
+        // the identity survived the wrap without a word changed or lost.
+        assertTrue(captionLines.join(' | ').includes(harness), `${name} captions reassemble into the harness sentence`);
+      }
+    }, 'a round WITH a release record puts it on the header and on every chart');
+
+    check(() => {
+      // ...and a round WITHOUT one states that fact in the harness's own words, in both places.
+      const bare = join(root, 'bare');
+      mkdirSync(bare, { recursive: true });
+      buildRunWithoutDshRecord(bare, null);
+      const a1 = analyseRun(bare, ['N'], new Map(), '2026-01-01T00:00:00.000Z');
+      assertEqual(a1.dsh.present, false, 'no manifest means no record');
+      const md1 = renderMarkdown(a1);
+      assertTrue(md1.includes(`- DSH release: ${UNKNOWN_RELEASE}`), 'header states the missing record verbatim');
+      assertTrue(md1.includes('- model: not recorded'), 'the model row states the absence rather than going blank');
+      assertTrue(!md1.includes('- DSH release: \n'), 'the release row is never empty');
+      const svg1 = renderSvgs(a1);
+      for (const [name, text] of Object.entries(svg1)) {
+        assertTrue(text.includes(UNKNOWN_RELEASE), `${name} subtitle states the missing record verbatim`);
+        assertTrue(auditSvg(text).ok, `${name} geometry still holds with the UNKNOWN caption`);
+      }
+
+      // a manifest that exists but carries no _dsh is the same stated fact, not a crash
+      const partial = join(root, 'partial');
+      mkdirSync(partial, { recursive: true });
+      buildRunWithoutDshRecord(partial, `${JSON.stringify({ _run: partial, _harness: 'x' })}\n`);
+      const a2 = analyseRun(partial, ['N'], new Map(), '2026-01-01T00:00:00.000Z');
+      assertEqual(a2.dsh.present, false, 'a manifest with no _dsh is not a record');
+      assertEqual(a2.dsh.reason, 'manifest.json records no _dsh block', 'and the reason is recorded');
+      assertTrue(renderMarkdown(a2).includes(UNKNOWN_RELEASE), 'the header still states it verbatim');
+
+      // a _dsh with no version is the same: the harness reads `_dsh?.version` and so do we
+      const versionless = join(root, 'versionless');
+      mkdirSync(versionless, { recursive: true });
+      buildRunWithoutDshRecord(versionless, `${JSON.stringify({ _dsh: { executable: 'x' } })}\n`);
+      assertEqual(analyseRun(versionless, ['N'], new Map(), 'x').dsh.present, false, '_dsh without a version is not a record');
+
+      // unparseable manifest: a stated fact, never a throw - a report must still describe the round
+      const corrupt = join(root, 'corrupt');
+      mkdirSync(corrupt, { recursive: true });
+      buildRunWithoutDshRecord(corrupt, '{ not json');
+      const a4 = analyseRun(corrupt, ['N'], new Map(), 'x');
+      assertEqual(a4.dsh.present, false, 'a corrupt manifest is not a record');
+      assertTrue(a4.dsh.reason.startsWith('manifest.json is not valid JSON'), 'and the reason names it');
+    }, 'a round WITHOUT a release record states the fact in the harness wording, never a blank and never a guess');
 
     throws(() => analyseRun(join(root, 'nope'), ['A'], new Map(), 'x'), 'run directory not found', 'missing run directory fails loudly');
     throws(() => analyseRun(root, ['ZZ'], new Map(), 'x'), 'no control plane', 'missing cell evidence fails loudly');
