@@ -2,15 +2,24 @@
 /**
  * Open one test round: a randomly named directory inside the workspace, and nothing else.
  *
- * Why this exists. Test rounds used to write their answer to the workspace root, under a name the task itself
- * suggested - `pelican-bicycle.html` - so a later round could read the previous round's answer instead of
- * solving the task, and two rounds writing the same name would silently replace one another. A run that
- * measures the file system is not a measurement of the method.
+ * **The current stimuli need no round directory.** `scripts/round-tasks.json` writes nothing: its turns ask for
+ * the answer in the conversation and forbid creating, modifying or deleting a file or directory, so the fixture
+ * contains no `{salt}` placeholder and nothing lands in the directory this script would open. Those rounds are
+ * isolated by their workspace instead - each cell runs in its own empty working directory. Behaviour is unchanged
+ * either way: `--create` still opens the directory, `{salt}` is still substituted where a fixture contains it
+ * (nowhere, today), and the messages are printed as recorded - the closing summary still describes the directory,
+ * which is what a writing stimulus uses.
+ *
+ * Why the mechanism exists. Test rounds used to write their answer to the workspace root, under a name the task
+ * itself suggested - `pelican-bicycle.html` - so a later round could read the previous round's answer instead of
+ * solving the task, and two rounds writing the same name would silently replace one another. A run that measures
+ * the file system is not a measurement of the method.
  *
  * The workspace is deliberately **not** reconfigured. A session's workspace is the instance's working
  * directory and the sandbox confines writes to it, so narrowing it per round would work - but it changes the
- * environment the experiment runs in, and the session's workspace is part of what is being observed. The
- * isolation unit is therefore a directory *inside* the workspace, named by a random salt:
+ * environment the experiment runs in, and the session's workspace is part of what is being observed. For a
+ * stimulus that writes, the isolation unit is therefore a directory *inside* the workspace, named by a random
+ * salt:
  *
  *   <workspace>/<salt>/<answer>.html
  *
@@ -23,10 +32,11 @@
  * them; the defence against that is that the task text names one directory, and the harness moves a finished
  * round's directory out of the workspace once its evidence has been collected.
  *
- * The round's messages come from `scripts/round-tasks.json`, and the salt is substituted into them here rather
- * than retyped: the first message names the directory, so a mistyped salt would send the answer somewhere the
- * round is not watching. The fixture is ASCII-escaped (`\uXXXX`) because the experiment's stimuli are Chinese
- * and no repository file may contain Chinese; decoding it yields the exact code points that were recorded.
+ * The round's messages come from `scripts/round-tasks.json` and are sent as recorded rather than retyped, because
+ * a stimulus that is retyped is a stimulus that has changed. Where a stimulus names a directory, the salt is
+ * substituted into it here rather than typed by hand: a mistyped salt would send the answer somewhere the round is
+ * not watching. The fixture is ASCII-escaped (`\uXXXX`) because the experiment's stimuli are Chinese and no
+ * repository file may contain Chinese; decoding it yields the exact code points that were recorded.
  *
  * Usage:
  *   node scripts/new-test-run.mjs                 # print this round's directory and its messages

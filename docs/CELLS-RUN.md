@@ -7,8 +7,9 @@ conversation is a procedure that gets re-invented differently each time.
 
 ## The question this run answers
 
-The project's claim needs the full configuration (`C2`) to beat the baseline (`C0`) on one of completion / cost /
-time. The baseline arm of round `20261001-1300` — the cell that round called `C1`, today's `C0` — measured an 86.7%
+The **registered rule** — the pre-registered comparison of `docs/FORMULAS.md` §8 — needs the full configuration
+(`C2`) to beat the baseline (`C0`) on one of completion / cost / time. The baseline arm of round `20261001-1300` —
+the cell that round called `C1`, today's `C0` — measured an 86.7%
 prompt-cache hit rate, and the owner asked whether S1CAP's context management is what lowers it. That round ran
 four cells under labels that no longer exist; the mapping table is in "Cells" below, and every figure taken from
 it in this document carries the round and the label it ran under.
@@ -86,7 +87,8 @@ The full four-cell ablation stays the goal once the `C1`-vs-`C2` contrast is est
 `bench/cells/`, the settings panel, the `cell` field on every telemetry record and this document all bind to
 C0–C2 — and the old C3 is not run again (see above).
 
-**The contrast the project's claim rests on is TAS alone against the full configuration: `C1` against `C2`.** In
+**The design contrast — the comparison that decides whether the System-1 half earns its place — is TAS alone
+against the full configuration: `C1` against `C2`.** In
 round `20261001-1300` the TAS-alone arm (then `C2`) moved **14 441** tokens per step — 187 739 over 13 steps
 against the baseline's (then `C1`) 400 034 over 19, i.e. **21 054** per step — about 0.69×. It sits below the
 baseline on all three quantities (1 783 / 11 166 / 1 493 per step against 2 595 / 16 936 / 1 523, with the output
@@ -99,7 +101,7 @@ that argument needs a fourth arm.
 94.3% — a ±10 pp spread *within one cell*, across three turns, with no stable ordering — and the four arms' overall
 rates were not monotone in how much S1CAP each of them ran. So run C0, C1 and C2 several times each and report the
 repeats as a distribution per cell (min / median / max, and the count), not as one mean over runs that disagreed.
-Each repeat keeps its own salt directory and its own telemetry paths, exactly as the cells do now.
+Each repeat keeps its own workspace and its own telemetry paths, exactly as the cells do now.
 
 ## Setup
 
@@ -109,7 +111,7 @@ profile with three changes:
 - `cell: C0` … `cell: C2`;
 - **separate telemetry paths per cell** — `telemetry.controlJsonl`, `sessionJsonl` and `tapeJsonl` must not
   collide across cells (the plugin rejects identical session and control paths, and a shared file would make the
-  per-cell numbers meaningless); a repeat of a cell needs its own paths as well as its own salt;
+  per-cell numbers meaningless); a repeat of a cell needs its own paths as well as its own workspace;
 - **a pinned `s1.baseUrl`** for the already-running local endpoint. This is not cosmetic. With Laya selected and
   neither a `baseUrl` nor a `laya.pythonPath`, `singleBackendIssues` reports a conflict, and a conflict drops the
   session to `provider=none` — the cell then makes **no System-1 calls at all** while the panel merely says the
@@ -162,10 +164,10 @@ a previous round into 191 failed S1 calls out of 281.
 - **Overwriting an existing file fails as well** (`SetFileSecurityW EACCES` on the sibling temp directory the
   editor creates), in every mode. A stimulus that only ever creates *new* files never sees it; one that asks for
   an existing file to be corrected does, and the cell stops and asks a human instead of finishing.
-- Prefer a stimulus that **writes nothing at all**. Files make the round depend on the sandbox rather than on
-  S1CAP: permissions, temp directories and security descriptors all become confounders, and the cell that hit them
-  needed two human interventions to finish. A conversation-only stimulus removes the salt directories too, since
-  nothing is written that a later round could read.
+- **The stimulus writes nothing at all**, which is the choice this round settled on. Files make the round depend on
+  the sandbox rather than on S1CAP: permissions, temp directories and security descriptors all become confounders,
+  and the cell that hit them needed two human interventions to finish. A conversation-only stimulus removes the
+  round directories too, since nothing is written that a later round could read.
 - **Pick the cell model deliberately.** `bailian/qwen3.8-flash` over-thinks, which changes what a cell spends its
   steps on; the owner's choice for the next round is `deepseek-v4.1-flash`, with `reasoningEffort` pinned, set
   through `agent-default-model` in the copied profile. No sampling parameter is claimed for the run: DSH exposes
@@ -179,17 +181,37 @@ a previous round into 191 failed S1 calls out of 281.
 - `~/.dsh/profiles/node_modules` is a farm of unresolvable junctions: a recursive `grep` there fails with
   thousands of `os error 3`s. Read the profile patch files directly.
 
-Round directories: one per (cell, repeat), **different salts** — `node scripts/new-test-run.mjs --create` prints the
-salt and the messages with it substituted. The salt must differ per cell, or one cell's answers land in another
-cell's directory.
+**Round directories and salts are not used by these stimuli.** Nothing is written, so there is no directory to open
+and no `{salt}` placeholder to substitute. What isolates the cells instead is their **workspace**: each cell runs
+with its own empty working directory (`<run>/ws/<cell>`), so there is nothing in a cell's working directory for a
+later cell to inherit and no path for two cells to collide over. `node scripts/new-test-run.mjs --create` still
+opens a round directory and still substitutes `{salt}` where a stimulus contains it, so the mechanism stays
+available for a stimulus that does write; with the current fixture it prints the messages with nothing substituted.
 
 ## Messages
 
 The three-turn LeetCode stimuli live in `scripts/round-tasks.json` (ASCII-escaped, because no repository file may
-contain Chinese). Turns 2 and 3 carry the owner's revision: each asks for a **new `.py` file, keeping the
-previous one**, which is what makes the round a test of accumulation rather than of replacement. The fixture is
-the only copy of the stimulus — it is substituted, never retyped at the keyboard, because a stimulus that is
-retyped is a stimulus that has changed.
+contain Chinese), and they ask for the answer **in the conversation**: the stimulus forbids creating, modifying or
+deleting any file, and forbids making a directory. The reason is measured rather than stylistic. A round that
+writes makes the measurement depend on the file sandbox rather than on S1CAP, and the overwrite failure
+(`SetFileSecurityW EACCES`) cost the full-configuration cell **two human interventions** in round `20261001-1300`;
+a round's own directory was also a way for a later round to read an earlier round's answer. The turns offer the
+harness runtime's own Python for verification instead, fed through stdin (`@'...'@ | python -`) so that nothing
+needs to land on disk — it is the interpreter the runtime already ships, not an escalation.
+
+Three things are pinned so that an answer stays objectively checkable afterwards. The self-test data: three fixed
+price arrays, given in the first turn (`[7,1,5,3,6,4]`, `[1,2,3,4,5]`, `[7,6,4,3,1]`) and carried over by the later
+ones, plus `random.seed(0)` if the code uses randomness. The answer's length: code ≤ 40 lines and rationale ≤ 6
+bullets — because output tokens were 55–80% of what a price-weighted total would have charged in every cell of the
+last round, and an uncapped answer measures how much the model chose to say rather than how well it manages
+context. And the no-question rule, stated in the stimulus as well as enforced structurally by the run: a cell is
+driven by an agent, so a question is a turn spent waiting for an answer nobody sends.
+
+Turns 2 and 3 carry the owner's revision in its no-file form: each **keeps the earlier answers untouched and adds a
+new section** for the new problem — 121 → 122 → 123 (one transaction → any number of transactions → at most two),
+which is what makes the round a test of accumulation rather than of replacement. The fixture is still the only copy
+of the stimulus: the messages are read from it and sent as recorded, never retyped at the keyboard, because a
+stimulus that is retyped is a stimulus that has changed.
 
 ## Back-pressure
 

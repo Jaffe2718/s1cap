@@ -14,7 +14,7 @@
 2. **A new decision model category is born**: TypeSafe AI's Jev (2026-09-15, $0.042/M input, free output, parallel query evaluation) and the open-source Laya (2026-09-18, Apache-2.0, 322M/421M, 15.6ms/decision locally) — the cost of a "System-1 call" drops from "one LLM call" to "noise level";
 3. **Cache economics becomes a hard constraint**: DeepSeek `deepseek-flash` cache hit price $0.006/M vs. miss $0.30/M (**50x**) — how context is assembled, what may be reordered and what may not, directly determines cost.
 
-**Core hypotheses**: H1, association graph recall can hold the solve rate with fewer context tokens; H2, plan pre-ranking can eliminate wasted execution attempts; H3 (two-sided risk), Trace-as-State reordering will change the cache hit rate, and the net effect must be measured rather than assumed; H4, the gains transfer across harnesses.
+**Core hypotheses**: H2, plan pre-ranking can eliminate wasted execution attempts; H3 (selection, stabiliser and cache — one contrast, two-sided risk), Trace-as-State reordering will change the cache hit rate and the net effect must be measured rather than assumed, and association-graph selection plus the plan gate reduce context tokens at a non-inferior solve rate; H4, the gains transfer across harnesses. **H1 is retired, folded into H3**: with the recall-only arm dropped, `C2` is the only arm that runs System-1 governance, so the selection claim can only be observed as `C1` vs `C2` — the contrast the cache effect is already measured on — and two hypotheses riding one contrast cannot be separated afterwards (`docs/AGENT_BRIEF.md` §9.3, which keeps the round's numbers).
 
 **Success rule (revised, see §5.3)**: the solve rate is **non-inferior** to the baseline (paired McNemar, one-sided α=0.05, tolerance −2pp) **and** cost or time improves by ≥10% (paired bootstrap 95% CI excluding 0). The earlier "any one of the three counts as success" rule is no longer used.
 
@@ -101,7 +101,7 @@ no successor**, and `C4` (the full configuration) is today's **`C2`**.
 - Secondary metrics, $/task, tokens/task (split into hit/miss/out), wall-clock/task (net LLM + S1 + tools, **excluding permission-approval waiting**): paired **bootstrap** (10k resamples) 95% CI, Holm correction;
 - Success = non-inferior **and** (cost or time improvement ≥10% with a CI excluding 0). Winning on cost while the solve rate drops by >2pp does not count as a win;
 - Report all cells + a quality-cost **Pareto plot** + a cache hit rate waterfall chart (H3);
-- The analysis scripts are **frozen and committed before** the first full run (pre-registration style); a 10% subsample with 3 seeds estimates the variance.
+- The analysis scripts are **frozen and committed before** the first full run (pre-registration style); three repeats of a 10% subsample estimate the variance — no sampling seed exists to vary, because DSH exposes no sampling parameters (only the model and its `reasoningEffort` are pinned).
 
 ### 4.4 Telemetry (versioned JSONL, fields in AGENT_BRIEF §8)
 

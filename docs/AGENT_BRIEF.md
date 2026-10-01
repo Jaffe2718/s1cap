@@ -1,7 +1,7 @@
 # S1CAP — Agent Implementation Brief
 
 **Version** 0.1 · 2026-09-28 · Pre-implementation
-**Purpose:** complete, self-contained instructions for an AI coding agent (DSH / Claude Code / opencode / pi) to build this project's software stack: the System-1-governed context-lifecycle middleware, the DSH plugin, the 2×2 benchmark/ablation harness, and the paper's experimental artifacts.
+**Purpose:** complete, self-contained instructions for an AI coding agent (DSH / Claude Code / opencode / pi) to build this project's software stack: the System-1-governed context-lifecycle middleware, the DSH plugin, the benchmark/ablation harness for the 2×2 crossing (three arms run), and the paper's experimental artifacts.
 
 **Project one-liner:** a cheap System-1 *decision model* (Jev / Laya / Kev class, `/v1/systemone` protocol) acts as the **governance layer** over a System-2 LLM agent's context lifecycle — maintaining an association graph over session segments, assembling per-turn context with Trace-as-State ordering, and pre-ranking candidate plans — measured end-to-end on solve rate, token cost (cache hit/miss), and wall time.
 
@@ -401,7 +401,9 @@ The three rows of the design table above are the executed set; the fourth quadra
 renamed, because per step it moved more uncached input and more output than the baseline at a lower hit rate and its
 backend coverage was below the 0.5 floor (`docs/CELLS-RUN.md` carries the per-step numbers and the mapping table).
 Everything below — the hypotheses, the protocol lines and the milestones — uses today's names; where a figure is
-quoted it keeps the round it came from and the label it ran under.
+quoted it keeps the round it came from and the label it ran under. Two labels keep the comparisons apart:
+the **registered rule** is the pre-registered comparison against the baseline, `C2` vs `C0` (§9.3); the **design
+contrast** is `C1` vs `C2`, the comparison that decides whether the System-1 half earns its place.
 
 Same tasks, same model with `reasoningEffort` pinned, same harness version, same tool allowlist, randomized run
 order. No sampling parameter is claimed — not a temperature and not a seed — because DSH's model configuration
@@ -433,7 +435,7 @@ Terminal-Bench 4.0 all 66, tau2-bench full `base` split (`[VERIFY]` exact count 
   components, which is why the counts are the measurement and the hit rate stays a mechanism diagnostic. The
   dropped arm's figures (round `C3`) apply to no surviving cell and are recorded in `docs/CELLS-RUN.md`.
 - **H4** (transfer): `C0`→`C2` deltas persist on a second harness (opencode) at 10% subsample.
-- **Success rule (replaces "win any of three"):** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp absolute) **AND** ≥10% improvement in cost/task **OR** time/task with 95% CI excluding 0 (paired bootstrap, 10k resamples; Holm correction across the secondary family). A cell that wins cost but loses >2 pp solve rate is **not** a win. Report all cells + a quality-vs-cost Pareto figure.
+- **Success rule (the registered rule; replaces "win any of three"):** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp absolute) **AND** ≥10% improvement in cost/task **OR** time/task with 95% CI excluding 0 (paired bootstrap, 10k resamples; Holm correction across the secondary family). A cell that wins cost but loses >2 pp solve rate is **not** a win. Report all cells + a quality-vs-cost Pareto figure.
 - `[VERIFY]` power analysis in `bench/stats` before the grid: with paired n=100 (SWE-V) McNemar at 80% power resolves ~14–15 pp differences; n=66 (TB) ~18 pp; report the minimal detectable effect honestly.
 
 ### 9.4 Validity controls
@@ -489,7 +491,7 @@ Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Ter
 - 5 Results: quality/cost/time + Pareto; **cache-hit waterfall (H3)**; degradation; case studies.
 - 6 Analysis: when does TAS pay for its cache penalty; S1 decision quality vs outcome; failure modes (jaggedness, adversarial segments).
 - 7 Discussion: limits, ethics (black-box gating, bias in decision models — cite Jev's own bias discussion), generality.
-- **Contributions:** (1) first infrastructure-in-the-loop use of decision models for agent context lifecycle; (2) Trace-as-State transplanted from single-document QA into live agent loops with cache-aware accounting; (3) an open 2×2 benchmark suite + versioned telemetry schema; (4) a DSH plugin + portable proxy.
+- **Contributions:** (1) first infrastructure-in-the-loop use of decision models for agent context lifecycle; (2) Trace-as-State transplanted from single-document QA into live agent loops with cache-aware accounting; (3) an open 2×2-crossing benchmark suite, three arms run, + versioned telemetry schema; (4) a DSH plugin + portable proxy.
 
 ---
 
