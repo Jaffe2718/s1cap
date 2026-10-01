@@ -296,13 +296,17 @@ export function createS1Relevance(opts                    )              {
         // number that explains a 15-second call, so it is counted and reported instead of being left to be guessed
         // at from a latency nobody can attribute.
         const stateText = render(current);
+        // `state` is serialized once by the System-1 protocol. Repeating it inside every question made a
+        // 20-candidate request carry 21 copies of the same current segment. Long tool traces exposed the cost:
+        // one cell spent 28.96M lane tokens while only five context deliveries fired. Keep the state in the
+        // request's state field and let each question carry only its candidate.
+        stats.promptChars += stateText.length;
         const questions                                          = {};
         batch.forEach((candidateIndex, slot) => {
           const candidateText = render(candidates[candidateIndex]           );
-          stats.promptChars += stateText.length + candidateText.length;
+          stats.promptChars += candidateText.length;
           questions[`h${slot}`] = noul(
             `Does retrieving this candidate help answer or continue the current segment?\n\n` +
-              `Current segment:\n${stateText}\n\n` +
               `Candidate h${candidateIndex}:\n${candidateText}`,
             {
               true: 'retrieving the candidate would help with the current segment',

@@ -56,7 +56,13 @@ test('one call scores the whole window, and the weights come back aligned with t
     assert.equal(q?.type, 'noul', `${id}: relevance asks a noul question`);
     assert.equal(typeof q?.criteria?.true, 'string', `${id}: the true criterion is stated`);
     assert.equal(typeof q?.criteria?.false, 'string', `${id}: the false criterion is stated`);
+    assert.ok(!q?.instructions?.includes(current.text), `${id}: the shared current segment is not repeated per question`);
   }
+  assert.deepEqual(
+    calls[0]?.state,
+    { kind: current.kind, text: `[assistant] ${current.text}` },
+    'the shared current segment is sent once as rendered state',
+  );
 });
 
 test('a raw true/false distribution is read by its true-side mass', async () => {
@@ -473,18 +479,21 @@ test('a growing session costs the new pairs and nothing else, so the call count 
   const graph = new AssociationGraph();
   const questionsPerBatch: number[] = [];
   const pairs: string[] = [];
-  const readPair = (instructions: string): string => {
-    const match = /Current segment:\n\[[^\]]*\] (text \d+)\n\nCandidate h\d+:\n\[[^\]]*\] (text \d+)/.exec(instructions);
-    return match === null ? 'unreadable question' : `${String(match[2])}->${String(match[1])}`;
+  const readPair = (state: unknown, instructions: string): string => {
+    const currentMatch = /\[[^\]]*\] (text \d+)/.exec(String((state as { text?: unknown }).text));
+    const candidateMatch = /Candidate h\d+:\n\[[^\]]*\] (text \d+)/.exec(instructions);
+    return currentMatch === null || candidateMatch === null
+      ? 'unreadable question'
+      : `${String(candidateMatch[1])}->${String(currentMatch[1])}`;
   };
   const relevance = createS1Relevance({
     questionsPerCall: perCall,
-    decide: async (_state, questions) => {
+    decide: async (state, questions) => {
       questionsPerBatch.push(Object.keys(questions).length);
       const answers: Record<string, { type: string; noul: number }> = {};
       for (const [id, question] of Object.entries(questions)) {
         answers[id] = { type: 'noul', noul: 0.9 };
-        pairs.push(readPair(question.instructions));
+        pairs.push(readPair(state, question.instructions));
       }
       return { answers };
     },
