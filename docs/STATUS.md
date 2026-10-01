@@ -1815,7 +1815,7 @@ change with no run behind it is not an iteration's output.
 
 **The two token accounts stay separate.** The System-1 lane's own tokens are Laya's account; the LLM's cached-hit,
 uncached and output tokens are the LLM's. They are never added and never conflated. Round `20261001-1414` is the
-worked example: `C2`'s lane spent **86 214** tokens while that cell's own LLM spent **67 992** (55 808 cached +
+worked example: `C2`'s lane spent **86 214** tokens while that cell's own LLM spent **68 002** (55 808 cached +
 8 835 uncached + 3 359 output), and, separately, ≈ **1 620** of the cell's uncached input was the price of
 *receiving* 8 recalled blocks — +350 at step 2.1 (2 blocks) and +1 270 at step 3.1 (6 blocks) over the control arms,
 measured per step rather than inferred, 175–212 tokens per block. Fresh content in the LLM's prompt is billed to the
