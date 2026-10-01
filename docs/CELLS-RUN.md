@@ -40,15 +40,28 @@ C2/C4) — which is why one column carries both.
 
 ## Setup
 
-Four profiles, `C1test` … `C4test`, each a copy of the working `s1captest` profile with two changes:
+Four profiles, `C1test` … `C4test`, each a copy of the working `s1captest` profile with three changes:
 
 - `cell: C1` … `cell: C4`;
 - **separate telemetry paths per cell** — `telemetry.controlJsonl`, `sessionJsonl` and `tapeJsonl` must not
   collide across cells (the plugin rejects identical session and control paths, and a shared file would make the
-  per-cell numbers meaningless).
+  per-cell numbers meaningless);
+- **a pinned `s1.baseUrl`** for the already-running local endpoint. This is not cosmetic. With Laya selected and
+  neither a `baseUrl` nor a `laya.pythonPath`, `singleBackendIssues` reports a conflict, and a conflict drops the
+  session to `provider=none` — the cell then makes **no System-1 calls at all** while the panel merely says the
+  server is "stopped". Measured 2026-10-01: four freshly built cells came up with S1 entirely off, and `/s1cap-7340`
+  showed `s1.provider: "none"` beside `configuredProvider: "laya-serve"`, until `baseUrl` was pinned. Pinning it
+  changes nothing else: it is the address `laya.host`/`laya.port` derives anyway.
 
 Ports: **19491, 19492, 19493, 19494**. Each instance is a managed background job, never `Start-Process`; the UI
 token comes from the job's own stdout.
+
+The shared backend is started **by hand, once**, and the profile keeps `laya.autoStart: false` so the plugin
+launches nothing and no session ever needs `/s1-laya start` — a slash command sent into a cell is an extra turn in
+the thing being measured. Point its checkpoint cache at one shared directory (`HF_HOME`) so four cells do not each
+download the weights. **Confirm the device before the run, not after:** `GET /health` answers `device` and
+`checkpoint_devices`, and `cpu_fallbacks` should be zero. A CPU backend under four concurrent cells is what turned
+a previous round into 191 failed S1 calls out of 281.
 
 Round directories: four, one per cell, **different salts** — `node scripts/new-test-run.mjs --create` prints the
 salt and the messages with it substituted. The salt must differ per cell, or one cell's answers land in another
