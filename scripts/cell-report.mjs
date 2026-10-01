@@ -1338,13 +1338,18 @@ function niceStep(range, ticks) {
  * the unit in the axis label. Returns { svg, height }.
  */
 function barPanel({ title, note, unit, metrics, cells, valueOf, labelFor, y, width }) {
-  // pad.top carries the panel title, the note, and the headroom the rotated value labels need above
-  // the tallest bar: a label anchored at the top of a full-height bar must still clear the note.
-  const pad = { left: 118, right: 30, top: 108, bottom: 96 };
+  // pad.top carries the panel title, the note (up to two lines), and the headroom the rotated value
+  // labels need above the tallest bar: a label anchored at the top of a full-height bar must still
+  // clear the note.
+  const pad = { left: 118, right: 30, top: 124, bottom: 96 };
   const plotW = width - pad.left - pad.right;
   const plotH = 250;
-  const top = y + pad.top;
+  // Every coordinate below is PANEL-LOCAL: the panel's group carries `translate(0,y)` and is the one
+  // and only place `y` is applied. Adding `y` here as well put each panel's body a full band too low -
+  // invisible for panel 1, where y is 0, and wrong for every panel after it.
+  const top = pad.top;
   const bottom = top + plotH;
+  const noteLines = note ? wrapCaption(note, 132, 2) : [];
   const unitSpec = SVG_PANEL_UNIT[unit];
   const out = [];
 
@@ -1375,9 +1380,13 @@ function barPanel({ title, note, unit, metrics, cells, valueOf, labelFor, y, wid
   const maxBarW = nGroups <= 2 ? 104 : nGroups <= 4 ? 76 : 66;
   const barW = Math.min(maxBarW, (groupW - 2 * innerPad - (nBars - 1) * gap) / nBars);
 
-  out.push(`<g transform="translate(0,${y})">`);
+  // The band is declared on the group so the geometry can be read back out of the finished file and
+  // checked without re-running the renderer: `--audit` and `--self-test` both parse these attributes.
+  out.push(`<g class="panel" data-panel="${escapeXml(title)}" data-metrics="${metrics.length}" data-cells="${cells.length}" data-band-height="${pad.top + plotH + pad.bottom}" transform="translate(0,${y})">`);
   out.push(`  <text x="${pad.left}" y="30" class="panel-title">${escapeXml(title)}</text>`);
-  if (note) out.push(`  <text x="${pad.left}" y="56" class="panel-note">${escapeXml(note)}</text>`);
+  noteLines.forEach((ln, i) => {
+    out.push(`  <text x="${pad.left}" y="${56 + i * 15}" class="panel-note">${escapeXml(ln)}</text>`);
+  });
 
   // legend, on the panel-title line: a long note under the title would otherwise run beneath it
   let lx = width - pad.right;
@@ -1437,6 +1446,12 @@ function barPanel({ title, note, unit, metrics, cells, valueOf, labelFor, y, wid
 }
 
 function svgDocument({ title, subtitle, panels, width }) {
+  // The document is a header block, then the panels stacked with no gap and no overlap, then a footer
+  // margin. `HEAD` depends on how many lines the subtitle wrapped to, and is emitted as the wrapper's
+  // own offset so the audit can read it back rather than assume it.
+  const FOOT = 40;
+  const subLines = wrapCaption(subtitle, 138, 2);
+  const HEAD = 52 + (subLines.length - 1) * 15;
   let y = 0;
   let body = '';
   for (const p of panels) {
@@ -1444,7 +1459,7 @@ function svgDocument({ title, subtitle, panels, width }) {
     body += r.svg + '\n';
     y += r.height;
   }
-  const height = y + 52 + 40;
+  const height = HEAD + y + FOOT;
   const style = `<style>
     text { font-family: ${SVG_FONT}; }
     .doc-title { fill: #171a1f; font-size: 19px; font-weight: 600; }
@@ -1466,11 +1481,230 @@ function svgDocument({ title, subtitle, panels, width }) {
   <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>
   ${style}
   <text x="30" y="34" class="doc-title">${escapeXml(title)}</text>
-  <text x="30" y="54" class="doc-sub">${escapeXml(subtitle)}</text>
-  <g transform="translate(0,52)">
+${subLines.map((ln, i) => `  <text x="30" y="${54 + i * 15}" class="doc-sub">${escapeXml(ln)}</text>`).join('\n')}
+  <g class="panels" transform="translate(0,${HEAD})">
 ${body}  </g>
 </svg>
 `;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 8b. Reading the geometry back out of a finished SVG
+//
+// The arithmetic was right and the drawing was wrong, which is the one failure a numeric self-test
+// cannot see. So the geometry is asserted the same way the numbers are: by parsing the file that was
+// actually written and checking that every bar and every value label an SVG contains lies inside the
+// band of the panel that owns it - the panel whose heading names the series it draws.
+//
+// This reads attributes the renderer emits (`class="panel"`, `data-metrics`, `data-cells`,
+// `data-band-height`), but it does NOT trust the declared band height: the height of every band
+// except the last is derived from the next band's offset, the last is derived from the document
+// height, and the declared value is only accepted if it agrees. A renderer that lies about its own
+// geometry fails this check too.
+// ---------------------------------------------------------------------------------------------
+
+const SVG_HEAD = 52;
+const SVG_FOOT = 40;
+// A rotated value label is anchored at its baseline and runs upward. At the 10.5px the `.value`
+// class sets, no glyph in these labels is wider than 6.1px (the widest are digits and commas), so
+// `6.1 * length` is a conservative upper bound on how far above its anchor a label can reach.
+const VALUE_LABEL_ADVANCE = 6.1;
+// Horizontal budget per character, as a fraction of font size, for the horizontal containment check.
+// Deliberately generous: the sans stack's average lowercase advance is ~0.50em and its digits ~0.55em,
+// so 0.58em over-estimates a mixed caption by ~15% and a caption that passes has certainly fitted.
+const TEXT_ADVANCE_EM = 0.58;
+
+/** Font sizes declared by the document's own style block, so the estimate uses the real sizes. */
+function styleFontSizes(text) {
+  const style = /<style>([\s\S]*?)<\/style>/.exec(text);
+  const sizes = new Map();
+  if (!style) return sizes;
+  for (const m of style[1].matchAll(/\.([a-z-]+)\s*\{([^}]*)\}/g)) {
+    const fs = /font-size:\s*([\d.]+)px/.exec(m[2]);
+    if (fs) sizes.set(m[1], Number(fs[1]));
+  }
+  return sizes;
+}
+
+function auditSvg(text) {
+  const violations = [];
+  const docHeight = Number(/<svg[^>]*\sheight="([\d.]+)"/.exec(text)?.[1]);
+  const docWidth = Number(/<svg[^>]*\swidth="([\d.]+)"/.exec(text)?.[1]);
+  if (!Number.isFinite(docHeight)) violations.push('document has no readable height attribute');
+
+  // Panels carry `class="panel"` and the wrapper `class="panels"`. A chart written before those
+  // attributes existed is still audited, because the defect this check exists for was shipped in one:
+  // there the wrapper is the first `translate(0,y)` group and the panels are the rest, with neither
+  // the declared height nor the expected bar count available - so those two checks are skipped and
+  // the geometric ones, which are the ones that matter, are not.
+  const groups = [...text.matchAll(/<g(?: class="(panel|panels)")? data-panel="[^"]*"| <g(?: class="(panel|panels)")?[^>]*transform="translate\(0,(-?[\d.]+)\)">/g)];
+  const marks = [];
+  let origin = null;
+  let legacy = false;
+
+  const modern = [...text.matchAll(/<g class="panels" transform="translate\(0,(-?[\d.]+)\)">/g)];
+  if (modern.length === 1) {
+    // `modern[0][1]` is the first match's first capture group; `modern[1]` would be the second match.
+    origin = Number(modern[0][1]);
+    for (const m of text.matchAll(/<g class="panel" data-panel="([^"]*)" data-metrics="(\d+)" data-cells="(\d+)" data-band-height="(\d+)" transform="translate\(0,(-?[\d.]+)\)">/g)) {
+      marks.push({
+        at: m.index,
+        end: m.index + m[0].length,
+        title: m[1],
+        metrics: Number(m[2]),
+        cells: Number(m[3]),
+        declaredHeight: Number(m[4]),
+        y: Number(m[5]),
+      });
+    }
+    if (marks.length === 0) violations.push('document contains no panel group');
+  } else {
+    legacy = true;
+    const plain = [...text.matchAll(/<g(?: class="panel")? transform="translate\(0,(-?[\d.]+)\)">/g)]
+      .map((m) => ({ at: m.index, end: m.index + m[0].length, y: Number(m[1]), title: null, metrics: null, cells: null, declaredHeight: null }));
+    if (plain.length < 2) {
+      violations.push('document has no readable panel structure');
+      return { docHeight, docWidth, origin: null, bands: [], violations, ok: false, legacy };
+    }
+    origin = plain[0].y;
+    for (let i = 1; i < plain.length; i += 1) {
+      const body = text.slice(plain[i].end, i + 1 < plain.length ? plain[i + 1].at : text.length);
+      const t = /class="panel-title">([^<]*)</.exec(body);
+      marks.push({ ...plain[i], title: t ? t[1] : `panel ${i}` });
+    }
+  }
+
+  const bands = marks.map((m, i) => {
+    const bodyEnd = i + 1 < marks.length ? marks[i + 1].at : text.length;
+    const body = text.slice(m.end, bodyEnd);
+    // Bands are contiguous by construction: the next band starts where this one's height says it does.
+    const derivedHeight = i + 1 < marks.length
+      ? marks[i + 1].y - m.y
+      : docHeight - origin - SVG_FOOT - m.y;
+    const absTop = origin + m.y;
+    const absBottom = absTop + derivedHeight;
+
+    // Bars are the un-rounded rects; the only rounded rects a panel draws are legend swatches.
+    const rects = [...body.matchAll(/<rect [^>]*\/>/g)].map((r) => {
+      const t = r[0];
+      return {
+        x: Number(/x="(-?[\d.]+)"/.exec(t)[1]),
+        y: Number(/y="(-?[\d.]+)"/.exec(t)[1]),
+        w: Number(/width="([\d.]+)"/.exec(t)[1]),
+        h: Number(/height="([\d.]+)"/.exec(t)[1]),
+        legend: /\brx="/.test(t),
+      };
+    });
+    const values = [...body.matchAll(/<text x="(-?[\d.]+)" y="(-?[\d.]+)" class="value"[^>]*>([^<]*)<\/text>/g)]
+      .map((v) => ({ x: Number(v[1]), y: Number(v[2]), label: v[3] }));
+    const lines = [...body.matchAll(/<line x1="(-?[\d.]+)" y1="(-?[\d.]+)" x2="(-?[\d.]+)" y2="(-?[\d.]+)"/g)]
+      .map((l) => ({ y1: Number(l[2]), y2: Number(l[4]) }));
+
+    if (!legacy && m.declaredHeight !== derivedHeight) {
+      violations.push(`"${m.title}": declared band height ${m.declaredHeight} but the bands advance by ${derivedHeight}`);
+    }
+    if (m.y < 0) violations.push(`"${m.title}": band offset ${m.y} is negative`);
+    if (i > 0 && marks[i - 1].y >= m.y) {
+      violations.push(`"${m.title}": band offset ${m.y} does not advance past the previous band`);
+    }
+    // Every metric in this panel draws one bar per cell, plus one legend swatch per cell. A legacy
+    // chart declares neither, so the weaker invariant is used there: every bar carries its number.
+    const bars = rects.filter((r) => !r.legend);
+    if (!legacy) {
+      const expectedBars = m.metrics * m.cells;
+      if (bars.length !== expectedBars) {
+        violations.push(`"${m.title}": ${bars.length} bar(s) drawn for ${m.metrics} metric(s) x ${m.cells} cell(s) = ${expectedBars}`);
+      }
+      if (values.length !== expectedBars) {
+        violations.push(`"${m.title}": ${values.length} value label(s) for ${expectedBars} bar(s)`);
+      }
+    } else if (bars.length !== values.length) {
+      violations.push(`"${m.title}": ${bars.length} bar(s) but ${values.length} value label(s)`);
+    }
+    for (const r of bars) {
+      const yTop = absTop + r.y;
+      if (yTop < absTop - 1e-6 || yTop + r.h > absBottom + 1e-6) {
+        violations.push(`"${m.title}": bar y=${yTop.toFixed(1)}..${(yTop + r.h).toFixed(1)} outside band ${absTop}..${absBottom}`);
+      }
+    }
+    for (const v of values) {
+      const yAnchor = absTop + v.y;
+      const yReach = yAnchor - v.label.length * VALUE_LABEL_ADVANCE;
+      if (yAnchor > absBottom + 1e-6 || yReach < absTop - 1e-6) {
+        violations.push(`"${m.title}": label "${v.label}" occupies y=${yReach.toFixed(1)}..${yAnchor.toFixed(1)} outside band ${absTop}..${absBottom}`);
+      }
+    }
+    for (const l of lines) {
+      for (const ly of [l.y1, l.y2]) {
+        const abs = absTop + ly;
+        if (abs < absTop - 1e-6 || abs > absBottom + 1e-6) {
+          violations.push(`"${m.title}": grid/axis line y=${abs.toFixed(1)} outside band ${absTop}..${absBottom}`);
+        }
+      }
+    }
+    return {
+      title: m.title,
+      offset: m.y,
+      height: derivedHeight,
+      declaredHeight: m.declaredHeight,
+      absTop,
+      absBottom,
+      metrics: m.metrics,
+      cells: m.cells,
+      bars: bars.length,
+      labels: values.length,
+      lines: lines.length,
+      barSpan: bars.length > 0 ? [absTop + Math.min(...bars.map((r) => r.y)), absTop + Math.max(...bars.map((r) => r.y + r.h))] : null,
+      labelSpan: values.length > 0 ? [absTop + Math.min(...values.map((v) => v.y)), absTop + Math.max(...values.map((v) => v.y))] : null,
+    };
+  });
+
+  const sum = bands.reduce((a, b) => a + b.height, 0);
+  if (Number.isFinite(docHeight) && docHeight !== origin + sum + SVG_FOOT) {
+    violations.push(`document height ${docHeight} is not origin ${origin} + bands ${sum} + footer ${SVG_FOOT}`);
+  }
+  if (bands.length > 0 && bands[0].offset !== 0) {
+    violations.push(`first band starts at ${bands[0].offset}, not 0`);
+  }
+
+  // Horizontal containment. The same class of defect as a double-translated panel is a caption wider
+  // than the page: nothing throws, the browser clips it, and the sentence just stops mid-word. Every
+  // non-rotated text is measured against the document width with a deliberately generous advance.
+  const fontSizes = styleFontSizes(text);
+  const horiz = [];
+  for (const m of text.matchAll(/<text x="(-?[\d.]+)" y="(-?[\d.]+)" class="([a-z-]+)"([^>]*)>([^<]*)<\/text>/g)) {
+    const cls = m[3];
+    if (cls === 'value' || cls === 'axis-label') continue; // rotated: covered by the vertical check
+    const size = fontSizes.get(cls);
+    if (size === undefined) continue;
+    const x = Number(m[1]);
+    const content = m[5];
+    const w = content.length * size * TEXT_ADVANCE_EM;
+    const anchor = /text-anchor="end"/.test(m[4]) ? 'end' : /text-anchor="middle"/.test(m[4]) ? 'middle' : 'start';
+    const left = anchor === 'start' ? x : anchor === 'end' ? x - w : x - w / 2;
+    const right = left + w;
+    horiz.push({ cls, content, left, right });
+    if (left < -1 || right > docWidth + 1) {
+      violations.push(`text "${content.slice(0, 40)}${content.length > 40 ? '…' : ''}" (class ${cls}) spans x=${left.toFixed(0)}..${right.toFixed(0)}, outside the document width 0..${docWidth}`);
+    }
+  }
+
+  return { docHeight, docWidth, origin, bands, violations, ok: violations.length === 0, legacy, texts: horiz.length };
+}
+
+/** Human-readable audit, used by `--audit` and quoted in the self-test output. */
+function formatAudit(name, audit) {
+  const lines = [`${name}: ${audit.ok ? 'OK' : `FAIL (${audit.violations.length})`}  doc ${audit.docWidth}x${audit.docHeight}, origin ${audit.origin}, ${audit.bands.length} panel(s)${audit.legacy ? ' [pre-band-attribute chart: heights derived from the offsets]' : ''}`];
+  for (const b of audit.bands) {
+    lines.push(
+      `  band [${b.absTop}..${b.absBottom}) h=${b.height}${b.declaredHeight === null ? '' : ` (declared ${b.declaredHeight})`} "${b.title}"` +
+        ` bars=${b.bars}${b.metrics === null ? '' : `/${b.metrics * b.cells}`} labels=${b.labels}` +
+        ` barSpan=${b.barSpan ? `${b.barSpan[0].toFixed(1)}..${b.barSpan[1].toFixed(1)}` : '-'}` +
+        ` labelSpan=${b.labelSpan ? `${b.labelSpan[0].toFixed(1)}..${b.labelSpan[1].toFixed(1)}` : '-'}`,
+    );
+  }
+  for (const v of audit.violations) lines.push(`  ! ${v}`);
+  return lines.join('\n');
 }
 
 function renderSvgs(analysis) {
@@ -1621,12 +1855,37 @@ const USAGE = `Usage:
   --label <map>     display labels, old=new,... e.g. --label C1=baseline,C2=TAS,C3=recall-only,C4=full
   --out <dir>       output directory for generated files (default ./s1cap-report)
   --format <list>   md | csv | svg | all (default all)
+  --audit <files>   read finished SVG(s) back and check each panel's geometry, then exit
   --quiet           do not print the markdown report to stdout
   --self-test       build a synthetic run under the OS temp directory and assert the arithmetic
 `;
 
+/**
+ * Wrap a caption into at most `maxLines` lines of at most `maxChars` characters, breaking on spaces.
+ *
+ * Captions used to be emitted as one line and simply ran off the right edge of the document, where a
+ * viewer clips them silently. A character budget rather than a measured width keeps this dependency
+ * free; the audit measures the result and rejects anything that still overflows.
+ */
+function wrapCaption(text, maxChars, maxLines) {
+  const words = String(text).split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    if (line !== '' && (line + ' ' + w).length > maxChars) {
+      lines.push(line);
+      line = w;
+      if (lines.length === maxLines) break;
+    } else {
+      line = line === '' ? w : `${line} ${w}`;
+    }
+  }
+  if (lines.length < maxLines && line !== '') lines.push(line);
+  return lines;
+}
+
 function parseArgs(argv) {
-  const opts = { cells: [], label: new Map(), format: null, out: null, run: null, quiet: false, selfTest: false, help: false };
+  const opts = { cells: [], label: new Map(), format: null, out: null, run: null, quiet: false, selfTest: false, audit: [], help: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const next = () => {
@@ -1659,6 +1918,11 @@ function parseArgs(argv) {
         break;
       }
       case '--quiet': opts.quiet = true; break;
+      case '--audit': {
+        // one or more paths, comma-separated or repeated; a directory audits every *.svg inside it
+        for (const p of next().split(',').map((s) => s.trim()).filter(Boolean)) opts.audit.push(p);
+        break;
+      }
       case '--self-test': opts.selfTest = true; break;
       case '-h': case '--help': opts.help = true; break;
       default: fail(`unknown argument "${a}"\n\n${USAGE}`);
@@ -1697,6 +1961,10 @@ function main() {
   }
   if (opts.selfTest) {
     runSelfTest();
+    return;
+  }
+  if (opts.audit.length > 0) {
+    runAudit(opts.audit);
     return;
   }
   if (!opts.run) {
@@ -1742,9 +2010,40 @@ function main() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 10b. --audit: read finished SVGs back and check their geometry
+// ---------------------------------------------------------------------------------------------
+
+function runAudit(paths) {
+  const files = [];
+  for (const p of paths) {
+    const abs = resolve(p);
+    if (!existsSync(abs)) {
+      console.error(`cell-report --audit: no such file or directory: ${abs}`);
+      process.exit(1);
+    }
+    if (statSync(abs).isDirectory()) {
+      for (const f of walkFiles(abs).filter((x) => x.toLowerCase().endsWith('.svg'))) files.push(f);
+    } else {
+      files.push(abs);
+    }
+  }
+  if (files.length === 0) {
+    console.error('cell-report --audit: nothing to audit');
+    process.exit(1);
+  }
+  let bad = 0;
+  for (const f of files.sort()) {
+    const audit = auditSvg(readFileSync(f, 'utf8'));
+    if (!audit.ok) bad += 1;
+    process.stdout.write(`${formatAudit(f, audit)}\n`);
+  }
+  process.stdout.write(`cell-report --audit: ${files.length - bad}/${files.length} chart(s) OK\n`);
+  process.exit(bad === 0 ? 0 : 1);
+}
+
+// ---------------------------------------------------------------------------------------------
 // 11. --self-test
-//
-// Builds a real run directory under the OS temp directory - real multi-frame zstd session stores,
+//// Builds a real run directory under the OS temp directory - real multi-frame zstd session stores,
 // real control.jsonl, real rg snapshot - and runs the same load/aggregate path the report uses.
 // This checks the arithmetic without the caller's scratch data, and it is the only test this script
 // needs, because nothing outside this file is exercised.
@@ -2156,6 +2455,61 @@ function runSelfTest() {
       assertTrue(svgs['s1-governance.svg'].includes('n/a (no lane)'), 'the governance chart has no coverage bar for a lane-absent cell');
       assertTrue(svgs['s1-governance.svg'].includes('never (E)'), 'the governance chart names the lane-absent cell');
     }, 'svg charts distinguish a lane-absent zero from a refused-lane zero');
+
+    // GEOMETRY. The arithmetic was right the first time and the drawing was not: every panel after
+    // the first was translated twice, so its body landed in the next panel's band and the last
+    // panel's body fell off the canvas entirely. Nothing above can see that, so the finished files
+    // are read back and every bar and every value label is required to lie inside the band of the
+    // panel that owns it.
+    check(() => {
+      const audits = Object.entries(svgs).map(([name, text]) => [name, auditSvg(text)]);
+      for (const [name, audit] of audits) {
+        assertTrue(audit.violations.length === 0, `${name} geometry: ${audit.violations.slice(0, 4).join(' | ')}`);
+        assertTrue(audit.ok, `${name} audit not ok`);
+        assertTrue(audit.bands.length >= 1, `${name} has no panels`);
+        // every panel must actually carry its own series, not just its heading
+        for (const b of audit.bands) {
+          assertEqual(b.bars, b.metrics * b.cells, `${name} "${b.title}" bars drawn`);
+          assertEqual(b.labels, b.metrics * b.cells, `${name} "${b.title}" value labels drawn`);
+          assertTrue(b.barSpan !== null && b.barSpan[0] >= b.absTop && b.barSpan[1] <= b.absBottom,
+            `${name} "${b.title}" bar span ${JSON.stringify(b.barSpan)} outside ${b.absTop}..${b.absBottom}`);
+        }
+        // bands are contiguous and fill the document exactly
+        const sum = audit.bands.reduce((a, b) => a + b.height, 0);
+        assertEqual(audit.bands[0].offset, 0, `${name} first band offset`);
+        assertEqual(audit.origin + sum + 40, audit.docHeight, `${name} doc height identity`);
+        for (let i = 1; i < audit.bands.length; i += 1) {
+          assertEqual(audit.bands[i].absTop, audit.bands[i - 1].absBottom, `${name} band ${i + 1} starts where band ${i} ends`);
+        }
+      }
+      // time.svg is the multi-panel file and is where the defect lived: pin its panel count and order
+      const time = audits.find(([n]) => n === 'time.svg')[1];
+      assertEqual(time.bands.length, 3, 'time.svg panel count');
+      assertEqual(time.bands.map((b) => b.title).join(' / '),
+        'Time - counts / Time - wall clock (the step, decomposed) / Time - System-1 lane (concurrent, not additive)',
+        'time.svg panel order');
+      assertTrue(time.bands[1].metrics === 4 && time.bands[1].cells === 4, 'wall-clock panel draws 4 metrics x 4 cells');
+      assertTrue(time.bands[2].metrics === 1, 'the System-1 panel draws one metric');
+
+      // and the audit must actually fail on the defect it exists for: stack one panel on another's
+      // offset, exactly as the double translation did, and the same reader rejects it. The offsets are
+      // read from the chart rather than hard-coded, so the fixture survives any change in band height.
+      const offsets = time.bands.map((b) => b.offset);
+      const lastOffset = offsets[offsets.length - 1];
+      const prevOffset = offsets[offsets.length - 2];
+      assertTrue(lastOffset !== prevOffset, 'the geometry fixture needs at least two distinct band offsets');
+      const broken = svgs['time.svg'].replace(`transform="translate(0,${lastOffset})"`, `transform="translate(0,${prevOffset})"`);
+      assertTrue(broken !== svgs['time.svg'], 'the geometry regression fixture did not apply');
+      const brokenAudit = auditSvg(broken);
+      assertTrue(!brokenAudit.ok, 'the audit must reject a panel whose body is drawn one band too low');
+      assertTrue(brokenAudit.violations.some((v) => /outside band|bands advance|doc height/.test(v)),
+        `the audit must name the geometric violation, got: ${brokenAudit.violations.join(' | ')}`);
+
+      // the horizontal check gets its own fixture: a caption too wide for the page must be rejected
+      const wide = auditSvg(svgs['cost.svg'].replace(/<text x="118" y="56" class="panel-note">[^<]*<\/text>/,
+        `<text x="118" y="56" class="panel-note">${'W'.repeat(300)}</text>`));
+      assertTrue(!wide.ok, 'the audit must reject a caption wider than the document');
+    }, 'svg geometry: bars and value labels lie inside the owning panel band, bands are contiguous, height is exact');
 
     throws(() => analyseRun(join(root, 'nope'), ['A'], new Map(), 'x'), 'run directory not found', 'missing run directory fails loudly');
     throws(() => analyseRun(root, ['ZZ'], new Map(), 'x'), 'no control plane', 'missing cell evidence fails loudly');
