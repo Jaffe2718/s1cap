@@ -448,7 +448,7 @@ Re-run C0 vs C2 on **one additional harness through the proxy** (opencode first;
 
 ### 9.6 Cost budget (deepseek-flash, peak; assumptions labeled)
 
-Per grid (4 cells × ~1,780 episodes): SWE-V 100/cell ≈ $21; tau2 ≈ $22; Terminal-Bench ≈ $440 **lean assumption** (5M in + 1M out per task; frontier-scale TB runs 20–65M tokens/episode → budget-buster) — **pilot 10 TB tasks first** to pin tokens/task; Artificial Analysis publishes per-model TB 4.0 cost/task for calibration. Total ≈ **$480 peak / $240 off-peak** (off-peak = 50% discount outside 01:00–04:00 & 06:00–10:00 UTC weekdays — schedule runs accordingly). Optional `deepseek-v4-pro` arm on SWE-V only: +$76. GLM-5.3 10% model-swap check: budget +$40.
+**Three arms run: ~446 episodes per arm** (SWE-V 100 + tau2 ~280 + TB 66), so ~1,340 episodes where the four-arm grid budgeted ~1,780. At that per-arm density: SWE-V 100/cell ≈ $16; tau2 ≈ $17; Terminal-Bench ≈ $330 **lean assumption** (5M in + 1M out per task; frontier-scale TB runs 20–65M tokens/episode → budget-buster) — **pilot 10 TB tasks first** to pin tokens/task; Artificial Analysis publishes per-model TB 4.0 cost/task for calibration. Total ≈ **$360 peak / $180 off-peak** — the same per-arm estimate that read $480/$240 at four arms, scaled by three quarters and printed so it can be checked ($16 + $17 + $330 ≈ $363) — off-peak = 50% discount outside 01:00–04:00 & 06:00–10:00 UTC weekdays, so schedule runs accordingly. Optional `deepseek-v4-pro` arm on SWE-V only: +$57 (was $76 at four arms). GLM-5.3 10% model-swap check: +$30 (was $40). This is an estimate at the same per-arm density and nothing else: the budget **cap** remains the owner's decision (§12.3).
 
 ---
 

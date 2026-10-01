@@ -78,7 +78,7 @@ Cost and timing must join to turns for the paper, but joining must not move cont
 - **No self-excitation:** System-1 never scores its own output, so per-turn S1 cost is a function of
   session content, not of history length in calls.
 - **Budget accounting that stays honest:** the cost model reads S1 usage from the control log, so
-  governance cost can be reported separately from task cost (a headline number for the 2×2).
+  governance cost can be reported separately from task cost (a headline number for the 2×2 crossing, three arms run).
 - **Reproducibility:** the two logs together are a complete, replayable record — session content and
   governance decisions — without either contaminating the other.
 

@@ -16,6 +16,9 @@ Authors: **Yuanming Chen** · **LI Changzhe** (citation form: `Chen, Yuanming an
 
 ## 1. GitHub About description — primary (257 chars)
 
+The ablation this names is the 2×2 crossing run as **three arms** (`C0`, `C1`, `C2`); the character count below is
+exact, so the design's name stays inside the paste text and the arm count is stated here.
+
 ```
 Research artifact for S1CAP — System-1 decision models governing LLM agent context lifecycle: associative recall, Trace-as-State assembly, probability-ranked plan execution, prompt-cache-aware cost telemetry, 2x2 ablation suite. DSH plugin + portable proxy.
 ```

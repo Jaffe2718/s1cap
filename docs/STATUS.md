@@ -373,7 +373,8 @@ table is built from install metadata, not from the package.json on disk.
 ### N4 evidence (round 20 — the panel is live in the browser)
 
 Driven through a real browser against the sandbox web profile: opening **设置** shows a **S1CAP** section next to
-通用设置 / 模型 / 内置插件 / Agent 预设, and the panel renders
+通用设置 / 模型 / 内置插件 / Agent 预设, and the panel renders (those characters are the application's own interface
+labels, quoted verbatim; they are not prose, and they are the only Chinese in this file).
 
 ```
 S1CAP — System-1 backend
@@ -889,7 +890,7 @@ coverage was measured.
 ### Later
 
 - [ ] **M2** harness-agnostic proxy (`packages/proxy`)
-- [ ] **M3** benchmarks and the 2×2 ablation runs *(selection deliberately deferred — see `bench/README.md`)*
+- [ ] **M3** benchmarks and the 2×2 crossing's three arms (`C0`, `C1`, `C2`) *(selection deliberately deferred — see `bench/README.md`)*
 
 ---
 
@@ -1414,17 +1415,17 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
    `claimed` (what the inbox handed over) plus a projected context message; `dsh-agent-loop`'s `step()` appends
    it to the session log and then builds the request *from that log*. So a plugin can add context, and cannot
    remove any. See N6.
-3. **After any profile install, re-run `pnpm install` in the repository** — it can drop the workspace
+4. **After any profile install, re-run `pnpm install` in the repository** — it can drop the workspace
    junctions the tests resolve `@s1cap/*` through.
-4. **Ship JavaScript.** Profile installs live under `node_modules`, where Node refuses to strip TypeScript, so
+5. **Ship JavaScript.** Profile installs live under `node_modules`, where Node refuses to strip TypeScript, so
    `main`/`exports` point at `lib/`; run `node scripts/build-packages.mjs` after touching any `src/`.
-5. **Everything is English.** No Chinese in any repository file, including comments and fixtures.
-6. **One System-1 backend at a time**, and S1CAP never owns termination.
-7. **A half-built governor must never break the harness:** inert by default, `apply()` wrapped, only verified
+6. **Everything is English.** No Chinese in any repository file, including comments and fixtures.
+7. **One System-1 backend at a time**, and S1CAP never owns termination.
+8. **A half-built governor must never break the harness:** inert by default, `apply()` wrapped, only verified
    hook contracts registered, every optional surface failing soft with a warning.
-8. **Measurement honesty:** a telemetry record is metadata only (ids, counts, timings). Session content never
+9. **Measurement honesty:** a telemetry record is metadata only (ids, counts, timings). Session content never
    enters the control plane, and control-plane records never become segments.
-9. **A round's isolation is its workspace; the salt-named directory is for a stimulus that writes.** A round used
+10. **A round's isolation is its workspace; the salt-named directory is for a stimulus that writes.** A round used
    to write its answer to the workspace root under a name the task text itself supplied (`pelican-bicycle.html`),
    which meant a later round could read the previous round's answer instead of solving the task, and two rounds
    writing the same name replaced one another. The current stimuli write nothing — the answer goes into the

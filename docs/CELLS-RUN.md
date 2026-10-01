@@ -79,7 +79,8 @@ the three-armed design needs. Its absolute totals are *lower* than the baseline'
 totals are not comparable across these cells, which is exactly why every quantity here is reported per step and
 per turn. `validatePolicy` now emits a warning when `recall.tier1 !== 'off'` is configured with `tas.on: false`,
 naming the hit-rate and per-step pairs above, so the pairing has to be chosen on purpose rather than by accident.
-The full four-cell ablation stays the goal once the `C1`-vs-`C2` contrast is established.
+The full 2×2 crossing — three arms run today, the dropped arm included — stays the goal once the `C1`-vs-`C2`
+contrast is established.
 
 ## Run set for the next round: three cells, and repeats
 
@@ -324,7 +325,7 @@ read beside it, or it is trading a measurable cost for an unmeasured loss.
 and per step, a report states the triple `(n_miss, n_hit, n_out)` — uncached input tokens, cached input tokens,
 output tokens — as counts. **No scalar is formed from the three.** The three types carry three different prices,
 and those prices differ per model and per provider, so any weighted total is a property of a price list rather than
-of the system under test: the same four columns would rank differently against another provider's rates, and the
+of the system under test: the same columns would rank differently against another provider's rates, and the
 ranking would say nothing about S1CAP. A cell that wins on one component and loses on another is a normal outcome,
 not a tie to be broken by weights; the table is read component by component. What a rate cannot do is stand in for
 the counts — round `20261001-1300` is the demonstration, because the cell with the best hit rate (the full

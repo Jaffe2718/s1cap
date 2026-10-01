@@ -66,7 +66,7 @@ DSH's session model separates a **persistent append-only event log (the human re
 
 ## 4. Experimental Design
 
-### 4.1 2×2 Factorial (within-task pairing)
+### 4.1 2×2 Factorial, three arms run (within-task pairing)
 
 | Cell | A: TAS ordering | B: S1 governance (recall selection + plan gate) |
 |---|---|---|
@@ -115,7 +115,7 @@ Each LLM call records prompt/cacheHit/cacheMiss/output tokens, net latency, and 
 
 ### 4.6 Budget (`deepseek-flash`, peak-hour prices)
 
-Full grid ≈ **$480 (peak) / $240 (off-peak)**; off-peak = 50% off everywhere outside UTC weekdays 01:00–04:00 and 06:00–10:00 — schedule accordingly. Breakdown: SWE-V ≈ $21 + τ² ≈ $22 + TB ≈ $440 (lean assumption, **revised after the pilot**). Optional: a `deepseek-v4-pro` control arm on SWE-V, +$76; GLM model-swap check, +$40. S1 (cloud Jev) is about $0.04 per session, negligible.
+**Three arms run** (~446 episodes per arm, so ~1,340 where the 2×2 grid budgeted ~1,780) ≈ **$360 (peak) / $180 (off-peak)** — the same per-arm density as the four-arm $480/$240, scaled by three quarters and shown so it can be checked: SWE-V ≈ $16 + τ² ≈ $17 + TB ≈ $330, so ≈ $363 (lean assumption, **revised after the pilot**). Off-peak = 50% off everywhere outside UTC weekdays 01:00–04:00 and 06:00–10:00 — schedule accordingly. Optional: a `deepseek-v4-pro` control arm on SWE-V, +$57 (was $76); GLM model-swap check, +$30 (was $40). S1 (cloud Jev) is about $0.04 per session, negligible. This is an estimate at the same density, not a ceiling: the cap is open question 3 below.
 
 ## 5. Milestones (10 Weeks) and Suggested Division of Labor
 
@@ -124,7 +124,7 @@ Full grid ≈ **$480 (peak) / $240 (off-peak)**; off-peak = 50% off everywhere o
 | 1 | M0: close all `[VERIFY]` items; monorepo scaffolding; s1-client connected to real Jev/laya-serve; telemetry v1; DSH plugin skeleton | `dsh --dump-config` shows the bundle; a hard-coded assembly in a smoke session rewrites the surface |
 | 2–3 | M1: SEGMENTER+RG+ASSEMBLER; proxy MVP; replay consistency tests | core coverage ≥90%; replay invariants pass |
 | 3–4 | M2: plan gate; degradation paths; settings UI; **TB 10-task pilot** | the pilot report fixes the cost model; 10-task C0/C2 smoke |
-| 5–6 | M3: full 2×2 on SWE-V + τ²; (optional) Laya fine-tuning + calibration | the frozen statistics module produces the report |
+| 5–6 | M3: the 2×2 crossing on SWE-V + τ², three arms; (optional) Laya fine-tuning + calibration | the frozen statistics module produces the report |
 | 7–8 | M4: TB cells; opencode migration check; GLM model-swap check | H4 reaches a conclusion |
 | 9–10 | M5: paper figures (Pareto, cache waterfall, `/s1 why` case study) + LaTeX first draft | full first draft |
 
