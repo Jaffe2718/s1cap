@@ -1648,15 +1648,22 @@ function styleFontSizes(text) {
 /**
  * What kind of SVG is this?
  *
- * The audit owns the metric charts this tool writes, and only those. `cell-figure.mjs` writes a fourth
- * file into the same directory - a composition of a `foreignObject` header plus the three charts
- * nested inside it - which legitimately has no top-level panels. Counting it as a failure made the
- * documented order (`report` -> `figure` -> `audit`) report a false alarm, so a composition is
- * recognised and skipped with a note instead. An SVG that is neither is still a failure: a chart the
- * audit cannot place is exactly what it must not wave through.
+ * The audit owns the metric charts this tool writes, and only those. Two other generators write into
+ * the same directory, and both legitimately have no panels to band-check:
+ *
+ *   - `cell-figure.mjs` writes a composition of a `foreignObject` header plus the three charts nested
+ *     inside it. Counting it as a failure made the documented order (`report` -> `figure` -> `audit`)
+ *     report a false alarm, so a composition is recognised and skipped with a note instead.
+ *   - `s1-activity.mjs` writes a recall-activity matrix: rows are segments and columns are invocations,
+ *     so its geometry is a grid of cells with its own self-test, not bands of bars on one axis. It
+ *     declares itself with `data-chart="s1-activity"` on the root element and is skipped with a note.
+ *     The marker is decisive and nothing else is: an SVG that merely resembles the matrix, or that
+ *     carries no marker, is still 'unknown' and still fails — a chart the audit cannot place is
+ *     exactly what it must not wave through.
  */
 function classifySvg(text) {
-  // A composition is tested for first, and decisively: it embeds whole chart documents, so it contains
+  if (/<svg[^>]*\sdata-chart="s1-activity"/.test(text)) return 'activity';
+  // A composition is tested for next, and decisively: it embeds whole chart documents, so it contains
   // their `class="panels"` wrappers too. Only a `foreignObject` plus nested `<svg>` children rules it
   // out as a chart, and no metric chart this tool writes has either.
   const nestedSvg = (text.match(/<svg[\s>]/g) || []).length;
@@ -1672,6 +1679,22 @@ function auditSvg(text) {
   const docHeight = Number(/<svg[^>]*\sheight="([\d.]+)"/.exec(text)?.[1]);
   const docWidth = Number(/<svg[^>]*\swidth="([\d.]+)"/.exec(text)?.[1]);
   const kind = classifySvg(text);
+  if (kind === 'activity') {
+    return {
+      docHeight,
+      docWidth,
+      origin: null,
+      bands: [],
+      violations: [],
+      ok: true,
+      skipped: true,
+      kind,
+      texts: 0,
+      legacy: false,
+      reason: 'a recall-activity matrix (data-chart="s1-activity"): rows are segments and columns are recall '
+        + 'invocations, a grid audited by `node scripts/s1-activity.mjs --self-test`, not bands of bars on one axis',
+    };
+  }
   if (kind === 'composition') {
     return {
       docHeight,
@@ -2769,6 +2792,26 @@ function runSelfTest() {
       assertTrue(a.reason.includes('composed figure'), 'the skip carries a readable reason');
       assertTrue(formatAudit('summary.svg', a).startsWith('summary.svg: SKIPPED'), 'the audit prints the skip');
 
+      // `s1-activity.mjs` writes a matrix into the same directory under the documented order
+      // (`cell-report` -> `s1-activity` -> `cell-report --audit`). It declares itself on the root
+      // element; the skip is printed with a reason, and it is the marker alone that earns the skip.
+      const activity = `<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="1736" viewBox="0 0 1240 1736" data-chart="s1-activity">
+  <rect class="cell" data-row="0" data-col="1" data-state="candidate" x="300" y="900" width="120" height="24" fill="#2f6fd0"/>
+  <rect class="ring" data-row="0" data-col="1" data-overlay="selected" x="301" y="901" width="118" height="21" fill="none" stroke="#b0483f"/>
+</svg>`;
+      assertEqual(classifySvg(activity), 'activity', 'the activity matrix is recognised by its own marker');
+      const act = auditSvg(activity);
+      assertTrue(act.skipped && act.ok, 'the activity matrix is skipped, not failed');
+      assertTrue(act.reason.includes('recall-activity matrix'), 'the activity skip carries a readable reason');
+      assertTrue(act.reason.includes('s1-activity.mjs --self-test'), 'and names where its geometry is checked');
+      assertTrue(formatAudit('s1-activity.svg', act).startsWith('s1-activity.svg: SKIPPED'), 'the audit prints that skip');
+      // The marker has to be decisive. The same body without it is an unplaceable chart, not a matrix:
+      // a resemblance must never buy a skip, or the audit would wave through whatever looks familiar.
+      const unmarked = activity.replace(' data-chart="s1-activity"', '');
+      assertEqual(classifySvg(unmarked), 'unknown', 'a matrix without its marker is not recognised as one');
+      const unmarkedAudit = auditSvg(unmarked);
+      assertTrue(!unmarkedAudit.ok && !unmarkedAudit.skipped, 'and it still fails the audit');
+
       // a chart is still a chart, and a document that is neither is still a failure
       assertEqual(classifySvg(svgs['time.svg']), 'chart', 'the real charts classify as charts');
       const junk = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect x="0" y="0" width="100" height="100"/></svg>';
@@ -2776,7 +2819,7 @@ function runSelfTest() {
       const j = auditSvg(junk);
       assertTrue(!j.ok && !j.skipped, 'an unrecognisable svg still fails the audit');
       assertTrue(j.violations.includes('document has no readable panel structure'), 'and says why');
-    }, 'the audit skips a composed figure with a note, and still fails an svg it cannot place');
+    }, 'the audit skips a composed figure and the activity matrix with a note, and still fails an svg it cannot place');
 
     check(() => {
       // The release and the model are read from the manifest's `_dsh` block and must reach the header...

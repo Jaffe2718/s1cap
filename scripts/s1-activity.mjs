@@ -1,0 +1,1697 @@
+#!/usr/bin/env node
+/**
+ * S1CAP recall activity — one cell, one round: what the recall walk did, invocation by invocation.
+ *
+ * The matrix has one COLUMN per invocation of the recall/BFS inside the cell (the `assembly` records of
+ * the control plane, in time order, each attributed to the turn/step it ran in) and one ROW per segment
+ * of the cell's final association graph, numbered from 0 for the oldest, drawn WITH THE OLDEST AT THE
+ * BOTTOM. A cell of the matrix is one (segment, invocation) pair.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * WHAT IS RECORDED, AND WHAT IS NOT — read this before reading the picture
+ *
+ * Every state below is read out of a run artifact. Nothing is inferred from a count, and nothing is
+ * filled in from a plausible default; an input that is missing is an error, never a blank matrix.
+ *
+ *   1. `not yet created` — the segment's recorded creation stamp (`segments[].ts`) is later than the
+ *      invocation's stamp (`assembly.ts`). One correction is applied, and it is a recorded fact rather
+ *      than a tolerance: a step's pre-step payload is written to the graph by the upkeep lane a few
+ *      milliseconds AFTER the assembly that consumed it, so the segments a step itself carried can
+ *      carry a stamp later than the invocation that already used them. The step's payload is on the
+ *      tape (`{sessionId, step, systemPrompt, messages}`), so those ids are read from there and marked
+ *      as existing. The correction is counted and printed: it only ever turns a would-be blank cell
+ *      into "exists", never the other way round.
+ *
+ *   2. `recall candidate` — the segment's id is a node of that invocation's recorded `recallTree`
+ *      (excluding the root, which is the anchor the walk started from). `recallTree` is the shape of
+ *      the walk that produced the step's recall: every hit `recall` returned, ids only. `candidates`
+ *      in the same record is the number of those hits, and this tool asserts that identity rather
+ *      than trusting it.
+ *
+ *   3. `existed, the walk did not return it` — it is in the graph at that invocation (1) and not a
+ *      node of the walk (2). This is NOT "judged irrelevant": the walk only follows edges at or above
+ *      the relevance threshold r, from the anchor it chose, and a pair that was never scored has no
+ *      edge to follow at all. The matrix reports what the walk returned, not a relevance verdict.
+ *
+ *   THE SELECTED SET. `assembly.selected` is a COUNT (`recall.selected = layout.recalled.length`); the
+ *   control plane records no per-segment identity for it, and `recallTree` is explicitly the candidate
+ *   walk rather than the ranking (see `recallTreeOf` in packages/core/src/assembler.ts). The identity
+ *   is written in exactly one place: the injected message a delivered block becomes holds one
+ *   provenance line per selected segment, `## earlier <kind> turn, quoted verbatim · <parent-id>`, and
+ *   its id is the `payloadId` the `context_delivery` record carries. So this tool draws the selected
+ *   identity where — and only where — that payload is in the evidence, as a ring, and elsewhere it
+ *   draws the recorded COUNT (the bar panel and the per-invocation table say `count only`). It never
+ *   substitutes one for the other and never re-labels a candidate as selected. The summary line
+ *   prints how many selected segments are covered by a recorded identity and how many are not.
+ *
+ * The knobs are printed from the tape's `kind:"wiring"` record (`recall: {d, r, w, wait}`) — never
+ * hard-coded — and each column also reports the `windowN` its own assembly record carries.
+ *
+ * Usage:
+ *   node scripts/s1-activity.mjs --run <run-dir> --cell <name> [--out <run-dir>/report/s1-activity.svg] [--explain]
+ *   node scripts/s1-activity.mjs --run <run-dir> --cell <name> --out -        (SVG to stdout, summary to stderr)
+ *   node scripts/s1-activity.mjs --self-test
+ *
+ * Output: a self-contained SVG (no script, no external font, no network) and one summary line —
+ * invocations x segments, the cells of each state, and how many selections have a recorded id — so a
+ * caller can sanity-check the figure without opening it. `--explain` prints, column by column, where
+ * every state came from (the creation stamp, the same-step carry, the walk, the delivered payload).
+ * Exit 1 with a message naming the missing or inconsistent input when the figure cannot be drawn.
+ */
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
+
+// ---------------------------------------------------------------------------------------------
+// 1. Failures
+//
+// Every `fail` here is a case where a picture would otherwise have to be invented: an input that is
+// absent, a record that contradicts another record, or an identity that the run did not write down.
+// ---------------------------------------------------------------------------------------------
+
+function fail(message) {
+  const err = new Error(message);
+  err.isActivityError = true;
+  throw err;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 2. Small readers
+//
+// JSONL is read strictly: a line that does not parse is a partial record, and a matrix that silently
+// drops the invocation a truncated line carried is exactly the "blank where the data was missing"
+// failure this tool exists to avoid. `scripts/find-bad-jsonl-line.mjs` locates such a line.
+// ---------------------------------------------------------------------------------------------
+
+function readJsonlStrict(path, what) {
+  if (!existsSync(path)) fail(`missing ${what}: ${path}`);
+  const raw = readFileSync(path, 'utf8');
+  const out = [];
+  raw.split(/\r?\n/).forEach((line, i) => {
+    if (line.trim() === '') return;
+    try {
+      out.push(JSON.parse(line));
+    } catch (err) {
+      fail(`${what} has an unparseable line ${i + 1} of ${path}: ${String(err)} — `
+        + 'locate it with `node scripts/find-bad-jsonl-line.mjs <file>`');
+    }
+  });
+  if (out.length === 0) fail(`${what} holds no records: ${path}`);
+  return out;
+}
+
+function readJson(path, what) {
+  if (!existsSync(path)) fail(`missing ${what}: ${path}`);
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    fail(`${what} is not readable JSON (${path}): ${String(err)}`);
+    return undefined;
+  }
+}
+
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Strictly numeric, so a string field where a number belongs is an error and not a silent 0. */
+function numOf(record, field, where) {
+  const v = record?.[field];
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    fail(`${where}: field \`${field}\` is not a finite number (got ${JSON.stringify(v)})`);
+  }
+  return v;
+}
+
+const shortId = (id, n = 8) => (id.length > n ? id.slice(0, n) : id);
+
+/**
+ * A segment id as a row label. The chunk suffix is kept — `95e3cc48…f33a#0` and `…#1` are two rows of one
+ * longer event, and truncating them to the same eight characters would print two rows with one name.
+ */
+function rowLabelId(id) {
+  const chunk = /^(.+)#(\d+)$/.exec(id);
+  if (chunk) return `${chunk[1].slice(0, 8)}#${chunk[2]}`;
+  return shortId(id);
+}
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** Wall clock of a record stamp, in the reading host's zone (the round directory is named in it too). */
+function clock(ts) {
+  const d = new Date(ts);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
+/** Greedy word wrap, used for the notes the figure carries. */
+function wrap(text, max) {
+  const lines = [];
+  let line = '';
+  for (const word of String(text).split(' ')) {
+    if (line !== '' && (line + ' ' + word).length > max) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = line === '' ? word : `${line} ${word}`;
+    }
+  }
+  if (line !== '') lines.push(line);
+  return lines;
+}
+
+/**
+ * A path that fits the caption. A session store lives under a directory named after the whole workspace
+ * path, so the interesting part of it is at the END; whole middle segments are dropped rather than the
+ * tail, because "session.v4.jsonl.zstd" is the part a reader needs to find the file.
+ */
+function elidePath(path, max = 132) {
+  if (path.length <= max) return path;
+  const parts = String(path).split('/');
+  const head = [parts[0]];
+  const tail = parts.slice(1);
+  while (tail.length > 1 && `${head.join('/')}/…/${tail.join('/')}`.length > max) tail.shift();
+  return `${head.join('/')}/…/${tail.join('/')}`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3. Multi-frame zstd reader (carried from `scripts/cell-report.mjs`, which carried it from
+//    `.s1cap-ablation/session-store.mjs`)
+//
+// The harness session store is appended to one zstd frame per write, and Node's `zstdDecompressSync`
+// stops at the end of the FIRST frame: a naive read of a 40 KB store returns the session header and
+// nothing else. Turn/step attribution needs the `step/start` events, which are in the later frames,
+// so the frames are walked explicitly.
+// ---------------------------------------------------------------------------------------------
+
+const ZSTD_MAGIC = 0xfd2fb528;
+const SKIPPABLE_MIN = 0x184d2a50;
+const SKIPPABLE_MAX = 0x184d2a5f;
+
+/** Byte length of the compressed frame starting at `off`. */
+function frameSize(buf, off) {
+  if (buf.readUInt32LE(off) !== ZSTD_MAGIC) throw new Error(`no zstd magic at ${off}`);
+  let p = off + 4;
+  const fhd = buf[p];
+  p += 1;
+  const fcsFlag = fhd >> 6;
+  const singleSegment = (fhd >> 5) & 1;
+  const hasChecksum = (fhd >> 2) & 1;
+  const dictFlag = fhd & 3;
+  if (!singleSegment) p += 1;
+  p += [0, 1, 2, 4][dictFlag];
+  p += fcsFlag === 0 ? (singleSegment ? 1 : 0) : [0, 2, 4, 8][fcsFlag];
+  for (;;) {
+    const header = buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16);
+    p += 3;
+    const last = header & 1;
+    const blockType = (header >> 1) & 3;
+    const blockSize = header >> 3;
+    if (blockType === 1) p += 1;
+    else p += blockSize;
+    if (last) break;
+  }
+  if (hasChecksum) p += 4;
+  return p - off;
+}
+
+function readSessionStore(path) {
+  const buf = readFileSync(path);
+  let off = 0;
+  const parts = [];
+  while (off + 4 <= buf.length) {
+    const magic = buf.readUInt32LE(off);
+    if (magic >= SKIPPABLE_MIN && magic <= SKIPPABLE_MAX) {
+      const size = buf.readUInt32LE(off + 4);
+      off += 8 + size;
+      continue;
+    }
+    if (magic !== ZSTD_MAGIC) break; // a trailing partial frame is the only expected case
+    const size = frameSize(buf, off);
+    parts.push(zstdDecompressSync(buf.subarray(off, off + size)).toString('utf8'));
+    off += size;
+  }
+  const events = [];
+  for (const line of parts.join('').split(/\r?\n/)) {
+    if (line.trim() === '') continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      /* an unparseable session line is not part of the control plane; the events read are reported */
+    }
+  }
+  return { events, frames: parts.length, bytes: buf.length };
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4. The run's inputs
+//
+// Four files and one snapshot. Each is required for a stated reason; the error message says which
+// state it carries, because "the chart is missing a column" is not a useful failure to receive.
+// ---------------------------------------------------------------------------------------------
+
+function loadControl(runDir, cell) {
+  const path = join(runDir, 'evidence', cell, 'control.jsonl');
+  const records = readJsonlStrict(path, `the control plane of cell ${cell}`);
+  const assemblies = records.filter((r) => r?.type === 'assembly');
+  if (assemblies.length === 0) {
+    fail(`${path} records no \`assembly\` event: cell ${cell} ran no recall invocation, so there is no matrix `
+      + 'to draw (this is not an empty chart, it is a missing one)');
+  }
+  assemblies.forEach((a, i) => {
+    const where = `assembly #${i + 1} of ${path}`;
+    numOf(a, 'ts', where);
+    numOf(a, 'seq', where);
+    numOf(a, 'candidates', where);
+    numOf(a, 'selected', where);
+    numOf(a, 'bfsDepth', where);
+    numOf(a, 'windowN', where);
+    if (a.recallTree === null || typeof a.recallTree !== 'object' || Array.isArray(a.recallTree)) {
+      // `{}` is a reading ("the walk found nothing") and must be present; an absent field is not one.
+      fail(`${where}: \`recallTree\` is ${JSON.stringify(a.recallTree)} — the walk's own record of the ids it `
+        + 'returned is what the candidate state is read from, and a missing field is not an empty walk');
+    }
+    if (a.blocks === null || typeof a.blocks !== 'object') fail(`${where}: no \`blocks\` token accounting`);
+  });
+  const deliveries = records.filter((r) => r?.type === 'context_delivery');
+  for (const d of deliveries) {
+    if (typeof d.cell === 'string' && d.cell !== cell) {
+      fail(`${path}: a context_delivery record is stamped cell ${JSON.stringify(d.cell)} but --cell ${cell} was `
+        + 'asked for — the evidence does not belong to this cell');
+    }
+    if (d.delivered === true && (typeof d.payloadId !== 'string' || d.payloadId === '')) {
+      fail(`${path}: a delivered context_delivery at ts ${d.ts} carries no payloadId, so the selected ids it `
+        + 'delivered cannot be located');
+    }
+    if (d.delivered === true && !Array.isArray(d.blocks)) {
+      fail(`${path}: a delivered context_delivery at ts ${d.ts} carries no \`blocks\` list`);
+    }
+  }
+  const sessionIds = [...new Set(assemblies.concat(deliveries)
+    .map((r) => r.sessionId)
+    .filter((s) => typeof s === 'string' && s !== ''))];
+  return { path, records, assemblies, deliveries, sessionIds };
+}
+
+function loadSnapshot(runDir, cell, sessionIds) {
+  const dir = join(runDir, 'home', cell, '.s1cap', 'rg');
+  if (!existsSync(dir)) fail(`missing the association-graph snapshot directory: ${dir}`);
+  const files = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.json')).sort();
+  if (files.length === 0) fail(`no association-graph snapshot in ${dir} — the rows of the matrix are its segments`);
+  const parsed = files.map((f) => {
+    const path = join(dir, f);
+    return { file: f, path, doc: readJson(path, 'the association-graph snapshot') };
+  });
+  const wanted = new Set(sessionIds);
+  const matching = parsed.filter((p) => wanted.has(p.doc.sessionId));
+  let chosen;
+  if (matching.length === 1) chosen = matching[0];
+  else if (matching.length === 0 && parsed.length === 1 && wanted.size === 0) {
+    // No sessionId anywhere in the control plane and exactly one snapshot: the association is by
+    // uniqueness, which is stated rather than assumed.
+    chosen = parsed[0];
+  } else if (matching.length > 1) {
+    fail(`${dir} holds ${matching.length} snapshots of session ${[...wanted].join(', ')} (${matching.map((m) => m.file).join(', ')}) `
+      + '— which graph the matrix is drawn from cannot be decided here');
+  } else {
+    fail(`${dir} holds no snapshot of session ${[...wanted].join(', ') || '(none recorded in the control plane)'} `
+      + `(${parsed.map((p) => `${p.file}: session ${JSON.stringify(p.doc.sessionId)}`).join(', ')})`);
+  }
+  const doc = chosen.doc;
+  if (!Array.isArray(doc.segments) || doc.segments.length === 0) {
+    fail(`${chosen.path}: \`segments\` is not a non-empty array`);
+  }
+  doc.segments.forEach((s, i) => {
+    const where = `segment #${i + 1} of ${chosen.path}`;
+    if (typeof s.id !== 'string' || s.id === '') fail(`${where}: no id`);
+    numOf(s, 'ts', where);
+    numOf(s, 'tokens', where);
+  });
+  const byId = new Map(doc.segments.map((s) => [s.id, s]));
+  if (byId.size !== doc.segments.length) fail(`${chosen.path}: duplicate segment ids`);
+  let order;
+  if (Array.isArray(doc.order) && doc.order.length > 0) {
+    order = doc.order;
+    if (order.length !== doc.segments.length || new Set(order).size !== order.length) {
+      fail(`${chosen.path}: \`order\` is not a permutation of \`segments\` (${order.length} vs ${doc.segments.length})`);
+    }
+    for (const id of order) if (!byId.has(id)) fail(`${chosen.path}: \`order\` names ${id}, which is not a segment`);
+  } else if (doc.segments.every((s) => typeof s.seq === 'number')) {
+    // Append order is the graph's own order. `seq` is the session-log sequence of the message that
+    // produced the segment, so ordering by it reproduces that order; said out loud, not assumed.
+    order = [...doc.segments].sort((a, b) => a.seq - b.seq || a.ts - b.ts).map((s) => s.id);
+    if (new Set(order).size !== order.length) fail(`${chosen.path}: cannot order segments by \`seq\` (ties)`);
+  } else {
+    fail(`${chosen.path}: neither \`order\` nor a per-segment \`seq\` is present, so the row order — oldest `
+      + 'first — cannot be stated');
+  }
+  return { path: chosen.path, file: chosen.file, doc, byId, order, segments: order.map((id) => byId.get(id)) };
+}
+
+function loadTape(runDir, cell) {
+  const path = join(runDir, 'home', cell, '.s1cap', 'tape.jsonl');
+  const records = readJsonlStrict(path, `the tape of cell ${cell}`);
+  const wiring = records.filter((r) => r?.kind === 'wiring');
+  if (wiring.length === 0) {
+    fail(`${path} holds no \`kind:"wiring"\` record; the switches the cell ran with are stated there and nowhere `
+      + 'else, and the knobs are read from it rather than assumed');
+  }
+  const recall = wiring[0].recall;
+  if (recall === null || typeof recall !== 'object') fail(`${path}: the wiring record carries no \`recall\` block`);
+  // A round can write the wiring record more than once — the plugin states its switches at every
+  // activation, and a restart mid-round is normal. Agreement is what makes them one set of knobs; two
+  // records that disagree cannot be attributed to a column (the record carries no timestamp), so the
+  // knobs would be a guess and the figure is refused instead.
+  const shape = (r) => JSON.stringify(r?.recall ?? null);
+  const distinct = [...new Set(wiring.map(shape))];
+  if (distinct.length > 1) {
+    fail(`${path} holds ${wiring.length} \`kind:"wiring"\` records that disagree about the recall knobs `
+      + `(${distinct.join(' vs ')}); they carry no timestamp, so which invocation ran with which cannot be read `
+      + 'off the tape — the annotation would be a guess');
+  }
+  const knobs = {
+    w: numOf(recall, 'w', `the wiring record of ${path}`),
+    r: numOf(recall, 'r', `the wiring record of ${path}`),
+    d: numOf(recall, 'd', `the wiring record of ${path}`),
+  };
+  if (typeof recall.wait === 'number') knobs.wait = recall.wait;
+  // The step payload records: `{schema, sessionId, step, systemPrompt, messages}` — what the harness
+  // handed the pre-step hook. They carry the ids a step itself brought, which is the same-step
+  // existence correction (see the header).
+  const payloads = records.filter((r) => r && r.kind === undefined && Array.isArray(r.messages) && typeof r.step === 'number');
+  // How many times the cell stated its switches. More than one is a restart mid-round, which is worth
+  // printing rather than swallowing: it is the one fact that explains a step payload record appearing twice.
+  return { path, knobs, payloads, wiringCount: wiring.length };
+}
+
+function loadStepBoundaries(runDir, cell, sessionIds) {
+  const root = join(runDir, 'home', cell, 'sessions');
+  if (!existsSync(root)) {
+    fail(`missing the cell's session store directory: ${root} — the turn/step a column ran in is read from its `
+      + 'step/start events, and the columns must be labelled');
+  }
+  const found = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (entry.name === 'session.v4.jsonl.zstd') found.push({ path: p, sessionId: basename(dirname(p)) });
+    }
+  };
+  walk(root);
+  if (found.length === 0) fail(`no session.v4.jsonl.zstd under ${root}`);
+  const wanted = new Set(sessionIds);
+  const matching = found.filter((f) => wanted.has(f.sessionId));
+  let chosen;
+  if (matching.length === 1) chosen = matching[0];
+  else if (matching.length === 0 && found.length === 1 && wanted.size === 0) chosen = found[0];
+  else if (matching.length > 1) {
+    fail(`${root} holds ${matching.length} session stores of session ${[...wanted].join(', ')} `
+      + `(${matching.map((m) => m.path).join(', ')}) — the step boundaries are ambiguous`);
+  } else {
+    fail(`${root} holds no session store of session ${[...wanted].join(', ') || '(none recorded)'} `
+      + `(${found.map((f) => `${f.sessionId}`).join(', ')}) — without it a column cannot be mapped to a turn/step`);
+  }
+  const { events, frames, bytes } = readSessionStore(chosen.path);
+  const steps = events
+    .filter((e) => e?.type === 'step/start' && typeof e.time === 'number')
+    .map((e) => ({ time: e.time, turn: e.data?.turn ?? null, step: e.data?.step ?? null, seq: e.seq ?? null }))
+    .sort((a, b) => a.time - b.time);
+  if (steps.length === 0) {
+    fail(`${chosen.path} records no readable \`step/start\` event (${frames} zstd frame(s), ${bytes} bytes) — a `
+      + 'column label is the turn and step the invocation ran in');
+  }
+  if (steps.some((s) => s.turn === null || s.step === null)) {
+    fail(`${chosen.path}: a step/start event carries no \`data.turn\`/\`data.step\``);
+  }
+  return { path: chosen.path, steps, frames, events };
+}
+
+/**
+ * Texts of the messages the harness logged, by id: the evidence copy of the session stream, plus the
+ * session store (which holds the same message when the stream file was not kept). Both are read so
+ * that the delivered payload can be found, and both are compared when both have it — a figure drawn
+ * from a payload that two artifacts disagree about would be a figure about neither.
+ */
+function loadMessageTexts(runDir, cell, stepInfo) {
+  const map = new Map();
+  const sources = [];
+  const evidence = join(runDir, 'evidence', cell, 'session.jsonl');
+  if (existsSync(evidence)) {
+    for (const record of readJsonlStrict(evidence, `the session stream of cell ${cell}`)) {
+      if (typeof record?.id === 'string' && typeof record.text === 'string') map.set(record.id, record.text);
+    }
+    sources.push(evidence);
+  }
+  for (const e of stepInfo.events) {
+    if (e?.type !== 'user/message') continue;
+    const data = e.data;
+    if (typeof data?.id !== 'string' || !Array.isArray(data.content)) continue;
+    const text = data.content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('');
+    const previous = map.get(data.id);
+    if (previous !== undefined && previous !== text) {
+      fail(`the message ${data.id} reads differently in ${evidence} and in ${stepInfo.path} — the delivered payload `
+        + 'cannot be quoted from two disagreeing copies');
+    }
+    map.set(data.id, text);
+  }
+  sources.push(stepInfo.path);
+  return { map, sources };
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5. Attribution: which turn and step each invocation ran in
+//
+// The control plane carries `ts` but no turn/step (its `seq` is the plugin's own running message
+// counter, not a step number), so records are attributed by time: the pre-step hook runs immediately
+// before the step it belongs to, so an invocation belongs to the first `step/start` at or after it.
+// The mapping must be injective and order-preserving; anything else is reported rather than guessed.
+// ---------------------------------------------------------------------------------------------
+
+const ATTRIBUTION_WINDOW_MS = 120000;
+/** How far after its invocation a message a step carried may be stamped before the match is refused. */
+const CARRY_SLACK_MS = 60000;
+
+function attributeToSteps(invocations, steps, what) {
+  const claims = new Map();
+  return invocations.map((record, i) => {
+    const next = steps.find((s) => s.time >= record.ts);
+    if (next === undefined) {
+      fail(`${what} #${i + 1} (ts ${record.ts}) has no \`step/start\` at or after it — it cannot be placed in a `
+        + 'turn/step, and a column without a label is not drawn');
+    }
+    const gap = next.time - record.ts;
+    if (gap > ATTRIBUTION_WINDOW_MS) {
+      fail(`${what} #${i + 1} (ts ${record.ts}) is ${gap} ms before the next step/start (turn ${next.turn} step `
+        + `${next.step}) — further than the attribution window of ${ATTRIBUTION_WINDOW_MS} ms, so the attribution `
+        + 'would be a guess');
+    }
+    const key = `${next.turn}/${next.step}`;
+    if (claims.has(key)) {
+      fail(`${what} #${claims.get(key) + 1} and #${i + 1} both attribute to turn ${next.turn} step ${next.step} — `
+        + 'two records claiming one step means the attribution rule does not fit this run');
+    }
+    claims.set(key, i);
+    return { ...next, gapMs: gap };
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// 6. The activity derivation
+// ---------------------------------------------------------------------------------------------
+
+/** Ids of every node of a `recallTree`, and its root. */
+function treeIds(tree) {
+  const ids = [];
+  const walk = (node) => {
+    for (const key of Object.keys(node)) {
+      ids.push(key);
+      const child = node[key];
+      if (child && typeof child === 'object') walk(child);
+    }
+  };
+  walk(tree);
+  return ids;
+}
+
+/**
+ * The provenance lines of a delivered payload, in order: one per selected segment, each naming the
+ * segment — or, for a chunked long event, its passage parent, which is what `renderSegment` writes.
+ */
+function provenanceIds(text) {
+  const ids = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = /^## earlier .+ turn, quoted verbatim · (.+?)\s*$/.exec(line);
+    if (m) ids.push(m[1]);
+  }
+  return ids;
+}
+
+function derive({ control, snapshot, tape, stepInfo, messages }) {
+  const invocations = control.assemblies
+    .map((a, i) => ({ index: i, record: a }))
+    .sort((x, y) => x.record.ts - y.record.ts || x.index - y.index);
+  const places = attributeToSteps(invocations.map((v) => v.record), stepInfo.steps, 'an assembly record');
+
+  // Tape payload records are the observed steps in file order. They are matched to invocations by the
+  // step they name, greedily and in order, because a run's step numbers restart with every turn.
+  const carried = new Map(); // invocation index -> [ids]
+  const unsegmentedCarry = [];
+  const stepDuration = (place) => {
+    const next = stepInfo.steps.find((s) => s.time > place.time);
+    return next === undefined ? ATTRIBUTION_WINDOW_MS : next.time - place.time;
+  };
+  let cursor = 0;
+  invocations.forEach((v, k) => {
+    const place = places[k];
+    const ids = [];
+    let matched = false;
+    for (let p = cursor; p < tape.payloads.length; p += 1) {
+      const rec = tape.payloads[p];
+      if (rec.step !== place.step) continue;
+      matched = true;
+      cursor = p + 1;
+      for (const message of rec.messages) {
+        const id = message?.id;
+        if (typeof id !== 'string') continue;
+        const segment = snapshot.byId.get(id);
+        if (segment === undefined) {
+          unsegmentedCarry.push({ at: k, id });
+          continue;
+        }
+        // A step's own payload can only carry a message that step observed, and the graph stamps it
+        // when the upkeep lane writes it - during the step, not minutes later. A carried id stamped
+        // long after the invocation means the record matched by step NUMBER belongs to another turn's
+        // step of the same number (step numbers restart every turn), so the correction would invent a
+        // row. Refused rather than drawn.
+        const late = segment.ts - v.record.ts;
+        if (late > stepDuration(place) + CARRY_SLACK_MS) {
+          fail(`assembly #${k + 1} (ts ${v.record.ts}, turn ${place.turn} step ${place.step}) matched the tape's `
+            + `step-${place.step} payload record, but the message ${id} it carries was created ${late} ms later — `
+            + 'that record belongs to another step of the same number and the tape is missing the one for this '
+            + 'step, so which messages this invocation carried cannot be established');
+        }
+        ids.push(id);
+      }
+      break;
+    }
+    if (!matched) {
+      // An unmatched step is not the same as a step that carried nothing: the second is a record with an
+      // empty `messages` list, the first is no record at all. Without it the segments this step itself
+      // brought would read as "not yet created" at the invocation that used them - a blank where the run
+      // has an answer - so the matrix is refused rather than drawn from the creation stamps alone.
+      fail(`assembly #${k + 1} (turn ${place.turn} step ${place.step}) has no matching step payload record on `
+        + `${tape.path} after ${cursor} record(s) — what the step itself carried is that record's message ids, and `
+        + 'without it the step\'s own segments would be drawn as not yet created. A run writes them when the '
+        + 'plugin observes in `tape` mode (`observation: "tape"`); a run that did not cannot show this state.');
+    }
+    carried.set(k, { ids, matched });
+  });
+
+  const deliveriesByInvocation = new Map();
+  for (const delivery of control.deliveries) {
+    const owner = invocations
+      .map((v, k) => ({ k, ts: v.record.ts }))
+      .filter((c) => c.ts <= delivery.ts)
+      .sort((a, b) => b.ts - a.ts)[0];
+    if (owner === undefined || delivery.ts - owner.ts > ATTRIBUTION_WINDOW_MS) {
+      fail(`a context_delivery at ts ${delivery.ts} follows no assembly within ${ATTRIBUTION_WINDOW_MS} ms — the `
+        + 'selection it reports cannot be attached to an invocation');
+    }
+    const place = places[owner.k];
+    if (!(delivery.ts >= place.time - ATTRIBUTION_WINDOW_MS && delivery.ts <= place.time + ATTRIBUTION_WINDOW_MS)) {
+      fail(`a context_delivery at ts ${delivery.ts} does not belong to the step of assembly #${owner.k + 1}`);
+    }
+    deliveriesByInvocation.set(owner.k, delivery);
+  }
+
+  const columns = invocations.map((v, k) => {
+    const a = v.record;
+    const place = places[k];
+    const strict = new Set(snapshot.segments.filter((s) => s.ts <= a.ts).map((s) => s.id));
+    const carryIds = carried.get(k).ids;
+    const existed = new Set([...strict, ...carryIds]);
+    const treeList = treeIds(a.recallTree);
+    const root = Object.keys(a.recallTree)[0] ?? null;
+    const candidates = treeList.filter((id) => id !== root);
+    if (candidates.length !== a.candidates) {
+      fail(`assembly #${k + 1} (ts ${a.ts}) records candidates=${a.candidates} but its recallTree holds `
+        + `${candidates.length} hit(s) under the root — the walk's id list and its count disagree, so neither can `
+        + 'be drawn as fact');
+    }
+    for (const id of treeList) {
+      if (!existed.has(id)) {
+        fail(`assembly #${k + 1} walked to ${id}, which the existence rule says did not exist yet at ${a.ts} — `
+          + 'a segment cannot be walked before it exists');
+      }
+    }
+    for (const id of carryIds) {
+      if (strict.has(id)) {
+        // The correction is a boundary correction by construction; a carried id that was already there
+        // means the rule added nothing, which is worth saying rather than hiding.
+        continue;
+      }
+    }
+
+    const delivery = deliveriesByInvocation.get(k);
+    let selected = null;
+    let selectedSource = 'none';
+    if (delivery !== undefined && delivery.delivered === true) {
+      const text = messages.map.get(delivery.payloadId);
+      if (text === undefined) {
+        fail(`assembly #${k + 1} delivered payload ${delivery.payloadId}, but no logged message carries that id `
+          + `(looked in ${messages.sources.join(' and ')}) — the selected ids of this invocation are not in the `
+          + 'evidence, so the ring cannot be drawn from them');
+      }
+      const ids = provenanceIds(text);
+      if (ids.length !== delivery.blocks.length) {
+        fail(`the delivered payload ${delivery.payloadId} holds ${ids.length} provenance line(s) but the `
+          + `context_delivery record lists ${delivery.blocks.length} block(s)`);
+      }
+      if (ids.length !== a.selected) {
+        fail(`assembly #${k + 1} records selected=${a.selected} but its delivered payload names ${ids.length} `
+          + 'segment(s) — the count and the identity disagree');
+      }
+      selected = [];
+      for (const id of ids) {
+        if (snapshot.byId.has(id)) {
+          selected.push({ id, rows: [id], passage: false });
+          continue;
+        }
+        const chunks = snapshot.segments.filter((s) => s.chunkOf === id);
+        if (chunks.length === 0) {
+          fail(`the delivered payload ${delivery.payloadId} names ${id}, which is neither a segment of `
+            + `${snapshot.file} nor the passage parent of one — the snapshot is not the graph that invocation saw`);
+        }
+        // One provenance line per selected segment, but a chunked event is named by its passage parent:
+        // the identity of which chunk was selected is not in the payload, and is not invented here.
+        selected.push({ id, rows: chunks.map((c) => c.id), passage: chunks.length > 1 });
+      }
+      selectedSource = 'delivered payload';
+    } else if (delivery !== undefined) {
+      selectedSource = 'not delivered';
+    }
+    if (selected !== null) {
+      for (const entry of selected) {
+        for (const row of entry.rows) {
+          if (!existed.has(row)) {
+            fail(`assembly #${k + 1} selected ${row}, which did not exist at ts ${a.ts} — a segment cannot be `
+              + 'selected before it exists');
+          }
+        }
+        if (entry.rows.includes(root)) {
+          fail(`assembly #${k + 1} selected its own walk root ${root}, which the assembler excludes from recall`);
+        }
+      }
+    }
+    return {
+      index: k + 1,
+      record: a,
+      place,
+      strictIds: strict,
+      carryIds,
+      existed,
+      root,
+      candidates,
+      selected,
+      selectedSource,
+      delivery,
+      payloadId: delivery?.delivered === true ? delivery.payloadId : '',
+      fallback: typeof a.fallback === 'string' ? a.fallback : '',
+    };
+  });
+
+  // The matrix: one state per (segment row, invocation column). `absent` is the default and every
+  // other state is set from a recorded fact, so no state can appear without evidence for it.
+  const rows = snapshot.segments.map((segment, row) => ({ row, segment, cells: [] }));
+  const counts = { absent: 0, candidate: 0, root: 0, existed: 0, selectedIds: 0, selectedPassage: 0 };
+  for (const row of rows) {
+    for (const column of columns) {
+      let state = 'absent';
+      if (column.existed.has(row.segment.id)) {
+        if (row.segment.id === column.root) state = 'root';
+        else if (column.candidates.includes(row.segment.id)) state = 'candidate';
+        else state = 'existed';
+      }
+      let overlay = '';
+      if (column.selected !== null) {
+        for (const entry of column.selected) {
+          if (!entry.rows.includes(row.segment.id)) continue;
+          overlay = entry.passage ? 'passage' : 'selected';
+          break;
+        }
+      }
+      row.cells.push({ state, overlay });
+      counts[state] += 1;
+      if (overlay === 'selected') counts.selectedIds += 1;
+      if (overlay === 'passage') counts.selectedPassage += 1;
+    }
+  }
+
+  const carryCells = columns.reduce((n, c) => n + c.carryIds.filter((id) => !c.strictIds.has(id)).length, 0);
+  const selectedTotal = columns.reduce((n, c) => n + c.record.selected, 0);
+  const identityColumns = columns.filter((c) => c.selected !== null).length;
+  const identityRows = counts.selectedIds;
+  const passageColumns = columns.filter((c) => c.selected !== null && c.selected.some((e) => e.passage)).length;
+  const countOnly = selectedTotal - columns.reduce((n, c) => n + (c.selected === null ? 0 : c.selected.length), 0);
+  const rowsById = new Map(rows.map((r) => [r.segment.id, r]));
+  return {
+    columns,
+    rows,
+    counts,
+    carryCells,
+    unsegmentedCarry,
+    selectedTotal,
+    identityColumns,
+    identityRows,
+    passageColumns,
+    countOnly,
+    rowsById,
+    snapshot,
+    tape,
+    control,
+    stepInfo,
+    messages,
+    knobs: tape.knobs,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// 7. The figure
+//
+// One column of the matrix per invocation, one row per segment, oldest at the BOTTOM (row 0), so the
+// "not yet created" region reads as a corner: time advances to the right and creation order upwards.
+// The count bars sit directly above the matrix on the same column grid, because the two are the same
+// columns — the counts are what the identity does not always record.
+// ---------------------------------------------------------------------------------------------
+
+const W = 1240;
+const MARGIN = 30;
+const GUTTER = 272; // row labels; must hold "21 trace 332t 95e3cc48#0" plus a margin
+const ROW_H = 24;
+const ROW_GAP = 2;
+const SVG_FONT = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+const COLOUR = {
+  absent: '#ffffff',
+  absentEdge: '#dfe5ee',
+  existed: '#d7e0ee',
+  candidate: '#2f6fd0',
+  root: '#d7e0ee',
+  ring: '#b0483f',
+  bar: '#2f6fd0',
+  barSoft: '#bcd2ee',
+  fallback: '#d08a2f',
+  ink: '#171a1f',
+  muted: '#5c6675',
+  rule: '#e3e8ef',
+  ruleFaint: '#f0f3f7',
+  axis: '#9aa5b4',
+};
+
+function niceStep(range, ticks) {
+  if (range <= 0) return 1;
+  const raw = range / ticks;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  // A count axis wants few, whole ticks: `2.5` printed over a bar chart of record counts reads as a
+  // measurement, and 15 as the top of a 9-high axis wastes half the panel.
+  for (const mult of [1, 1.5, 2, 2.5, 3, 4, 5, 10]) if (raw <= mag * mult) return mag * mult;
+  return mag * 10;
+}
+
+function renderFigure(model, meta) {
+  const { columns, rows } = model;
+  const nCols = columns.length;
+  const nRows = rows.length;
+  const plotLeft = MARGIN + GUTTER;
+  const plotWidth = W - MARGIN - plotLeft;
+  const colPitch = plotWidth / nCols;
+  const cellW = Math.max(24, colPitch - 8);
+  const colX = (i) => plotLeft + i * colPitch + (colPitch - cellW) / 2;
+
+  const maxCount = Math.max(1, ...columns.map((c) => Math.max(c.record.candidates, c.record.selected)));
+  const barStep = niceStep(maxCount * 1.15, 4);
+  const axisMax = Math.max(barStep, Math.ceil((maxCount * 1.15) / barStep) * barStep);
+
+  const body = [];
+  let y = 0;
+  const band = (name, height) => {
+    const at = y;
+    y += height;
+    return { at, height, name };
+  };
+  const bands = [];
+
+  // -- band: header -------------------------------------------------------------------------
+  // Every caption is wrapped to the page before it is measured: a sentence that runs off the right
+  // edge is the failure mode a figure forwarded on its own cannot recover from.
+  const subLines = meta.subtitle.flatMap((line) => wrap(line, 148));
+  const headH = 46 + (subLines.length - 1) * 15 + 18;
+  bands.push(band('header', headH));
+
+  // -- band: selection counts, on the matrix's columns ---------------------------------------
+  const countsNote = wrap(meta.countsNote, 150);
+  const barsTop = 42 + countsNote.length * 15 + 20;
+  const barsH = 150;
+  bands.push(band('counts', barsTop + barsH + 64));
+
+  // -- band: the matrix ----------------------------------------------------------------------
+  const matrixNote = wrap(meta.matrixNote, 150);
+  const matrixTop = 42 + matrixNote.length * 15 + 20;
+  const gridH = nRows * (ROW_H + ROW_GAP) - ROW_GAP;
+  bands.push(band('matrix', matrixTop + gridH + 44));
+
+  // -- band: legend and notes ------------------------------------------------------------------
+  const legendItems = [
+    ['absent', 'not yet created — the recorded creation stamp is later than the invocation'],
+    ['existed', 'existed, and the recorded walk did not return it (not a `recallTree` node)'],
+    ['candidate', 'existed, and the recorded walk returned it (a `recallTree` node)'],
+    ['selected', 'ring — the id is in the delivered payload: the only recorded selected id'],
+    ['passage', 'dashed ring — the payload names a passage parent; the chunk is not recorded'],
+    ['root', 'caret — that walk\'s root (the anchor it started from), which is not a hit'],
+  ];
+  const legendRows = Math.ceil(legendItems.length / 2);
+  const noteLines = meta.notes.flatMap((n) => wrap(n, 150));
+  const legendH = 34 + legendRows * 19 + 18 + noteLines.length * 15 + 16;
+  bands.push(band('legend', legendH));
+
+  // -- band: the per-invocation record ---------------------------------------------------------
+  const tableCols = [
+    { key: 'n', label: '#', w: 34, align: 'end' },
+    { key: 'when', label: 'turn · step', w: 84 },
+    { key: 'clock', label: 'time (local)', w: 92 },
+    { key: 'seq', label: 'seq', w: 48, align: 'end' },
+    { key: 'w', label: 'w', w: 52, align: 'end' },
+    { key: 'cand', label: 'cand', w: 50, align: 'end' },
+    { key: 'sel', label: 'sel', w: 44, align: 'end' },
+    { key: 'depth', label: 'depth', w: 54, align: 'end' },
+    { key: 'pairs', label: 'pairs j/s', w: 84, align: 'end' },
+    { key: 'fallback', label: 'recorded fallback', w: 118 },
+    { key: 'ids', label: 'selected ids (recorded?)', w: 0 },
+  ];
+  const tableW = W - 2 * MARGIN;
+  const fixedW = tableCols.reduce((n, c) => n + c.w, 0);
+  tableCols[tableCols.length - 1].w = tableW - fixedW;
+  const tableNote = wrap(meta.tableNote, 150);
+  const tableBand = 40 + 22 + nCols * 20 + 14 + tableNote.length * 15;
+  bands.push(band('record', tableBand));
+  const sourceLines = meta.sources.flatMap((line) => wrap(line, 150));
+  const footH = 24 + sourceLines.length * 15 + 10;
+  bands.push(band('sources', footH));
+  const height = y;
+
+  // -- header --------------------------------------------------------------------------------
+  body.push(`<g class="band" data-band="header" transform="translate(0,${bands[0].at})">`);
+  body.push(`  <text x="${MARGIN}" y="34" class="doc-title">${escapeXml(meta.title)}</text>`);
+  subLines.forEach((line, i) => {
+    body.push(`  <text x="${MARGIN}" y="${58 + i * 15}" class="doc-sub">${escapeXml(line)}</text>`);
+  });
+  body.push('</g>');
+
+  // -- counts --------------------------------------------------------------------------------
+  const { at: cAt } = bands[1];
+  const baseY = barsTop + barsH;
+  const yOf = (v) => baseY - (v / axisMax) * barsH;
+  body.push(`<g class="band" data-band="counts" transform="translate(0,${cAt})">`);
+  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">What each invocation returned and selected</text>`);
+  countsNote.forEach((line, i) => {
+    body.push(`  <text x="${MARGIN}" y="${42 + i * 15}" class="panel-note">${escapeXml(line)}</text>`);
+  });
+  for (const t of Array.from({ length: axisMax / barStep + 1 }, (_, i) => i * barStep)) {
+    const yy = yOf(t);
+    body.push(`  <line x1="${plotLeft}" y1="${yy.toFixed(1)}" x2="${(plotLeft + plotWidth).toFixed(1)}" y2="${yy.toFixed(1)}" class="grid"/>`);
+    body.push(`  <text x="${plotLeft - 10}" y="${(yy + 4).toFixed(1)}" class="tick" text-anchor="end">${t}</text>`);
+  }
+  body.push(`  <line x1="${plotLeft}" y1="${baseY}" x2="${(plotLeft + plotWidth).toFixed(1)}" y2="${baseY}" class="axis"/>`);
+  body.push(`  <text x="${plotLeft - 10}" y="${(baseY + 15).toFixed(1)}" class="axis-label" text-anchor="end">recall hits / selected</text>`);
+  const barW = Math.min(30, (cellW - 10) / 2);
+  columns.forEach((column, i) => {
+    const groupCx = plotLeft + i * colPitch + colPitch / 2;
+    const x0 = groupCx - barW - 3;
+    const x1 = groupCx + 3;
+    const candH = Math.max(column.record.candidates > 0 ? 1.5 : 0, (column.record.candidates / axisMax) * barsH);
+    const selH = Math.max(column.record.selected > 0 ? 1.5 : 0, (column.record.selected / axisMax) * barsH);
+    body.push(`  <rect class="bar" data-kind="candidates" data-col="${i + 1}" x="${x0.toFixed(1)}" y="${(baseY - candH).toFixed(1)}" width="${barW.toFixed(1)}" height="${candH.toFixed(1)}" fill="${COLOUR.barSoft}"/>`);
+    body.push(`  <rect class="bar" data-kind="selected" data-col="${i + 1}" x="${x1.toFixed(1)}" y="${(baseY - selH).toFixed(1)}" width="${barW.toFixed(1)}" height="${selH.toFixed(1)}" fill="${COLOUR.bar}"/>`);
+    body.push(`  <text x="${(x0 + barW / 2).toFixed(1)}" y="${(baseY - candH - 5).toFixed(1)}" class="bar-value" text-anchor="middle">${column.record.candidates}</text>`);
+    body.push(`  <text x="${(x1 + barW / 2).toFixed(1)}" y="${(baseY - selH - 5).toFixed(1)}" class="bar-value" text-anchor="middle">${column.record.selected}</text>`);
+    // The two badges are the honest half of this chart: whether the selected ids exist for this
+    // invocation, and whether the recorded selection came from the recency window rather than a walk.
+    if (column.fallback !== '') {
+      body.push(`  <text x="${(groupCx).toFixed(1)}" y="${(baseY + 14).toFixed(1)}" class="badge-fallback" text-anchor="middle">recency-window</text>`);
+    }
+    const idsLabel = column.selected === null
+      ? (column.record.selected === 0 ? 'ids: none selected' : 'ids: not recorded')
+      : `ids: recorded (${column.record.selected})`;
+    body.push(`  <text x="${(groupCx).toFixed(1)}" y="${(baseY + 30).toFixed(1)}" class="badge-${column.selected === null ? 'no' : 'yes'}" text-anchor="middle">${escapeXml(idsLabel)}</text>`);
+    body.push(`  <text x="${(groupCx).toFixed(1)}" y="${(baseY + 48).toFixed(1)}" class="col-label" text-anchor="middle">#${column.index} · T${column.place.turn}·S${column.place.step}</text>`);
+  });
+  body.push('</g>');
+
+  // -- matrix --------------------------------------------------------------------------------
+  const { at: mAt } = bands[2];
+  body.push(`<g class="band" data-band="matrix" transform="translate(0,${mAt})">`);
+  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">The matrix — ${nRows} segments (rows, oldest at the bottom) × ${nCols} recall invocations (columns)</text>`);
+  matrixNote.forEach((line, i) => {
+    body.push(`  <text x="${MARGIN}" y="${42 + i * 15}" class="panel-note">${escapeXml(line)}</text>`);
+  });
+  body.push(`  <line x1="${MARGIN}" y1="${matrixTop - 8}" x2="${W - MARGIN}" y2="${matrixTop - 8}" class="axis"/>`);
+  const rowY = (row) => matrixTop + (nRows - 1 - row) * (ROW_H + ROW_GAP);
+  rows.forEach((row, r) => {
+    const yy = rowY(r);
+    body.push(`  <line x1="${MARGIN}" y1="${(yy + ROW_H + 1).toFixed(1)}" x2="${W - MARGIN}" y2="${(yy + ROW_H + 1).toFixed(1)}" class="grid-faint"/>`);
+    body.push(`  <text x="${plotLeft - 12}" y="${(yy + ROW_H / 2 + 4).toFixed(1)}" class="row-label" text-anchor="end">`
+      + `${row.row} ${escapeXml(row.segment.kind)} ${row.segment.tokens}t ${escapeXml(rowLabelId(row.segment.id))}`
+      + `${row.segment.chunkOf ? ` +${escapeXml(shortId(row.segment.chunkOf, 6))}` : ''}</text>`);
+    row.cells.forEach((cell, c) => {
+      const x = colX(c);
+      const stroke = cell.state === 'absent' ? COLOUR.absentEdge : 'none';
+      const fill = cell.state === 'absent' ? COLOUR.absent : cell.state === 'candidate' ? COLOUR.candidate : COLOUR.existed;
+      body.push(`  <rect class="cell" data-row="${row.row}" data-col="${c + 1}" data-state="${cell.state}"`
+        + `${cell.overlay ? ` data-overlay="${cell.overlay}"` : ''} x="${x.toFixed(1)}" y="${yy.toFixed(1)}"`
+        + ` width="${cellW.toFixed(1)}" height="${ROW_H}" fill="${fill}"${stroke === 'none' ? '' : ` stroke="${stroke}"`}/>`);
+      if (cell.state === 'candidate') {
+        body.push(`  <text x="${(x + cellW / 2).toFixed(1)}" y="${(yy + ROW_H / 2 + 3).toFixed(1)}" class="cell-mark" text-anchor="middle">hit</text>`);
+      }
+      if (cell.state === 'root') {
+        body.push(`  <path d="M ${(x + 6).toFixed(1)} ${(yy + ROW_H - 6).toFixed(1)} l 4.5 -8 l 4.5 8 z" fill="${COLOUR.ink}" class="root-mark"/>`);
+      }
+      if (cell.overlay) {
+        const dashed = cell.overlay === 'passage' ? ' stroke-dasharray="4 3"' : '';
+        body.push(`  <rect class="ring" data-row="${row.row}" data-col="${c + 1}" data-overlay="${cell.overlay}"`
+          + ` x="${(x + 1.5).toFixed(1)}" y="${(yy + 1.5).toFixed(1)}" width="${(cellW - 3).toFixed(1)}"`
+          + ` height="${ROW_H - 3}" fill="none" stroke="${COLOUR.ring}" stroke-width="2.5"${dashed}/>`);
+      }
+    });
+  });
+  body.push(`  <line x1="${MARGIN}" y1="${(matrixTop + gridH + 1).toFixed(1)}" x2="${W - MARGIN}" y2="${(matrixTop + gridH + 1).toFixed(1)}" class="axis"/>`);
+  body.push(`  <text x="${MARGIN}" y="${(matrixTop + gridH + 22).toFixed(1)}" class="panel-note">row 0 is the oldest segment of ${nRows}; every row above it is one segment later in the graph's append order.</text>`);
+  body.push('</g>');
+
+  // -- legend ---------------------------------------------------------------------------------
+  const { at: lAt } = bands[3];
+  body.push(`<g class="band" data-band="legend" transform="translate(0,${lAt})">`);
+  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">Legend — what each cell state is read from</text>`);
+  legendItems.forEach(([kind, text], i) => {
+    const col = i % 2;
+    const rowI = Math.floor(i / 2);
+    const lx = MARGIN + col * 600;
+    const ly = 48 + rowI * 19;
+    if (kind === 'candidate') {
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.candidate}"/>`);
+      body.push(`  <text x="${lx + 11}" y="${ly - 1}" class="cell-mark" text-anchor="middle">hit</text>`);
+    } else if (kind === 'absent') {
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.absent}" stroke="${COLOUR.absentEdge}"/>`);
+    } else if (kind === 'existed') {
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.existed}"/>`);
+    } else if (kind === 'selected') {
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.existed}"/>`);
+      body.push(`  <rect x="${lx + 1.5}" y="${ly - 10.5}" width="23" height="11" fill="none" stroke="${COLOUR.ring}" stroke-width="2.5"/>`);
+    } else if (kind === 'passage') {
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.existed}"/>`);
+      body.push(`  <rect x="${lx + 1.5}" y="${ly - 10.5}" width="23" height="11" fill="none" stroke="${COLOUR.ring}" stroke-width="2.5" stroke-dasharray="4 3"/>`);
+    } else {
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.root}"/>`);
+      body.push(`  <path d="M ${lx + 6} ${ly - 2} l 4.5 -8 l 4.5 8 z" fill="${COLOUR.ink}"/>`);
+    }
+    body.push(`  <text x="${lx + 36}" y="${ly}" class="legend">${escapeXml(text)}</text>`);
+  });
+  noteLines.forEach((line, i) => {
+    body.push(`  <text x="${MARGIN}" y="${(48 + legendRows * 19 + 14 + i * 15).toFixed(1)}" class="panel-note">${escapeXml(line)}</text>`);
+  });
+  body.push('</g>');
+
+  // -- the per-invocation record ---------------------------------------------------------------
+  const { at: tAt } = bands[4];
+  body.push(`<g class="band" data-band="record" transform="translate(0,${tAt})">`);
+  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">Per-invocation record (control plane and tape, as recorded)</text>`);
+  let tx = MARGIN;
+  const headerYs = 52;
+  for (const col of tableCols) {
+    body.push(`  <text x="${col.align === 'end' ? (tx + col.w - 8).toFixed(1) : tx.toFixed(1)}" y="${headerYs}" class="table-head"${col.align === 'end' ? ' text-anchor="end"' : ''}>${escapeXml(col.label)}</text>`);
+    tx += col.w;
+  }
+  columns.forEach((column, i) => {
+    const ty = headerYs + 20 + i * 20;
+    const a = column.record;
+    const cells = {
+      n: String(column.index),
+      when: `T${column.place.turn} · S${column.place.step}`,
+      clock: clock(a.ts),
+      seq: String(a.seq),
+      w: String(a.windowN) + (a.windowN !== model.knobs.w ? ' *' : ''),
+      cand: String(a.candidates),
+      sel: String(a.selected),
+      depth: String(a.bfsDepth),
+      pairs: `${a.judgedPairs ?? '?'}/${a.scoredPairs ?? '?'}`,
+      fallback: column.fallback === '' ? '—' : column.fallback,
+      ids: column.selected === null
+        ? (a.selected === 0 ? 'none selected (count 0)' : `not recorded — count only (${a.selected})`)
+        : column.selected.map((e) => (e.passage ? `${shortId(e.id)}→passage` : shortId(e.id))).join(', '),
+    };
+    tx = MARGIN;
+    for (const col of tableCols) {
+      const value = cells[col.key] ?? '';
+      const cls = col.key === 'ids'
+        ? (column.selected === null ? (a.selected === 0 ? 'table-cell' : 'table-cell-warn') : 'table-cell-ok')
+        : 'table-cell';
+      body.push(`  <text x="${col.align === 'end' ? (tx + col.w - 8).toFixed(1) : tx.toFixed(1)}" y="${ty}" class="${cls}"${col.align === 'end' ? ' text-anchor="end"' : ''}>${escapeXml(value)}</text>`);
+      tx += col.w;
+    }
+  });
+  tableNote.forEach((line, i) => {
+    body.push(`  <text x="${MARGIN}" y="${(headerYs + 20 + nCols * 20 + 14 + i * 15).toFixed(1)}" class="panel-note">${escapeXml(line)}</text>`);
+  });
+  body.push('</g>');
+
+  // -- sources ---------------------------------------------------------------------------------
+  const { at: sAt } = bands[5];
+  body.push(`<g class="band" data-band="sources" transform="translate(0,${sAt})">`);
+  body.push(`  <line x1="${MARGIN}" y1="0" x2="${W - MARGIN}" y2="0" class="grid"/>`);
+  sourceLines.forEach((line, i) => {
+    body.push(`  <text x="${MARGIN}" y="${16 + i * 15}" class="source">${escapeXml(line)}</text>`);
+  });
+  body.push('</g>');
+
+  const style = `<style>
+    text { font-family: ${SVG_FONT}; }
+    .doc-title { fill: ${COLOUR.ink}; font-size: 19px; font-weight: 600; }
+    .doc-sub { fill: ${COLOUR.muted}; font-size: 12px; }
+    .panel-title { fill: ${COLOUR.ink}; font-size: 14.5px; font-weight: 600; }
+    .panel-note { fill: ${COLOUR.muted}; font-size: 11px; }
+    .legend { fill: #3b4553; font-size: 11px; }
+    .tick { fill: ${COLOUR.muted}; font-size: 10.5px; }
+    .axis-label { fill: ${COLOUR.muted}; font-size: 10.5px; }
+    .bar-value { fill: ${COLOUR.ink}; font-size: 10.5px; }
+    .cell-mark { fill: #ffffff; font-size: 9.5px; }
+    .row-label { fill: ${COLOUR.ink}; font-size: 11px; }
+    .col-label { fill: ${COLOUR.ink}; font-size: 11.5px; font-weight: 600; }
+    .badge-fallback { fill: ${COLOUR.fallback}; font-size: 9.5px; }
+    .badge-yes { fill: #2f6fd0; font-size: 9.5px; }
+    .badge-no { fill: ${COLOUR.ring}; font-size: 9.5px; }
+    .table-head { fill: ${COLOUR.muted}; font-size: 10.5px; }
+    .table-cell { fill: ${COLOUR.ink}; font-size: 11px; }
+    .table-cell-ok { fill: #21618c; font-size: 11px; }
+    .table-cell-warn { fill: ${COLOUR.ring}; font-size: 11px; }
+    .source { fill: ${COLOUR.muted}; font-size: 10.5px; }
+    .grid { stroke: ${COLOUR.rule}; stroke-width: 1; }
+    .grid-faint { stroke: ${COLOUR.ruleFaint}; stroke-width: 1; }
+    .axis { stroke: ${COLOUR.axis}; stroke-width: 1.2; }
+  </style>`;
+  const banner = '<!-- generated by scripts/s1-activity.mjs (S1CAP recall activity); self-contained, no script, no external font -->';
+  return `${banner}
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" data-chart="s1-activity" role="img" aria-label="${escapeXml(meta.title)}">
+  <title>${escapeXml(meta.title)}</title>
+  <rect x="0" y="0" width="${W}" height="${height}" fill="#ffffff"/>
+  ${style}
+${body.join('\n')}
+</svg>
+`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 8. The summary line
+//
+// One line, so a caller can sanity-check the figure without opening it: the dimensions, how many cells
+// of each state, and — the number that decides how much of the picture is missing — how many selected
+// segments have a recorded identity and how many are a count with no id behind it.
+// ---------------------------------------------------------------------------------------------
+
+function summaryLine(model, meta) {
+  const { counts, columns } = model;
+  const cells = counts.absent + counts.candidate + counts.root + counts.existed;
+  return `s1-activity: ${meta.cell} @ ${meta.runName} — ${columns.length} invocations x ${model.rows.length} segments `
+    + `(${cells} cells): not-created ${counts.absent}, candidate ${counts.candidate}, walk-root ${counts.root}, `
+    + `existed-not-returned ${counts.existed} · selected ${model.selectedTotal} `
+    + `(ids recorded ${model.identityRows} on ${model.identityColumns}/${columns.length} invocations`
+    + `${model.passageColumns > 0 ? ` + ${counts.selectedPassage} passage-only row(s)` : ''}, count-only ${model.countOnly}) `
+    + `· knobs w=${model.knobs.w} r=${model.knobs.r} d=${model.knobs.d}`
+    + `${model.knobs.wait === undefined ? '' : ` wait=${model.knobs.wait}`}`
+    + ` · ${model.carryCells} same-step carry cell(s)`;
+}
+
+/**
+ * `--explain`: the derivation behind each column, in words. The figure states what it read; this states
+ * where each state came from, so a reader can check the figure against the run without re-deriving it.
+ */
+function explainLines(model) {
+  const lines = [];
+  for (const column of model.columns) {
+    const a = column.record;
+    const carried = column.carryIds.length === 0
+      ? 'none'
+      : column.carryIds.map((id) => {
+        const s = model.snapshot.byId.get(id);
+        return `${id} (+${s.ts - a.ts} ms)`;
+      }).join(', ');
+    lines.push(`invocation #${column.index} · turn ${column.place.turn} step ${column.place.step} · ts ${a.ts} (${clock(a.ts)}) `
+      + `· seq ${a.seq} · windowN ${a.windowN} · candidates ${a.candidates} · selected ${a.selected} · bfsDepth ${a.bfsDepth}`
+      + `${column.fallback === '' ? '' : ` · fallback ${column.fallback}`}`);
+    lines.push(`  exists: ${column.existed.size} of ${model.rows.length} segments `
+      + `(${column.strictIds.size} by creation stamp, carry: ${carried})`);    lines.push(`  walk: ${column.root === null ? 'no tree recorded (recall returned no hit)' : `root ${column.root}`}`
+      + `${column.candidates.length === 0 ? '' : `, hits ${column.candidates.join(', ')}`}`);
+    lines.push(`  selected: ${column.selected === null
+      ? (a.selected === 0 ? 'none (recorded count 0)' : `count only (${a.selected}), no id recorded`)
+      : `${column.selected.map((e) => (e.passage ? `${e.id} → passage of ${e.rows.length} chunk(s)` : e.id)).join(', ')} `
+        + `from the delivered payload ${column.payloadId}`}`);
+  }
+  if (model.unsegmentedCarry.length > 0) {
+    lines.push(`carried messages that produced no segment (the adapter could not read their shape, so they have no row): `
+      + `${model.unsegmentedCarry.map((u) => `${u.id} at invocation #${u.at + 1}`).join(', ')}`);
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 9. main
+// ---------------------------------------------------------------------------------------------
+
+function usage() {
+  return [
+    'usage: node scripts/s1-activity.mjs --run <run-dir> --cell <name> [--out <run-dir>/report/s1-activity.svg] [--explain]',
+    '       node scripts/s1-activity.mjs --self-test',
+  ].join('\n');
+}
+
+function run(options) {
+  const runDir = resolve(options.run);
+  if (!existsSync(runDir)) fail(`no such run directory: ${runDir}`);
+  const control = loadControl(runDir, options.cell);
+  const snapshot = loadSnapshot(runDir, options.cell, control.sessionIds);
+  const tape = loadTape(runDir, options.cell);
+  const stepInfo = loadStepBoundaries(runDir, options.cell, control.sessionIds);
+  const messages = loadMessageTexts(runDir, options.cell, stepInfo);
+  const model = derive({ control, snapshot, tape, stepInfo, messages });
+  const rel = (p) => relative(runDir, p).split(sep).join('/');
+  // The two clauses that only sometimes apply are built away from the note array: a nested template
+  // inside a conditional inside a template is where a caption stops being readable in the source too.
+  const passageClause = model.counts.selectedPassage > 0
+    ? `, plus ${model.counts.selectedPassage} row(s) whose delivered provenance names a passage parent rather than `
+      + 'the chunk that was selected'
+    : '';
+  const unsegmentedClause = model.unsegmentedCarry.length > 0
+    ? ` ${model.unsegmentedCarry.length} message(s) a step carried produced no segment at all (the adapter could not read `
+      + 'their shape), so they have no row here.'
+    : '';
+  const runName = basename(runDir);
+  const displayName = runName.startsWith('round-') ? runName.slice('round-'.length) : runName;
+  const span = model.columns.length > 0
+    ? `${clock(model.columns[0].record.ts)} – ${clock(model.columns[model.columns.length - 1].record.ts)}`
+    : '-';
+  const knobs = `w=${model.knobs.w} r=${model.knobs.r} d=${model.knobs.d}`
+    + `${model.knobs.wait === undefined ? '' : ` wait=${model.knobs.wait}ms`}`;
+  const meta = {
+    runName,
+    cell: options.cell,
+    title: `S1CAP recall activity — cell ${options.cell}, round ${displayName}`,
+    subtitle: [
+      `${model.columns.length} recall invocations × ${model.rows.length} segments (the cell's final segment count), `
+        + `oldest segment at the bottom · records span ${span}`,
+      `recall knobs, read from the tape's wiring record: ${knobs}`
+        + ` · the window each invocation itself ran with is its assembly record's windowN`
+        + `${model.columns.every((c) => c.record.windowN === model.knobs.w) ? ' (all equal to w)' : ' (marked * in the table where it differs)'}`,
+      `cell states: not yet created ${model.counts.absent} · recall candidate ${model.counts.candidate} · `
+        + `walk root ${model.counts.root} · existed but not returned ${model.counts.existed}`
+        + ` · selected ids recorded ${model.identityRows} of ${model.selectedTotal}`,
+    ],
+    countsNote: 'left bar: assembly.candidates (the walk\'s hits) · right bar: assembly.selected (how many were taken). '
+      + 'Both are recorded counts; the ring below is the only recorded per-segment identity of a selection.',
+    matrixNote: 'one cell per (segment, invocation). Filled = the recorded walk returned that segment; dim = it existed and '
+      + 'the walk did not return it; blank = it did not exist yet. A ring marks a delivered selection, which is where a '
+      + 'selected id is written down. Row labels: `+parent` marks one chunk of a longer event, so `id#n` is the chunk.',
+    notes: [
+      `The selected identity is recorded for ${model.identityColumns} of ${model.columns.length} invocations. assembly.selected `
+        + 'is a count: the control plane stores no per-segment id list for it, and recallTree is the candidate walk rather '
+        + 'than the ranking. A ring is drawn only where a delivered payload names the segment (its provenance line, keyed by '
+        + 'context_delivery.payloadId); elsewhere the recorded count stands alone in the bar, the table below, and this note.',
+      `Of ${model.selectedTotal} selected segments, ${model.identityRows} have a recorded id and ${model.countOnly} are a count `
+        + `with no id${passageClause}. Nothing here infers the missing ones.`,
+      `"Existed but not returned" is not "judged irrelevant": the walk only follows edges at or above r=${model.knobs.r}, from the `
+        + `anchor it chose, and a pair inside the window that was never scored has no edge to follow. ${model.carryCells} cell(s) `
+        + 'exist by their own step\'s recorded payload although their creation stamp is a few milliseconds later than the '
+        + `invocation (the graph write follows the assembly) — counted, not silently tolerated.${unsegmentedClause}`,
+    ],
+    tableNote: 'seq is the plugin\'s own running message counter, not a step number; the turn/step column is attributed by time '
+      + '(the pre-step hook runs immediately before its step/start event). "ids: not recorded" means the run holds a count and no id list.',
+    sources: [
+      `control plane: ${elidePath(rel(control.path))}`,
+      `association graph snapshot: home/${options.cell}/.s1cap/rg/${snapshot.file} (session ${snapshot.doc.sessionId ?? '?'})`,
+      `tape (wiring + step payloads): ${elidePath(rel(tape.path))}`
+        + ` — ${tape.wiringCount} wiring record(s)${tape.wiringCount > 1 ? ', all stating the same knobs (the cell restarted)' : ''}, `
+        + `${tape.payloads.length} step payload record(s)`,
+      `session store (turn/step attribution): ${elidePath(rel(stepInfo.path))}`,
+      `delivered payload text: ${messages.sources.map((p) => elidePath(rel(p))).join(' + ')}`,
+      'self-contained SVG: no script, no external font, no network — the figure stands alone.',
+    ],
+  };
+  const svg = renderFigure(model, meta);
+  return { model, meta, svg, line: summaryLine(model, meta) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// 10. --self-test
+//
+// A synthetic run is built under the OS temp directory — a real control.jsonl, a real association-graph
+// snapshot, a real tape, a real multi-frame zstd session store and a real delivered payload — and the
+// arithmetic is asserted on what the tool derives from it. The three assertions the tool owes its
+// caller are here: the state counts, that nothing is selected before it exists, and that the row count
+// is the final segment count. The defect cases are asserted too, because a rule that only ever passes
+// is indistinguishable from no rule.
+// ---------------------------------------------------------------------------------------------
+
+const FIXTURE_SESSION = 'session-fixture-0001';
+
+/** Frames of a multi-frame store, one zstd frame per group of lines (the shape a live store has). */
+function zstdFrames(text, chunkLines) {
+  const lines = text.split('\n').filter((l) => l !== '');
+  const frames = [];
+  for (let i = 0; i < lines.length; i += chunkLines) {
+    frames.push(zstdCompressSync(Buffer.from(lines.slice(i, i + chunkLines).join('\n') + '\n', 'utf8')));
+  }
+  return Buffer.concat(frames);
+}
+
+const FIXTURE_SEGMENTS = [
+  { id: 'u1', kind: 'user', seq: 8, ts: 1010, tokens: 191, text: 'first question' },
+  { id: 'u2', kind: 'user', seq: 9, ts: 1100, tokens: 98, text: 'runtime context' },
+  { id: 't1', kind: 'trace', seq: 18, ts: 1500, tokens: 217, text: 'reasoning' },
+  { id: 'P#0', kind: 'trace', seq: 20, ts: 1600, tokens: 506, chunkOf: 'P', text: 'long answer, first chunk' },
+  { id: 'P#1', kind: 'trace', seq: 20, ts: 1600, tokens: 152, chunkOf: 'P', text: 'long answer, second chunk' },
+  { id: 'r1', kind: 'toolResult', seq: 24, ts: 2500, tokens: 17, text: 'tool output' },
+  { id: 'r2', kind: 'toolResult', seq: 31, ts: 3050, tokens: 12, text: 'later tool output' },
+];
+
+/**
+ * The fixture's five invocations, one per step: a walk that found nothing (fallback), a walk whose
+ * selection is recorded in a delivered payload, a walk that selected a chunked event (recorded only
+ * at passage granularity), a walk selected again from a delivered payload, and a fallback selection
+ * whose ids the run never wrote down — the case the figure must show as a count and not as a state.
+ * `defects` each break exactly one recorded relation, so the tool has to fail rather than draw around it.
+ */
+function fixtureInvocations(defects = {}) {
+  const inv = [
+    { ts: 1000, seq: 0, windowN: 1024, candidates: 0, selected: 0, bfsDepth: 0, recallTree: {}, fallback: 'recency-window' },
+    { ts: 2000, seq: 5, windowN: 1024, candidates: 2, selected: 1, bfsDepth: 1, recallTree: { u1: { u2: {}, t1: {} } } },
+    { ts: 3000, seq: 9, windowN: 1024, candidates: 1, selected: 1, bfsDepth: 1, recallTree: { t1: { 'P#0': {} } } },
+    { ts: 4000, seq: 12, windowN: 2048, candidates: 2, selected: 2, bfsDepth: 1, recallTree: { r1: { r2: {}, t1: {} } } },
+    { ts: 5000, seq: 15, windowN: 1024, candidates: 0, selected: 2, bfsDepth: 0, recallTree: {}, fallback: 'recency-window' },
+  ];
+  if (defects.candidateCount) inv[1].candidates = 3;
+  if (defects.selectedCount) inv[3].selected = 3;
+  return inv.map((a, i) => ({
+    windowN: a.windowN,
+    scoredPairs: i * 7,
+    judgedPairs: i * 7,
+    type: 'assembly',
+    schema: 1,
+    ts: a.ts,
+    sessionId: FIXTURE_SESSION,
+    seq: a.seq,
+    candidates: a.candidates,
+    selected: a.selected,
+    bfsDepth: a.bfsDepth,
+    budgetUsed: 920,
+    budgetTotal: 118800,
+    blocks: { pinned: 700, stateProxy: 29, recalled: 0, tail: 0, anchor: 191 },
+    prefixTokensStable: 700,
+    layoutOrder: ['pinned', 'stateProxy', 'anchor', 'recalled', 'tail'],
+    xFirst: true,
+    layoutStableTokens: 920,
+    cutAfterBlock: 'anchor',
+    tokensAfterCut: 0,
+    recallTree: a.recallTree,
+    ...(a.fallback === undefined ? {} : { fallback: a.fallback }),
+  }));
+}
+
+/**
+ * Deliveries, and the prose payload the harness logged for each. The provenance line is written by
+ * `renderSegment` as `## earlier <kind> turn, quoted verbatim · <chunkOf ?? id>`, which is what makes
+ * a chunked event's selection readable only at passage granularity.
+ */
+function fixtureDeliveries(defects = {}) {
+  const out = [
+    { ts: 2005, payloadId: 's1cap-aaaa1111', names: ['u2'], blocks: 1 },
+    { ts: 3005, payloadId: 's1cap-bbbb2222', names: defects.selectNotYetExisting ? ['r2'] : ['P'], blocks: 1 },
+    { ts: 4005, payloadId: 's1cap-cccc3333', names: ['r2', 't1'], blocks: 2 },
+  ];
+  return out.map((d) => ({
+    delivery: {
+      type: 'context_delivery',
+      schema: 1,
+      ts: d.ts,
+      sessionId: FIXTURE_SESSION,
+      cell: 'C9',
+      delivered: true,
+      reason: `inserted one message carrying ${d.blocks} block(s): recalled`,
+      messagesBefore: 1,
+      messagesAfter: 2,
+      kept: 1,
+      dropped: 0,
+      inserted: 1,
+      blocks: Array.from({ length: d.blocks }, () => 'recalled'),
+      payloadId: d.payloadId,
+      order: ['pinned', 'stateProxy', 'anchor', 'recalled', 'tail'],
+    },
+    text: d.names.map((id) => `## earlier trace turn, quoted verbatim · ${id}\n…${id} body…`).join('\n\n'),
+  }));
+}
+
+function buildFixture(dir, defects = {}) {
+  const runDir = join(dir, 'round-fixture');
+  const cellDir = join(runDir, 'evidence', 'C9');
+  const stateDir = join(runDir, 'home', 'C9', '.s1cap');
+  const storeDir = join(runDir, 'home', 'C9', 'sessions', '--ws--', FIXTURE_SESSION);
+  mkdirSync(cellDir, { recursive: true });
+  mkdirSync(join(stateDir, 'rg'), { recursive: true });
+  mkdirSync(storeDir, { recursive: true });
+
+  const controlLines = [];
+  for (const a of fixtureInvocations(defects)) controlLines.push(JSON.stringify(a));
+  if (defects.noDelivery) {
+    // nothing delivered at all
+  } else {
+    for (const d of fixtureDeliveries(defects)) controlLines.push(JSON.stringify(d.delivery));
+  }
+  const controlPath = join(cellDir, 'control.jsonl');
+  writeFileSync(controlPath, controlLines.join('\n') + '\n', 'utf8');
+
+  const segments = defects.dropSegment
+    ? FIXTURE_SEGMENTS.filter((s) => s.id !== defects.dropSegment)
+    : FIXTURE_SEGMENTS;
+  const snapshot = {
+    schema: 2,
+    order: segments.map((s) => s.id),
+    segments: segments.map((s) => ({ sessionId: FIXTURE_SESSION, role: 'user', taskTag: 'user', ...s })),
+    edges: [],
+    scores: [],
+    scored: segments.length,
+    scoredPairs: 21,
+    judgedPairs: 21,
+    sessionId: defects.wrongSnapshotSession ? 'session-other' : FIXTURE_SESSION,
+  };
+  writeFileSync(join(stateDir, 'rg', `rg-${FIXTURE_SESSION}-deadbeef.json`), JSON.stringify(snapshot), 'utf8');
+
+  const tapeLines = [];
+  const wiring = {
+    schema: 0,
+    kind: 'wiring',
+    s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' },
+    relevance: true,
+    planGate: true,
+    xFirst: true,
+    recall: { d: 2, r: 0.55, w: 1024, wait: 10000 },
+    tas: { on: true, tMaxChars: 8000, updatePolicy: 'perTask' },
+  };
+  if (!defects.noWiring) {
+    tapeLines.push(JSON.stringify(wiring));
+    // A round that restarted states its switches again; identical records are one set of knobs.
+    if (defects.duplicateWiring) tapeLines.push(JSON.stringify(wiring));
+    if (defects.disagreeingWiring) {
+      tapeLines.push(JSON.stringify({ ...wiring, recall: { ...wiring.recall, r: 0.9 } }));
+    }
+  }
+  // One payload record per observed step, in step order: the same-step existence correction. The step
+  // numbers restart with every turn, which is why they are read from the fixture's own step list
+  // rather than derived from the index.
+  const steps = [[1, 1, 1005], [1, 2, 2005], [2, 1, 3005], [2, 2, 4005], [2, 3, 5005]];
+  const carried = [['u1'], [], [], [], []];
+  carried.forEach((ids, i) => {
+    if (defects.missingPayloadForStep === steps[i][1] && i > 0) return;
+    tapeLines.push(JSON.stringify({
+      schema: 1,
+      sessionId: i === 0 ? 'unassigned' : FIXTURE_SESSION,
+      step: steps[i][1],
+      systemPrompt: 'sys',
+      messages: ids.map((id) => ({ id, role: 'user' })),
+    }));
+  });
+  writeFileSync(join(stateDir, 'tape.jsonl'), tapeLines.join('\n') + '\n', 'utf8');
+
+  const storeLines = [];
+  storeLines.push(JSON.stringify({ type: 'session', seq: 1, time: 900, data: { sessionId: FIXTURE_SESSION } }));
+  for (const [turn, step, time] of steps) {
+    storeLines.push(JSON.stringify({ type: 'turn/start', seq: 2, time: time - 40, data: { turn } }));
+    storeLines.push(JSON.stringify({ type: 'step/start', seq: 3, time, data: { turn, step } }));
+  }
+  for (const d of fixtureDeliveries(defects)) {
+    storeLines.push(JSON.stringify({
+      type: 'user/message',
+      seq: 40,
+      time: d.delivery.ts,
+      data: { id: d.delivery.payloadId, role: 'user', source: { kind: 'system-prompt', form: 's1cap' }, content: [{ type: 'text', text: d.text }] },
+    }));
+  }
+  writeFileSync(join(storeDir, 'session.v4.jsonl.zstd'), zstdFrames(storeLines.join('\n'), 3));
+
+  // The evidence copy of the session stream: the same delivered texts, plus the segments themselves.
+  const stream = segments.map((s) => JSON.stringify({ ...s, sessionId: FIXTURE_SESSION }));
+  if (!defects.noDelivery) {
+    for (const d of fixtureDeliveries(defects)) {
+      stream.push(JSON.stringify({ id: d.delivery.payloadId, sessionId: FIXTURE_SESSION, seq: 40, kind: 'user', role: 'user', taskTag: 'system-prompt', ts: d.delivery.ts, text: d.text }));
+    }
+  }
+  writeFileSync(join(cellDir, 'session.jsonl'), stream.join('\n') + '\n', 'utf8');
+  return runDir;
+}
+
+function selfTest() {
+  const assertEqual = (actual, expected, what) => {
+    if (actual !== expected) {
+      throw new Error(`self-test FAILED: ${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+  };
+  const assertTrue = (cond, what) => {
+    if (!cond) throw new Error(`self-test FAILED: ${what}`);
+  };
+  const assertFails = (fn, match, what) => {
+    try {
+      fn();
+    } catch (err) {
+      if (!err.isActivityError) throw new Error(`self-test FAILED: ${what}: threw a non-activity error: ${String(err)}`);
+      if (match && !String(err.message).includes(match)) {
+        throw new Error(`self-test FAILED: ${what}: message ${JSON.stringify(err.message)} does not mention ${JSON.stringify(match)}`);
+      }
+      return String(err.message);
+    }
+    throw new Error(`self-test FAILED: ${what}: no error was raised`);
+  };
+  const say = (what) => process.stdout.write(`  ok   ${what}\n`);
+
+  const tmp = mkdtempSync(join(tmpdir(), 's1-activity-'));
+  try {
+    const runDir = buildFixture(tmp);
+    const out = run({ run: runDir, cell: 'C9' });
+    const { model } = out;
+
+    // --- the three assertions this tool owes its caller -------------------------------------
+    // (1) the state counts, from the fixture's own arithmetic
+    assertEqual(model.columns.length, 5, 'invocations');
+    assertEqual(model.rows.length, FIXTURE_SEGMENTS.length, 'row count is the final segment count');
+    assertEqual(model.counts.absent, 9, 'not-yet-created cells');
+    assertEqual(model.counts.candidate, 5, 'candidate cells');
+    assertEqual(model.counts.root, 3, 'walk-root cells');
+    assertEqual(model.counts.existed, 18, 'existed-but-not-returned cells');
+    assertEqual(model.counts.absent + model.counts.candidate + model.counts.root + model.counts.existed,
+      model.columns.length * model.rows.length, 'the four states partition the matrix');
+    say('state counts: absent 9, candidate 5, walk-root 3, existed 18 over 5x7 cells');
+
+    // (2) selection identity, and its absence, are both read rather than assumed
+    assertEqual(model.identityColumns, 3, 'invocations whose delivered payload records the selected ids');
+    assertEqual(model.identityRows, 3, 'rows ringed as recorded selections');
+    assertEqual(model.counts.selectedPassage, 2, 'rows ringed as passage-only selections');
+    assertEqual(model.selectedTotal, 0 + 1 + 1 + 2 + 2, 'recorded selected counts');
+    assertEqual(model.countOnly, 2, 'selected segments with no recorded id');
+    assertEqual(model.columns[2].selected.length, 1, 'the chunked selection is one provenance line');
+    assertEqual(model.columns[2].selected[0].rows.length, 2, 'the passage resolves to both of its chunks');
+    assertTrue(model.columns[2].selected[0].passage, 'the passage entry is flagged as passage-granularity');
+    assertTrue(model.columns[4].selected === null, 'an invocation that delivered nothing records no ids');
+    say('selected identity: recorded on 3/5 invocations, 2 passage-only rows, counts agree with the payloads');
+
+    // (3) the same-step carry is the recorded correction it claims to be, and only that
+    assertEqual(model.carryCells, 1, 'cells that exist only because the step\'s own payload carried them');
+    assertTrue(model.columns[0].existed.has('u1'), 'the first invocation sees the segment its payload carried');
+    assertTrue(!model.columns[0].existed.has('u2'), 'and not one that arrived later in the same step');
+    say('same-step carry: 1 cell, from the step payload record on the tape');
+
+    // --- the figure itself -------------------------------------------------------------------
+    assertTrue(out.svg.includes('data-chart="s1-activity"'), 'the SVG carries its classifier marker');
+    assertTrue(!/<script/i.test(out.svg), 'the SVG contains no script');
+    assertTrue(!/@font-face|@import|<image|href="https?:|src="https?:/.test(out.svg),
+      'the SVG embeds no font and references no external resource (its only URL is the SVG namespace)');
+    assertTrue(out.svg.includes('xmlns="http://www.w3.org/2000/svg"'), 'the xmlns is the only absolute URL it carries');
+    assertTrue(out.svg.includes('w=1024 r=0.55 d=2'), 'the knobs are printed from the tape wiring record');
+    assertTrue(out.svg.includes('not recorded — count only (2)'), 'a count without an id says so in the table');
+    assertTrue(out.svg.includes('ids: recorded (2)'), 'a recorded identity says so above the matrix');
+    assertTrue(out.svg.includes('ids: not recorded'), 'a count without an id says so above the matrix too');
+    assertTrue(out.svg.includes('recency-window'), 'the recorded fallback flag is shown');
+    assertTrue(out.svg.includes('>2048 *<'), 'a per-invocation window that differs from w is marked in the table');
+
+    // Geometry, read back out of the finished document rather than recomputed: every cell lies in
+    // its row and column, cells do not overlap, and every band lies inside the document.
+    const doc = out.svg;
+    const docW = Number(/<svg[^>]*\swidth="(\d+)"/.exec(doc)[1]);
+    const docH = Number(/<svg[^>]*\sheight="(\d+)"/.exec(doc)[1]);
+    const cells = [...doc.matchAll(/<rect class="cell"([^>]*)\/>/g)].map((m) => {
+      const attr = (name) => Number(new RegExp(`\\s${name}="(-?[\\d.]+)"`).exec(m[1])?.[1]);
+      return {
+        x: attr('x'), y: attr('y'), w: attr('width'), h: attr('height'),
+        state: /\sdata-state="([a-z]+)"/.exec(m[1])?.[1] ?? '?',
+      };
+    });
+    assertEqual(cells.length, model.columns.length * model.rows.length, 'one rect per matrix cell');
+    assertTrue(cells.every((c) => c.x >= 0 && c.y >= 0 && c.x + c.w <= docW && c.y + c.h <= docH), 'every cell is inside the document');
+    const stateTally = {};
+    for (const c of cells) stateTally[c.state] = (stateTally[c.state] ?? 0) + 1;
+    assertEqual(stateTally.absent ?? 0, 9, 'the drawn blank cells equal the derived count');
+    assertEqual(stateTally.candidate ?? 0, 5, 'the drawn candidate cells equal the derived count');
+    assertEqual(stateTally.root ?? 0, 3, 'the drawn walk-root cells equal the derived count');
+    assertEqual(stateTally.existed ?? 0, 18, 'the drawn dim cells equal the derived count');
+    assertEqual((doc.match(/class="ring"/g) ?? []).length, 5, 'one ring per recorded selected row');
+    for (const m of doc.matchAll(/<g class="band"[^>]*transform="translate\(0,(-?[\d.]+)\)"/g)) {
+      assertTrue(Number(m[1]) >= 0 && Number(m[1]) <= docH, `band offset ${m[1]} is inside the document`);
+    }
+    // The audit's own failure mode: a caption that runs off the page or out of its gutter. Widths are
+    // estimated from each class's declared font size, which is what the class-based CSS carries.
+    const sizes = new Map([...doc.matchAll(/\.([a-z-]+) \{ fill: [^;]+; font-size: ([\d.]+)px/g)].map((m) => [m[1], Number(m[2])]));
+    const estimate = (text, cls) => [...text].length * (sizes.get(cls) ?? 11) * 0.56;
+    for (const m of doc.matchAll(/<text x="([\d.]+)" y="[\d.]+" class="(panel-note|doc-sub|legend|source|table-cell|table-cell-ok|table-cell-warn)"[^>]*>([^<]*)</g)) {
+      const width = Number(m[1]) + estimate(m[3], m[2]);
+      assertTrue(width <= docW - 10, `a ${m[2]} caption runs off the page (${width.toFixed(0)} > ${docW}): ${m[3].slice(0, 60)}`);
+    }
+    for (const m of doc.matchAll(/<text x="([\d.]+)" y="[\d.]+" class="row-label" text-anchor="end">([^<]*)</g)) {
+      const left = Number(m[1]) - estimate(m[2], 'row-label');
+      assertTrue(left >= 10, `a row label runs off the left edge (left ${left.toFixed(0)}): ${m[2]}`);
+    }
+    say('figure: cells tile the matrix, rings match the recorded selections, no caption overflows');
+
+    // --- the summary line ---------------------------------------------------------------------
+    assertTrue(out.line.startsWith('s1-activity: C9 @ round-fixture'), 'the summary names the cell and the run');
+    assertTrue(out.line.includes('5 invocations x 7 segments (35 cells)'), 'the summary prints the dimensions');
+    assertTrue(out.line.includes('not-created 9, candidate 5, walk-root 3, existed-not-returned 18'), 'the summary prints every state');
+    assertTrue(out.line.includes('ids recorded 3 on 3/5 invocations'), 'the summary prints the recorded-identity coverage');
+    assertTrue(out.line.includes('2 passage-only row(s)'), 'the summary prints the passage-granularity rows');
+    assertTrue(out.line.includes('count-only 2'), 'the summary prints how many selections have no id behind them');
+    assertTrue(out.line.includes('1 same-step carry cell(s)'), 'the summary prints the boundary correction');
+    say('summary line carries dimensions, every state, identity coverage and the carry count');
+
+    // --- --explain says where each state came from -------------------------------------------
+    const explained = explainLines(model).join('\n');
+    assertTrue(explained.includes('carry: u1 (+10 ms)'), '--explain names the carried id and its stamp lag');
+    assertTrue(explained.includes('count only (2), no id recorded'), '--explain distinguishes a count from an id');
+    assertTrue(explained.includes('passage of 2 chunk(s)'), '--explain states the passage granularity');
+    assertTrue(explained.includes('turn 2 step 1'), '--explain labels the column with its turn and step');
+    say('--explain reports the derivation behind every column (carry, walk, selection provenance)');
+
+    // --- what must fail loudly ------------------------------------------------------------------
+    const bad = (name, defects, match) => {
+      const dir = mkdtempSync(join(tmp, 'defect-'));
+      const fixture = buildFixture(dir, defects);
+      const message = assertFails(() => run({ run: fixture, cell: 'C9' }), match, name);
+      say(`${name} fails loudly: ${message.replace(tmp, '…').slice(0, 110)}…`);
+    };
+    bad('a selection that does not exist yet',
+      { selectNotYetExisting: true },
+      'a segment cannot be selected before it exists');
+    bad('a candidate count that disagrees with the walk',
+      { candidateCount: true },
+      'the walk\'s id list and its count disagree');
+    bad('a selected count that disagrees with the delivered payload',
+      { selectedCount: true },
+      'the count and the identity disagree');
+    bad('a wiring record that is not on the tape',
+      { noWiring: true },
+      'the knobs are read from it rather than assumed');
+    bad('a tape with no payload record for a step',
+      { missingPayloadForStep: 3 },
+      'has no matching step payload record');
+    bad('wiring records that disagree about the knobs',
+      { disagreeingWiring: true },
+      'disagree about the recall knobs');
+    bad('a snapshot of another session',
+      { wrongSnapshotSession: true },
+      'holds no snapshot of session');
+
+    // The remaining two are file-level absences rather than record-level contradictions.
+    {
+      const dir = mkdtempSync(join(tmp, 'defect-'));
+      const fixture = buildFixture(dir);
+      rmSync(join(fixture, 'home', 'C9', '.s1cap', 'rg'), { recursive: true, force: true });
+      assertFails(() => run({ run: fixture, cell: 'C9' }), 'missing the association-graph snapshot directory',
+        'a missing snapshot is an error, never a blank matrix');
+      say('a missing snapshot fails loudly (not an empty matrix)');
+    }
+    {
+      const dir = mkdtempSync(join(tmp, 'defect-'));
+      const fixture = buildFixture(dir);
+      rmSync(join(fixture, 'home', 'C9', 'sessions'), { recursive: true, force: true });
+      assertFails(() => run({ run: fixture, cell: 'C9' }), 'missing the cell\'s session store directory',
+        'a missing session store is an error (columns must be labelled)');
+      say('a missing session store fails loudly (a column needs a turn/step label)');
+    }
+    {
+      const dir = mkdtempSync(join(tmp, 'defect-'));
+      const fixture = buildFixture(dir);
+      const controlPath = join(fixture, 'evidence', 'C9', 'control.jsonl');
+      writeFileSync(controlPath, readFileSync(controlPath, 'utf8') + '{"type":"assembly","ts":\n', 'utf8');
+      assertFails(() => run({ run: fixture, cell: 'C9' }), 'unparseable line',
+        'a truncated control-plane line is an error, not a dropped column');
+      say('a truncated control-plane line fails loudly (with the tool that locates it)');
+    }
+
+    {
+      // A restarted cell writes the wiring record again. Identical records are one set of knobs and the
+      // matrix still draws; the two real rounds of this project both carry two.
+      const dir = mkdtempSync(join(tmp, 'defect-'));
+      const fixture = buildFixture(dir, { duplicateWiring: true });
+      const restarted = run({ run: fixture, cell: 'C9' });
+      assertEqual(restarted.model.knobs.r, 0.55, 'two agreeing wiring records state one set of knobs');
+      assertTrue(restarted.svg.includes('r=0.55'), 'and the annotation still names them');
+      say('two agreeing wiring records (a restarted cell) still draw: agreement is what makes them one set');
+    }
+
+    // An SVG that carries someone else's marker is still not this chart: the classifier is decisive.
+    assertTrue(!/<g class="panels"/.test(out.svg), 'the figure does not claim the metric-chart panel wrapper');
+    say('the figure declares itself with data-chart="s1-activity" and no chart panel wrapper');
+
+    process.stdout.write('s1-activity --self-test: PASS\n');
+    return 0;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function main(argv) {
+  if (argv.includes('--self-test')) return selfTest();
+  if (argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(`${usage()}\n`);
+    return 0;
+  }
+  const value = (name) => {
+    const i = argv.indexOf(`--${name}`);
+    return i >= 0 && i + 1 < argv.length ? argv[i + 1] : undefined;
+  };
+  const runDir = value('run');
+  const cell = value('cell');
+  if (runDir === undefined || cell === undefined) {
+    process.stderr.write(`${usage()}\ns1-activity: --run and --cell are both required\n`);
+    return 2;
+  }
+  const out = value('out') ?? join(resolve(runDir), 'report', 's1-activity.svg');
+  const result = run({ run: runDir, cell });
+  // `--out -` writes the SVG to stdout, so the summary goes to stderr there: a caller redirecting the
+  // document into a file must get the document, and the sanity-check line must not land inside it.
+  const say = out === '-' ? (line) => process.stderr.write(line) : (line) => process.stdout.write(line);
+  if (argv.includes('--explain')) {
+    say(`${explainLines(result.model).join('\n')}\n`);
+  }
+  if (out === '-') {
+    process.stdout.write(result.svg);
+  } else {
+    mkdirSync(dirname(resolve(out)), { recursive: true });
+    writeFileSync(resolve(out), result.svg, 'utf8');
+  }
+  say(`${result.line}${out === '-' ? '' : ` · wrote ${resolve(out)}`}\n`);
+  return 0;
+}
+
+try {
+  process.exitCode = main(process.argv.slice(2));
+} catch (err) {
+  if (err?.isActivityError) {
+    process.stderr.write(`s1-activity: ${err.message}\n`);
+    process.exitCode = 1;
+  } else {
+    throw err;
+  }
+}
