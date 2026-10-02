@@ -262,14 +262,13 @@ function composeFigure({ run, cells, outDir, labelOf, headerHeight }) {
         : cell === 'C1'
           ? 'TAS alone: state proxy first, current task before recall, nothing judged'
           : cell === 'C2'
-            ? 'full configuration: TAS ordering plus System-1 governance'
+            ? 'full configuration: TAS ordering plus System-1 recall selection'
             : `(${labelOf.get(cell) ?? 'no role recorded'})`;
     return {
       cell,
       role,
       tas: yes(w.tas?.on),
       selection: yes(w.relevance),
-      planGate: yes(w.planGate),
       xFirst: yes(w.xFirst),
       lane,
     };
@@ -311,8 +310,10 @@ function composeFigure({ run, cells, outDir, labelOf, headerHeight }) {
   </table>`;
 
   const defTable = table(
-    ['cell', 'what it is', 'TAS', 'S1 selection', 'plan gate', 'x-first', 'System-1 lane'],
-    definitions.map((d) => [d.cell, d.role, d.tas, d.selection, d.planGate, d.xFirst, d.lane]),
+    // No `plan gate` column: the policy has no such field any more, and a column printed from a key no run writes
+    // would be a blank in one cell and a true-looking "yes" in another. See packages/core/src/types.ts.
+    ['cell', 'what it is', 'TAS', 'S1 selection', 'x-first', 'System-1 lane'],
+    definitions.map((d) => [d.cell, d.role, d.tas, d.selection, d.xFirst, d.lane]),
     'defs',
   );
 
@@ -540,8 +541,8 @@ function writeFixtureRun(root, { dsh, cells }) {
     const dir = join(root, 'home', cell, '.s1cap');
     mkdirSync(dir, { recursive: true });
     const wiring = cell === 'C2'
-      ? { schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true, planGate: true, xFirst: false, tas: { on: true } }
-      : { schema: 0, kind: 'wiring', s1: 'none', relevance: false, planGate: false, xFirst: false, tas: { on: false } };
+      ? { schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true, xFirst: false, tas: { on: true } }
+      : { schema: 0, kind: 'wiring', s1: 'none', relevance: false, xFirst: false, tas: { on: false } };
     writeFileSync(join(dir, 'tape.jsonl'), `${JSON.stringify(wiring)}\n`, 'utf8');
   }
   if (dsh !== null) writeFileSync(join(root, 'manifest.json'), `${JSON.stringify({ _run: root, _dsh: dsh }, null, 1)}\n`, 'utf8');

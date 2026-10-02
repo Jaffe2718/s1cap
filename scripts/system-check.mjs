@@ -47,7 +47,13 @@ const STATUS_ROUTE = '/s1cap-7340';
 
 /** Conversation kinds the adapter may produce. Anything else in the session file is a leak. */
 const CONVERSATION_KINDS = new Set(['user', 'assistant', 'trace', 'toolCall', 'toolResult', 'systemPinned']);
-/** Control-plane event types that must never appear in the session stream. */
+/**
+ * Control-plane event types that must never appear in the session stream.
+ *
+ * `plan_gate` stays on the list although nothing writes one any more: the check is an invariant about the two
+ * streams (a control record may never become a segment), and an invariant that only covers the record types
+ * currently in use stops holding the moment one is added back.
+ */
 const CONTROL_TYPES = new Set(['llm_call', 's1_call', 'tool_call', 'assembly', 'plan_gate', 'context_delivery']);
 
 function readJsonl(path) {
@@ -196,12 +202,15 @@ check(
 const cell = status?.cell ?? '(none)';
 const cellOk = EXPECT_CELL === '' || cell === EXPECT_CELL;
 // The route reports these flat, which is the shape the panel reads them in.
+// `planGate` is not here: the knob was removed on 2026-10-02 (`packages/core/src/types.ts` carries the evidence -
+// the gate's record appears in no artifact of the round that was supposed to exercise it), so a status payload that
+// still carried the key would be the last place claiming C2 ran a component it does not have.
 const knobs = [
   ['tas', status?.tas],
   ['tier1', status?.tier1],
-  ['planGate', status?.planGate],
   ['xFirst', status?.xFirst],
   ['deliver', status?.deliver],
+  ['admissionLimit', status?.s1?.admissionLimit],
 ].filter(([, v]) => v !== undefined);
 check(
   'I6 cell authority: the preset the profile names is the policy that ran',

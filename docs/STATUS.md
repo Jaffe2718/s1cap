@@ -764,11 +764,17 @@ without a restart, host packages resolve for our plugin, and no allowlist stands
 schema itself.
 
 **The hard constraint to respect when writing it:** the exported `Config` must describe **every** field
-`resolvePluginConfig` accepts today (`enabled`, `observation`, `s1`, `laya`, `recall`, `tas`, `tail`, `planGate`,
+`resolvePluginConfig` accepts today (`enabled`, `observation`, `s1`, `laya`, `recall`, `tas`, `tail`,
 `telemetry`, `cache`, `rgMaintenance`, `cell`, ...). The loader validates the plugin's configuration against that
 schema, so a schema that omits a field the patch sets makes the plugin fail to activate - which is worse than the
 feature being unfinished. Read the current field set first, write the schema in one pass, then verify activation in a
 real profile before touching the panel.
+
+**One field left that list on 2026-10-02: `planGate`.** A plan gate cannot be reached in a run whose model writes no
+numbered plan and emits no `todo/write`, and round `20261002-2037` is such a run - zero `plan_gate` records in any
+artifact across 277 steps, with the knob `on`. It is gone from the policy, the presets, the status route and the
+report; the mechanism is kept and unit-tested. `packages/core/src/types.ts` carries the decision, and
+`bench/cells/C2.json`'s `_meta.planGateRemoved` the evidence.
 
 **Also learned about the live cost curve:** headless probe rounds cannot force multiple steps, because that
 profile's sandbox refuses writes to the repository, so the model declines to issue the shell commands and only one

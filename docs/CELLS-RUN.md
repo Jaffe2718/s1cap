@@ -34,11 +34,31 @@ can win on it while moving more tokens on all three quantities, which is what th
 Presets live in `bench/cells/`; `cellPolicy(cell)` in `packages/core/src/types.ts` derives C0–C2 from toggles,
 with `termination: model-owned` and `rgMaintenance.mode: async` fixed in every cell.
 
-| Cell | `tas.on` / `xFirst` | `recall.tier1` | `planGate.on` | System-1 lane | Role |
-| --- | --- | --- | --- | --- | --- |
-| C0 | off / off | off | off | `provider: none`, no lane | baseline: the harness manages history natively, and nothing is delivered |
-| C1 | on / on | off | off | `provider: none`, no lane | the TAS half alone |
-| C2 | on / on | embed | on | live provider, `retryAttempts: 2` | the project's own configuration |
+| Cell | `tas.on` / `xFirst` | `recall.tier1` | System-1 lane | Role |
+| --- | --- | --- | --- | --- |
+| C0 | off / off | off | `provider: none`, no lane | baseline: the harness manages history natively, and nothing is delivered |
+| C1 | on / on | off | `provider: none`, no lane | the TAS half alone |
+| C2 | on / on | embed | live provider, `retryAttempts: 2`, `admissionLimit: 8` | the project's own configuration |
+
+**There is no `planGate.on` column any more, in the table or in the policy.** It was a column here until
+2026-10-02, `on` for C2 and `off` for the other two. Round `20261002-2037` is why it is gone: that round contains
+**zero** `plan_gate` records in any artifact — its control plane (6 546 records), its tape (2 003 lines) and its
+session stream all lack the string — across 277 steps and 289 tool calls, because the gate can be reached only by a
+numbered plan in an assistant message or a `todo/write` session event and the model produced neither. So C2 ran with
+a knob that was `on` in its wiring record and could not fire, and this document's own table described a difference
+between C1 and C2 that did not exist. The field is removed from `AssemblyPolicy`, `bench/cells/*.json`, the config
+schema, the status route and the report; the mechanism stays in `packages/core/src/plan-gate.ts` and
+`packages/dsh-plugin/src/plan-gate-runtime.ts`, unit-tested, for whichever arm next has a plan source the model
+actually writes to. `packages/core/src/types.ts` carries the full decision and C2's `_meta.planGateRemoved` the
+evidence. **What separates C1 from C2 is now recall selection and nothing else**, and the document says so wherever
+it used to say "selection + plan gate".
+
+`admissionLimit` is new in the same round, and it is the cell's answer to a backend that refuses rather than queues:
+`retryAttempts` handles *one* refusal (the server's own `Retry-After`, then a second attempt), and `admissionLimit`
+handles a backend refusing *everything*, which a retry only adds load to. Round `20261002-2037` sent 5 992 requests
+at 2.70/s over 2 220 s and 64.4 % of them came back `503 server busy`, with the refusal rate above a third in every
+thirty-second bucket of the run. A window the gate does not send is deferred, not scored lexically, and is counted in
+`deferredPairs` beside `judgedPairs / scoredPairs` — see `bench/cells/C2.json`'s `_meta.admissionLimit`.
 
 Two switches, not one: `tas.on` is whether the state proxy T exists at all, `xFirst` is whether the current task x
 sits before or after the recalled block, and `cellPolicy()` moves them together here (both off for C0, both on for
@@ -66,7 +86,7 @@ round is labelled with the round and with the name the cell ran under, and none 
 | `C1` | baseline: nothing delivered, the harness manages history natively | **`C0`** |
 | `C2` | TAS alone: state proxy and x-first ordering, no System-1 selection | **`C1`** |
 | `C3` | recall selection with `tas.on: false` | **dropped, no successor** |
-| `C4` | the full configuration: TAS ordering + System-1 selection + plan gate | **`C2`** |
+| `C4` | the full configuration: TAS ordering + System-1 selection (+ a plan gate that was configured and never fired) | **`C2`** |
 
 **Old `C3` has no successor, so a reader looking for "the recall-only cell" will not find one.** It was recall
 selection with `tas.on: false`, and per step it was worse than the baseline on the quantities of round
@@ -220,6 +240,19 @@ a previous round into 191 failed S1 calls out of 281.
   retry on, a refused call waits the server's own `Retry-After` and is answered, and `attempts`/`waitedMs` on the
   `s1_call` record say how often that happened. The two control arms carry no `retryAttempts`: they have no lane,
   so there is nothing to retry. Report `judgedPairs / scoredPairs` either way.
+- **And set `s1.admissionLimit` (8 is the preset) on that arm.** The retry is the right answer to *one* refusal and
+  the wrong answer to a backend refusing everything, because the retry is one more request inside the same
+  admission window. Round `20261002-2037` is what that costs, measured from the cell's own control plane: 5 992
+  `s1_call` records over a 2 219.7 s span — **2.70 requests/second** — of which **3 859 (64.4 %)** came back
+  `503 server busy`, with the refusal rate above a third in *every* thirty-second bucket of the run and no sign of
+  recovery. `admissionLimit` caps what one cell may have in flight and opens a circuit breaker after a run of
+  refusals, probing once per cooldown until the backend answers again. A window the gate does not send is
+  **deferred**: nothing is scored for it, by the backend or by the fallback, and the pairs are counted in the
+  association graph's `deferredPairs` and written on the assembly record beside `judgedPairs / scoredPairs`. That
+  third number is what keeps coverage honest — a pair that was never offered is not a pair the backend failed to
+  judge — and it is reported in the "Mechanism diagnostics" table. Note what it is **not**: a lower coverage. The
+  ratio's meaning is unchanged, and the omission is a number with a reason rather than a silently smaller
+  denominator.
 - `~/.dsh/profiles/node_modules` is a farm of unresolvable junctions: a recursive `grep` there fails with
   thousands of `os error 3`s. Read the profile patch files directly.
 

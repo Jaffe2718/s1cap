@@ -15,18 +15,20 @@
  * BFS from an unscored anchor returns nothing while the block is silently refilled from the recency window.
  * `waitForAnchorRow` therefore drains already-queued upkeep, bounded by `recall.anchorWaitMs` and skipped
  * entirely when the row is complete or when nothing is queued or in flight. The bounded wait is the exception
- * path; the fail-open rule in `assemble()` is what runs when it expires.
+ * path; the fail-open rule in `assemble()` is what runs when it expires. Both outcomes are recorded, and
+ * differently: a wait that ran out of time and a wait that was never worth starting are not the same event, and
+ * the tape line for each says which one it was (`waited`).
  */
 import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
 import type {
   AssemblyPolicy,
   RawEvent,
   RgStore,
+  S1Deferral,
   StepObservation,
   TelemetryEvent,
   UpkeepQueueStats,
 } from '@s1cap/core';
-import { extractTodoEvent } from './plan-gate-runtime.ts';
 import { isS1capInjected } from '@s1cap/core';
 
 export interface StepObserverOptions {
@@ -41,24 +43,26 @@ export interface StepObserverOptions {
   /** how far the graph may lag the session, in turns (policy: rgMaintenance.maxLagTurns) */
   maxLagTurns?: number;
   /**
+   * The most pairs one upkeep tick may offer, across every segment it folds in (passed to `scoreNew`).
+   *
+   * The upkeep queue starts several scoring loops per tick, and each scores each of its new segments against its
+   * whole window, so a tick that folds in a burst offers `segments x w` pairs at once. Pairs the budget holds
+   * back are deferred, not scored lexically: the graph's cursor does not advance over them. Undefined means no
+   * budget (the local-only callers want every pair at once).
+   */
+  maxPairsPerSweep?: number;
+  /**
    * One S1 call per new segment, scoring the whole window at once. Present only when a backend is configured;
    * its absence is what falls the graph back to lexical scoring, so observation mode stays free and offline.
+   *
+   * `S1Deferral` is a third answer and it is not a failure: the backend is saturated and the window was not
+   * offered, so the pairs wait for a later tick rather than being bought from the fallback. The graph holds its
+   * cursor and counts them (`packages/core/src/assoc-graph.ts`, `S1_DEFERRED`).
    */
   scoreBatch?: (
     current: Segment,
     candidates: readonly Segment[],
-  ) => readonly number[] | Promise<readonly number[]>;
-  /**
-   * The advisory plan gate. Optional, and its return value is only recorded: the observer has no way to feed an
-   * order back into the prompt, which is the property that makes "never vetoes stop" true by construction.
-   */
-  planGate?: {
-    consider(text: string, sessionId: string, step: number): Promise<unknown>;
-    /** The same gate for a plan the model wrote with a tool rather than in prose. Called from upkeep. */
-    considerTodos(todos: readonly unknown[], sessionId: string, step: number): Promise<unknown>;
-    /** Gate counters for status; `null` when the gate is armed but has never seen a plan. */
-    stats(): unknown;
-  };
+  ) => readonly number[] | undefined | S1Deferral | Promise<readonly number[] | undefined | S1Deferral>;
   sessionId?: string;
   /**
    * Per-session graph persistence. Optional by design: the observer stays free of the filesystem (see the header
@@ -104,6 +108,16 @@ export interface StepObserverStats {
   skipped: number;
   /** calls whose messages produced no segment, so there was nothing to assemble (see EmptyStepObservation) */
   empty: number;
+  /**
+   * Steps that were read into the graph and deliberately not assembled, because the harness's decision carried no
+   * messages (see `ObserveOptions.assemble`).
+   *
+   * Its own counter, and not folded into `empty`, because the two are opposite diagnoses: `empty` is the segmenter
+   * failing to understand a payload, `ingestOnly` is the lane correctly declining to pay for a step that cannot
+   * receive context. A measured diagnostic round is 275 of these against 2 assembled steps, and a counter that
+   * could not tell that from 275 unreadable payloads would hide the finding it exists to show.
+   */
+  ingestOnly: number;
   /** session events that carried conversation content and were folded into the graph */
   upkeepEvents: number;
   /** session events that carried no conversation (lifecycle notices) */
@@ -127,6 +141,12 @@ export interface StepObserverStats {
    * gap between "the window was offered" and "the window was judged".
    */
   upkeepJudgedPairs: number;
+  /**
+   * Pairs the backend was too busy to be asked about, so upkeep deferred them to a later tick rather than scoring
+   * them lexically. Beside `upkeepScoredPairs`, not inside it: the first is what was offered, this is what was
+   * held back, and only the two together say how much of the session the backend was actually shown.
+   */
+  upkeepDeferredPairs: number;
   /** observation failures (reported, never thrown) */
   errors: number;
   /** tokens the full history would have sent that the selected view did not */
@@ -140,6 +160,14 @@ export interface StepObserverStats {
   systemPromptTokens: number;
   /** diagnostic lines emitted (probe mode) */
   probes: number;
+  /**
+   * Steps where the payload's own anchor position and the graph window's disagreed.
+   *
+   * Counted rather than only sampled, because the tape keeps a bounded number of lines for it: the count is what
+   * says "this is on every step" after the lines have stopped, and a reader who saw four lines and a cap would
+   * otherwise not know whether the disagreement was rare or universal.
+   */
+  anchorMismatches: number;
   unknownPartTypes: string[];
   unknownRoles: string[];
   graphSegments: number;
@@ -161,6 +189,19 @@ export interface StepObserverStats {
   upkeep: UpkeepQueueStats;
 }
 
+export interface ObserveOptions {
+  /**
+   * Default true. Pass false when the harness's decision for this step carried no messages.
+   *
+   * The decision is the harness's answer to "what will be appended to the log for this step", and an empty one
+   * means this step sends no request - so there is no context to deliver into, whatever the graph holds. The
+   * observation still happens: the payload's messages become segments, because a segment belongs to the session
+   * from the moment it arrives and this is one of the two lanes it can arrive on. What stops is the assembly,
+   * which is the part that costs the walk and the anchor wait.
+   */
+  assemble?: boolean;
+}
+
 export interface StepObserver {
   /**
    * `agent/pre-step`: observe one LLM call, and hand back what it assembled.
@@ -168,9 +209,10 @@ export interface StepObserver {
    * Returns a promise because scoring a new segment may be one System-1 call. The caller in `index.ts` awaits
    * it inside its own try/catch, so a rejected scorer still costs the record and never the step. The returned
    * observation carries the layout, which is what lets the caller deliver the view instead of only recording it;
-   * `undefined` means there was nothing to assemble, and the caller then passes the decision through untouched.
+   * `undefined` means there was nothing to assemble - an empty step, or a step the caller asked not to assemble -
+   * and the caller then passes the decision through untouched.
    */
-  observe(payload: unknown): Promise<StepObservation | undefined>;
+  observe(payload: unknown, options?: ObserveOptions): Promise<StepObservation | undefined>;
   /** `session/event`: capture the system prompt and queue the event for asynchronous upkeep */
   noteSessionEvent(event: unknown): void;
   /** N1: the rendered system prompt, read from the harness registry (see system-prompt.ts) */
@@ -182,8 +224,16 @@ export interface StepObserver {
   stats(): StepObserverStats;
 }
 
-function readMessages(payload: unknown): readonly unknown[] | undefined {
-  if (typeof payload !== 'object' || payload === null) return undefined;
+/**
+ * How many `anchor-mismatch` lines one observer may write.
+ *
+ * Four, and the number is a judgement about the tape rather than about the condition: the disagreement is steady
+ * state (see `onAnchorMismatch` below), so its first few instances carry all the shape there is. The count of them
+ * is unbounded and reported in `stats().anchorMismatches`.
+ */
+const ANCHOR_MISMATCH_LINES = 4;
+
+function readMessages(payload: unknown): readonly unknown[] | undefined {  if (typeof payload !== 'object' || payload === null) return undefined;
   const messages = (payload as { messages?: unknown }).messages;
   return Array.isArray(messages) ? messages : undefined;
 }
@@ -268,12 +318,15 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     unknownPartTypes: [],
     unknownRoles: [],
     empty: 0,
+    ingestOnly: 0,
+    anchorMismatches: 0,
     upkeepEvents: 0,
     upkeepEmpty: 0,
     upkeepSegments: 0,
     upkeepSelfDropped: 0,
     upkeepScoredPairs: 0,
     upkeepJudgedPairs: 0,
+    upkeepDeferredPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
     lastError: '',
@@ -313,18 +366,41 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   // gave up with pairs still unjudged. The poll count is what makes a stuck wait legible - a line per poll would be
   // hundreds of lines for one slow backend, and no line at all would leave `unknownAdmitted` in the record with
   // nothing explaining it.
-  const reportAnchorWait = (probe: (line: Record<string, unknown>) => void, waitMs: number, polls: number, unknown: number): void => {
-    probe({ schema: 0, kind: 'anchor-wait', ms: waitMs, polls, unknown });
+  // The bounded anchor wait (`recall.anchorWaitMs`): at most one diagnostic line per step, and only when pairs are
+  // about to be admitted unjudged. The poll count is what makes a stuck wait legible - a line per poll would be
+  // hundreds of lines for one slow backend, and no line at all would leave `unknownAdmitted` in the record with
+  // nothing explaining it.
+  //
+  // Two outcomes reach this function and the record distinguishes them, because they are not the same event and
+  // used to be written identically. `waited` is the wait that ran and lost: polling happened and the deadline or
+  // the poll ceiling arrived with the row still incomplete. `not-started` is the wait that was never worth taking:
+  // nothing was queued and no scoring call was in flight, so no amount of time could have completed the row. The
+  // tape from a real round carries `{ms:10000, polls:0, unknown:2}` - a line that reads as a completed wait with
+  // no polls, which is the one thing it cannot be - and the step proceeded down the fail-open path with nothing
+  // saying that the fail-open path is what happened. `gaveUp` states the outcome for a reader with no code in
+  // front of them, and it is true in both cases: the pairs were admitted unjudged either way.
+  const reportAnchorWait = (
+    probe: (line: Record<string, unknown>) => void,
+    waitMs: number,
+    polls: number,
+    unknown: number,
+    waited: boolean,
+  ): void => {
+    probe({ schema: 0, kind: 'anchor-wait', ms: waitMs, polls, unknown, waited, gaveUp: true });
     opts.onWarn?.(
-      `[s1cap] anchor wait gave up after ${waitMs}ms (${polls} drain(s)): ` +
-        `${unknown} pair(s) inside the window still unjudged; the fail-open rule admits them`,
+      waited
+        ? `[s1cap] anchor wait gave up after ${waitMs}ms (${polls} drain(s)): ` +
+          `${unknown} pair(s) inside the window still unjudged; the fail-open rule admits them`
+        : `[s1cap] anchor wait not started (${waitMs}ms available): nothing queued and no scoring call in flight, ` +
+          `so the anchor's own row cannot be completed by waiting; the fail-open rule admits its ${unknown} pair(s)`,
     );
   };
 
   const waitForAnchorRow = async (probe: (line: Record<string, unknown>) => void, sessionId: string, anchorId: string): Promise<void> => {
     const waitMs = opts.policy.recall.anchorWaitMs;
     // `0`, or anything below it, disables the wait: the panel sets this, and a researcher turning it off must get
-    // the step's own timing back rather than a small wait.
+    // the step's own timing back rather than a small wait. Nothing is admitted on this path either - the fail-open
+    // rule in `assemble()` still is - but the wait is not asked for, so it reports nothing.
     if (!(waitMs > 0)) return;
     const graph = graphFor(sessionId);
     // The common case, and the reason this is an exception path rather than a per-step cost: the anchor's row has
@@ -340,10 +416,10 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     // answered by time passing. That is not a hypothetical saving: it is what a step should do in a session whose
     // upkeep has not been asked for anything yet, and it is what keeps a caller with a clock that does not advance (a
     // deterministic test) from holding a step open for the whole deadline over a queue nobody is going to fill. The
-    // give-up line is still written - the fail-open rule is about to admit these pairs, and the record has to say so -
-    // with a poll count of 0, which is what makes it distinguishable from a wait that ran out of time.
+    // line is still written - the fail-open rule is about to admit these pairs, and the record has to say so - with
+    // `waited: false`, which is what makes it distinguishable from a wait that ran out of time.
     if (queue.stats().pending === 0 && scoringInFlight === 0) {
-      reportAnchorWait(probe, waitMs, 0, unknownBefore);
+      reportAnchorWait(probe, waitMs, 0, unknownBefore, false);
       return;
     }
     const deadline = opts.now() + waitMs;
@@ -372,7 +448,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     }
     // Giving up is not a failure: assembly carries on, and the pairs it could not wait for are counted as
     // `unknownAdmitted`. The wait makes the fail-open rule rarer; it does not replace it.
-    reportAnchorWait(probe, waitMs, polls, unknown);
+    reportAnchorWait(probe, waitMs, polls, unknown, true);
   };
 
   // How many upkeep scoring calls are in flight right now.
@@ -418,23 +494,14 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       }
       if (raw.length === 0) {
         // Lifecycle events (step/start, turn/end, request/header, delivery notices) land here by design.
+        //
+        // `todo/write` lands here too, and it is worth saying what happened to it: it carries no message, so it
+        // adapts to nothing, and it used to be read here for the plan gate. The gate is gone from the policy
+        // (`packages/core/src/types.ts` says why: round `20261002-2037` produced zero `plan_gate` records because
+        // the model never wrote a plan in either of the two forms the gate could read). Nothing replaces it on
+        // this path; the todos are still the model's own plan, and a future arm that wants to order them has to
+        // wire a gate back in and feed it from here.
         stats.upkeepEmpty += 1;
-        // One exception, and it is a real one: `todo/write` is a lifecycle event by shape — it carries no message,
-        // so it adapts to nothing — but its `todos` are the model's own written plan, which is precisely what the
-        // gate scores. It is asked here, before this early return, because the alternative was a gate that only
-        // ever saw plans typed as prose and reported `inspected: 0` for a model that was planning with a tool all
-        // along. The decision stays advisory: the order is computed, recorded, and handed back.
-        if (opts.planGate !== undefined) {
-          const todos = extractTodoEvent(event);
-          if (todos !== undefined) {
-            try {
-              await opts.planGate.considerTodos(todos, sessionId, stats.upkeepEvents);
-            } catch (err) {
-              stats.errors += 1;
-              opts.onWarn?.(`[s1cap] plan gate failed on a todo/write (ignored): ${String(err)}`);
-            }
-          }
-        }
         return;
       }
       // The ingestion gate, on the path production actually takes.
@@ -469,13 +536,14 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       // Upkeep is where most pairs are scored now, so it is also where most S1 calls happen. It stays off the
       // critical path: the queue already defers this to a timer, and a failure here must cost the edges, not
       // the session - so a backend that is down degrades to no edges for that segment rather than throwing.
-      let scored: { scoredPairs: number; edges: number } = { scoredPairs: 0, edges: 0 };
+      let scored: { scoredPairs: number; edges: number; deferredPairs: number } = { scoredPairs: 0, edges: 0, deferredPairs: 0 };
       scoringInFlight += 1;
       try {
         scored = await graph.scoreNew({
           windowN: opts.policy.recall.window,
           threshold: opts.policy.recall.threshold,
           ...(opts.scoreBatch !== undefined ? { scoreBatch: opts.scoreBatch } : {}),
+          ...(opts.maxPairsPerSweep !== undefined ? { maxPairsPerSweep: opts.maxPairsPerSweep } : {}),
         });
       } catch (err) {
         stats.errors += 1;
@@ -488,34 +556,24 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       stats.upkeepSegments += segments.length;
       stats.upkeepScoredPairs += scored.scoredPairs;
       stats.upkeepJudgedPairs += scored.judgedPairs;
+      // Pairs the backend was too busy to be asked about. Counted apart from `upkeepScoredPairs` rather than inside
+      // it: they were never offered to a scorer, so a coverage ratio computed over them would be a ratio over work
+      // the run declined to do. This is the counter that makes "we stopped asking" visible next to "it answered
+      // little", which are otherwise the same two numbers on a `/s1` panel.
+      stats.upkeepDeferredPairs += scored.deferredPairs;
       // The graph changed here and nowhere else on this path, so this is the point to make it survive. Written
       // per upkeep event rather than per step: a step only reads.
       persistGraph(sessionId);
       stats.graphSegments = graph.segmentCount;
       stats.graphEdges = graph.edgeCount;
       seq += raw.length;
-
-      // The plan gate reads the model's own step list out of its own output. It runs here, after the segments
-      // are in the graph, because that output is where both arrive, and its failure is contained here for the
-      // same reason the scoring is: an advisory order that cannot be computed must not cost the session a
-      // segment.
-      //
-      // Both kinds count, and that is the correction of a real bug: a message whose parts are only text adapts
-      // to `assistant`, but a message carrying reasoning *and* text - which is what this model actually emits -
-      // adapts to `trace`, with the reasoning and the answer merged. Filtering on `assistant` alone silently
-      // inspected nothing: the gate reported `inspected: 0` for a whole session while the model was writing
-      // numbered plans the entire time.
-      if (opts.planGate !== undefined) {
-        for (const ev of raw) {
-          if (ev.kind !== 'assistant' && ev.kind !== 'trace') continue;
-          try {
-            await opts.planGate.consider(ev.text, sessionId, stats.upkeepEvents);
-          } catch (err) {
-            stats.errors += 1;
-            opts.onWarn?.(`[s1cap] plan gate failed (ignored): ${String(err)}`);
-          }
-        }
-      }
+      // The advisory plan gate used to be asked here, once per `assistant`/`trace` RawEvent, and the code that
+      // did it is gone with the policy field. `packages/core/src/types.ts` carries the evidence for the removal:
+      // the gate's record appears in no artifact of round `20261002-2037`, because the model wrote no numbered
+      // plan and emitted no `todo/write`, so there was never anything to order. Note for whoever wires a gate
+      // back: both kinds must be offered - a message whose parts are only text adapts to `assistant`, and one
+      // carrying reasoning *and* text, which is what this model emits, adapts to `trace` with both merged.
+      // Filtering on `assistant` alone inspects nothing while the model writes numbered plans the whole time.
     },
   });
 
@@ -536,19 +594,20 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
 
   return {
     /**
-     * Observe one step and return what it assembled, or `undefined` when there was nothing to assemble.
+     * Observe one step and return what it assembled, or `undefined` when nothing was assembled.
      *
      * The return value exists for context delivery: the caller needs the layout's segments, not just the
      * token counts in the record, to be able to put the view in front of the model. It is `undefined` on the
-     * empty and failed paths, and neither of those throws.
+     * empty, failed and skipped paths, and none of those throws.
      */
-    async observe(payload: unknown): Promise<StepObservation | undefined> {
+    async observe(payload: unknown, options?: ObserveOptions): Promise<StepObservation | undefined> {
       stats.steps += 1;
       const messages = readMessages(payload);
       if (messages === undefined) {
         stats.skipped += 1;
         return undefined;
       }
+      const assemble = options?.assemble !== false;
       const started = opts.now();
       try {
         const sessionId = readSessionId(payload, opts.sessionId ?? 'unassigned');
@@ -570,6 +629,23 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           fixedOverheadTokens: opts.fixedOverheadTokens,
           lambdaMs: opts.lambdaMs,
           graph: graphFor(sessionId),
+          // The decision carried no messages, so the caller asked for the read and not for the view. This reaches
+          // `observeStep`, which stops after the graph write, and it is the whole fix for a lane that measured
+          // 1,205,029 recalled tokens assembled against 1,597 delivered.
+          assemble,
+          // The two anchor positions live in different arrays and the walk was rooted in the wrong one for 273 of
+          // 277 invocations. A disagreement is normal - the two lists coincide only when a session starts empty -
+          // and writing it down is what makes the spaces legible in the tape instead of only in this code.
+          //
+          // The *lines* are bounded, the count is not. `writeProbe` is the one sink this module has and a line per
+          // step for the rest of a session would bury the shapes the probe budget exists to record; four lines plus
+          // `anchorMismatches` on `/s1` say both what the disagreement looks like and how often it happens.
+          onAnchorMismatch: (detail) => {
+            stats.anchorMismatches += 1;
+            if (stats.anchorMismatches <= ANCHOR_MISMATCH_LINES) {
+              writeProbe({ schema: 0, kind: 'anchor-mismatch', ...detail, n: stats.anchorMismatches });
+            }
+          },
           // The anchor id is computed inside `observeStep` and the queue that drains scoring lives here, so the wait
           // has to travel back out as a callback. It is called after the anchor is chosen and before `assemble()`,
           // and it never throws: a wait that gave up is reported and the fail-open rule covers the rest.
@@ -591,6 +667,25 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         // most exactly when the adapter could make no sense of it. Skipping it for empty steps would delete the
         // only evidence of the shape we do not understand yet.
         opts.onTape?.(readStep(payload), messages, systemPrompt);
+        // Read, and deliberately not assembled: the caller said this step cannot receive context. Reported once
+        // per step through `ingestOnly` and never as an error - a skip is the lane working as designed, and the
+        // only thing that would make it a defect is the caller getting the condition wrong.
+        //
+        // The adapter's shape report is still folded in, and that is not tidiness: with the skip in place this is
+        // the path most payloads now take, and a role or part type the adapter could not read would stop being
+        // reported exactly where it is most likely to appear.
+        if (observation.kind === 'ingested') {
+          stats.ingestOnly += 1;
+          stats.lastSegments = observation.segments.length;
+          stats.lastObserveMs = elapsed;
+          for (const type of observation.report.unknownPartTypes) {
+            if (!stats.unknownPartTypes.includes(type)) stats.unknownPartTypes.push(type);
+          }
+          for (const role of observation.report.unknownRoles) {
+            if (!stats.unknownRoles.includes(role)) stats.unknownRoles.push(role);
+          }
+          return undefined;
+        }
         // Nothing to assemble: no record is emitted, and the step is counted as empty rather than as an
         // observation. It used to throw from the assembler and be swallowed, which is why a real session could
         // log exactly one record (the primer's) while looking perfectly healthy.

@@ -4,7 +4,8 @@
     "role": "TAS alone: Trace-as-State ordering only (state proxy before history, x first), no System-1 selection",
     "status": "run set for the next round (C0, C1, C2)",
     "note": "The state proxy T exists and the current task x sits before the recalled block, not after it: `xFirst: true` and `deliver: true` come from `cellPolicy('C1')` (packages/core/src/types.ts) and are not repeated here, because a value in this file would silently override the cell. In round 20261001-1300 this arm measured 14 441 tokens per step against the baseline's 21 054 (about 0.69x), of which 1 783 were uncached input tokens per step against 2 595 (also about 0.69x) with 1 493 output tokens against 1 523, which is why it is the contrast C2 has to beat. The quantities are per step because the cells' absolute totals are not comparable: they ran a different number of steps.",
-    "providerNone": "`s1.provider: none` because this arm is a no-System-1 control: `recall.tier1: 'off'` disables recall *selection* but association-graph upkeep is not gated on it, so without this key the arm still scores pairs and reports System-1 calls - 257 of them in round 20261001-1300 - and the TAS half is a claim about ordering, which must be measurable with the System-1 lane absent rather than merely unscoped, reporting zero System-1 calls, tokens and time. Run recipe: a live profile must pair `s1.provider: none` with `laya.enabled: false`, because `laya.enabled: true` beside `provider: none` is a reported conflict (`singleBackendIssues`, packages/s1-client/src/resolve.ts); `laya` is a profile key and is deliberately not carried by this preset."
+    "providerNone": "`s1.provider: none` because this arm is a no-System-1 control: `recall.tier1: 'off'` disables recall *selection* but association-graph upkeep is not gated on it, so without this key the arm still scores pairs and reports System-1 calls - 257 of them in round 20261001-1300 - and the TAS half is a claim about ordering, which must be measurable with the System-1 lane absent rather than merely unscoped, reporting zero System-1 calls, tokens and time. Run recipe: a live profile must pair `s1.provider: none` with `laya.enabled: false`, because `laya.enabled: true` beside `provider: none` is a reported conflict (`singleBackendIssues`, packages/s1-client/src/resolve.ts); `laya` is a profile key and is deliberately not carried by this preset.",
+    "planGateRemoved": "This arm never gated anything, and as of 2026-10-02 neither does `C2`: the `planGate` block that used to sit below is gone from every preset and from the policy. Round `20261002-2037` recorded zero `plan_gate` events in any artifact, so the gate was never observed to fire in the one cell that had it on. See `C0.json`'s note and `packages/core/src/types.ts`."
   },
   "cell": "C1",
   "tas": { "on": true, "tMaxChars": 8000, "updatePolicy": "perTask" },
@@ -16,6 +17,5 @@
     "budgetRatio": 0.35
   },
   "tail": { "k": 3 },
-  "planGate": { "on": false, "maxPlans": 3, "attemptCap": 2, "abstainConfidence": 0.5 },
   "s1": { "provider": "none", "questionsPerCall": 20 }
 }

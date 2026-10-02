@@ -132,6 +132,13 @@ $$
 
 ## 4. Plan gate (S1 decision backend + PLAN GATE, factor S1G on)
 
+> **Design, not wiring, as of 2026-10-02.** Every formula in this section is the specification of the gate, and the
+> gate is not run by any cell: round `20261002-2037` produced zero `plan_gate` records with C2 carrying the knob
+> `on`, because neither of the gate's two triggers (a numbered plan in an assistant message, a `todo/write` session
+> event) occurred. The knob has been removed from the policy, the presets, the config schema and the report; the
+> mechanism below is kept, implemented and unit-tested, so an arm with a plan source the model actually writes to can
+> run it. See `packages/core/src/types.ts`.
+
 After the LLM produces a plan set $\Pi = \{\pi_1,\dots,\pi_m\}$ ($m \le 3$), it **hands the candidate plans directly to the S1 decision backend** for one choice scoring, retrieving probabilities $p_i$ and confidences $\mathrm{conf}_i$; **PLAN GATE consumes the scoring results** and is responsible only for normalization, the abstention decision, the attempt limit, and ordering. **Server-side normalization** (Jev does not guarantee $\sum p_i = 1$):
 
 $$

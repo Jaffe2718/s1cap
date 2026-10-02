@@ -46,9 +46,12 @@
  * is counted in `S1RelevanceStats` rather than left silent - a retry nobody can see is how "the backend was
  * slow" stayed indistinguishable from "the backend was refusing" for a whole round.
  */
-import { S1CancelledError, S1HttpError, S1TimeoutError, noul, normalize } from '@s1cap/s1-client';
+import { S1CancelledError, S1HttpError, S1TimeoutError, S1_RETRYABLE_STATUS, noul, normalize } from '@s1cap/s1-client';
                                                    
-                                           
+                                                       
+import { S1_DEFERRED } from '@s1cap/core';
+
+                                                         
 
 /**
  * How much of each segment is shown to the backend.
@@ -151,6 +154,21 @@ function isRetryable(err         )          {
                                                                           
      
                                     
+     
+                                                              
+    
+                                                                                                                
+                                                                                                               
+                                                                                                              
+                                                                                                                
+                                                                                                              
+                                                   
+    
+                                                                                                                  
+                                                                                                                   
+                                                                                                         
+     
+                              
  
 
                                    
@@ -188,14 +206,30 @@ function isRetryable(err         )          {
                                                 
      
                              
+     
+                                                                                                            
+    
+                                                                                                            
+                                                                                                           
+                                                                                             
+     
+                  
+                                                                                          
+                         
+                                                                                              
+                           
+                                                                  
+                         
  
 
                               
      
                                                                                                             
-                                                                             
+                                                                                                            
+                                                                                                               
+                                                               
      
-                                                                                             
+                                                                                                          
                             
  
 
@@ -240,6 +274,10 @@ export function createS1Relevance(opts                    )              {
     retries: 0,
     reducedBatches: 0,
     gaveUpAfterRetries: 0,
+    blocked: 0,
+    blockedByLimit: 0,
+    blockedByBreaker: 0,
+    backpressured: false,
   };
   const perCall = Math.max(1, Math.trunc(opts.questionsPerCall ?? 16));
   const clock = opts.now ?? Date.now;
@@ -248,7 +286,10 @@ export function createS1Relevance(opts                    )              {
   /** one line, not one per segment: "no backend" is a mode, and a mode repeated per segment is noise */
   let reportedNoClient = false;
 
-  const scoreBatch = async (current         , candidates                    )                                         => {
+  const scoreBatch = async (
+    current         ,
+    candidates                    ,
+  )                                                      => {
     if (candidates.length === 0) return [];
     const started = clock();
     const out = new Array        (candidates.length).fill(0);
@@ -287,6 +328,40 @@ export function createS1Relevance(opts                    )              {
         batch = [];
         for (let i = cursor; i < candidates.length && batch.length < size; i += 1) batch.push(i);
         if (batch.length < natural) stats.reducedBatches += 1;
+
+        // Admission, before a single question is rendered: the backend takes 16 requests at once and refuses the
+        // rest, so a request that cannot be admitted this instant is not worth composing. A refusal here is not a
+        // failure and is not retried - the window goes back to the graph as `S1_DEFERRED`, which holds the pairs
+        // without scoring them lexically, and the next upkeep tick offers them again.
+        //
+        // It is checked per attempt rather than per batch, because a retry is a second request and is exactly what
+        // the gate exists to ration. The wait between two attempts is `Retry-After`, which the gate does not
+        // replace: `retryAttempts` still governs one refusal, and the gate governs a backend that refuses all of
+        // them.
+        // Admission, taken immediately before the request and never released by it: `decide` is the frame that
+        // makes the call, so it hands the slot back to the gate when the request settles. Acquired per *chunk*
+        // and reused across its retries - a retry is the same request being asked again, and charging the gate
+        // twice for it would let one refused window exhaust a budget meant for windows.
+        let admittedThisChunk = false;
+        if (opts.backpressure !== undefined && !admittedThisChunk) {
+          const admission = opts.backpressure.tryAcquire();
+          if (!admission.ok) {
+            stats.blocked += 1;
+            stats.backpressured = true;
+            if (admission.reason === 'breaker-open') stats.blockedByBreaker += 1;
+            else stats.blockedByLimit += 1;
+            // Reported once per state change rather than once per window: the gate is a mode, and a line per
+            // deferred window on a saturated backend is a log nobody reads.
+            if (stats.blocked === 1 || stats.blocked % 50 === 0) {
+              opts.onWarn?.(
+                `[s1cap] relevance: not asking (${admission.reason}); ${stats.blocked} window(s) held back so far. ` +
+                  'Their pairs are reported as the graph\'s `deferredPairs` and are not scored lexically.',
+              );
+            }
+            return S1_DEFERRED;
+          }
+          admittedThisChunk = true;
+        }
 
         // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
         // the candidate's position in the window, so the model can still tell which part of the history it is
@@ -330,12 +405,18 @@ export function createS1Relevance(opts                    )              {
           // and it is handled here rather than by a TypeError on `result.answers`, which is what it used to be.
           // It is also not retried: there is no endpoint to ask again.
           if (result === undefined) {
+            // The gate was charged for a request that was never made: `decide` answered "there is no backend",
+            // which it can do without touching the network (no client, or a provider resolved to `none`). Handing
+            // the slot back keeps the in-flight count a measure of requests rather than of calls to a thunk.
+            opts.backpressure?.recordSuccess();
             if (!reportedNoClient) {
               reportedNoClient = true;
               opts.onWarn?.('[s1cap] relevance: no System-1 client is answering; windows are scored lexically');
             }
             return undefined;
           }
+          // The backend answered this request, which is what closes the breaker: not a timer, and not a guess.
+          opts.backpressure?.recordSuccess();
           answers = result.answers;
           stats.calls += 1;
           stats.inputTokens += result.usage?.input_tokens ?? 0;
@@ -348,6 +429,16 @@ export function createS1Relevance(opts                    )              {
           // a backend that answered something unusable. They used to arrive here as one TypeError.
           if (err instanceof S1TimeoutError) stats.timedOut += 1;
           else if (err instanceof S1CancelledError) stats.cancelled += 1;
+          // What the gate is told, and why it is this narrow. A *refusal* - a retryable status, which is Laya's
+          // `503 server busy` and the 429/gateway family - is the backend saying "not now", and a run of them is
+          // the saturation the breaker exists for. A transport timeout is the opposite signal at the same
+          // counter: the backend was working on the request for 30 s, so pausing would add a pause to a server
+          // that is merely slow. A cancellation is the caller's decision. Only the first is a refusal.
+          if (err instanceof S1HttpError && S1_RETRYABLE_STATUS.includes(err.status)) {
+            opts.backpressure?.recordRefusal();
+          } else {
+            opts.backpressure?.recordSuccess();
+          }
 
           const retryable = isRetryable(err);
           const elapsed = clock() - started;

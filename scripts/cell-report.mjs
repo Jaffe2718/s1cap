@@ -888,6 +888,17 @@ function aggregate(cell) {
 
   const rgScored = Number(cell.rg.scoredPairs || 0);
   const rgJudged = Number(cell.rg.judgedPairs || 0);
+  /**
+   * Pairs the run declined to offer because the System-1 backend was saturated.
+   *
+   * Reported beside `judgedPairs / scoredPairs`, never inside it, and the distinction is what keeps the coverage
+   * ratio honest. `scoredPairs` counts the pairs a scorer was shown; a pair the admission gate held back was shown
+   * to nobody, so folding it into the denominator would print coverage over work that never happened, and leaving
+   * it out without saying so would hide the work the run chose not to do. The snapshot carries it; a graph written
+   * before the field existed has none, which reads as 0 and is rendered as "not recorded" rather than as a zero.
+   */
+  const rgDeferred = Number(cell.rg.deferredPairs || 0);
+  const rgDeferredRecorded = cell.rg.deferredPairs !== undefined;
   const edgeSources = {};
   for (const e of cell.rg.edges || []) edgeSources[e.source] = (edgeSources[e.source] || 0) + 1;
   const rgAsOf = (cell.rg.scores || []).reduce((a, s) => Math.max(a, s.at || 0), 0)
@@ -916,6 +927,10 @@ function aggregate(cell) {
     s1ErrorTop: [...s1Errors.entries()].sort((a, b) => b[1] - a[1])[0] || null,
     scoredPairs: rgScored,
     judgedPairs: rgJudged,
+    deferredPairs: rgDeferred,
+    // A cell whose graph predates the field has no deferral *reading*; printing 0 for it would claim the run was
+    // never held back, which is a different statement from "this snapshot cannot say".
+    deferredRecorded: rgDeferredRecorded,
     coverage: laneAbsent ? null : (rgScored > 0 ? rgJudged / rgScored : null),
     edgeSourceS1: edgeSources['s1-noul'] || 0,
     edgeSourceLexical: edgeSources.lexical || 0,
@@ -1177,6 +1192,14 @@ function renderMarkdown(analysis) {
   out.push('a low coverage and did **not** receive its configured System-1 governance, whatever its call count');
   out.push('says - which is why coverage is repeated beside every System-1 column below.');
   out.push('');
+  out.push('`scoredPairs` is what the backend was *offered* and `judgedPairs` what it answered. Since 2026-10-02 a');
+  out.push('third number sits beside them, because the upkeep now stops asking a backend that is refusing:');
+  out.push('`deferredPairs` is the work the admission gate held back, which was offered to nobody. It is deliberately');
+  out.push('**not** in the coverage denominator - a pair that was never shown is not a pair the backend failed to');
+  out.push('judge - and it is deliberately not omitted either, because silence about it would make "the run stopped');
+  out.push('asking" indistinguishable from "the backend answered little". Deferred work is not scored lexically: the');
+  out.push('graph holds its cursor and offers the window again, so a deferred pair is delayed, not lost.');
+  out.push('');
   out.push('Two readings that look alike are kept apart here. A cell with the lane switched off has zero');
   out.push('System-1 calls, tokens and time *by construction*; a cell with a lane whose backend refused every');
   out.push('request has a real call count, a real failure split and a measured coverage. The lane state is read,');
@@ -1197,6 +1220,11 @@ function renderMarkdown(analysis) {
     ['association pairs judged / scored', ...cells.map((c) => (c.a.diagnostics.laneAbsent
       ? `${fmtInt(c.a.diagnostics.judgedPairs)} / ${fmtInt(c.a.diagnostics.scoredPairs)} (backend never judged)`
       : `${fmtInt(c.a.diagnostics.judgedPairs)} / ${fmtInt(c.a.diagnostics.scoredPairs)}`))],
+    // The third number, and the reason `judged / scored` stays readable when the backend is refusing: a pair the
+    // admission gate held back was never offered to anyone, so it is counted here rather than in the denominator.
+    ['association pairs deferred (not offered)', ...cells.map((c) => (c.a.diagnostics.deferredRecorded
+      ? fmtInt(c.a.diagnostics.deferredPairs)
+      : '— (not recorded by this snapshot)'))],
     ['**System-1 coverage**', ...cells.map((c) => (c.a.diagnostics.laneAbsent ? '**undefined** (no S1 lane)' : `**${fmtPct(c.a.diagnostics.coverage)}**`))],
     ['association edges from s1-noul / lexical', ...cells.map((c) => `${fmtInt(c.a.diagnostics.edgeSourceS1)} / ${fmtInt(c.a.diagnostics.edgeSourceLexical)}`)],
     ['context injections delivered', ...cells.map((c) => `${fmtInt(c.a.diagnostics.injections)} of ${fmtInt(c.a.diagnostics.contextSteps)} steps`)],
@@ -2380,7 +2408,7 @@ function buildSyntheticRun(root) {
     ],
     scores: [{ from: 'a', to: 'b', w: 0.3, source: 'lexical', at: 1032 }],
   };
-  const tapeE = [{ schema: 0, kind: 'wiring', s1: 'none', relevance: false, planGate: false, xFirst: false }];
+  const tapeE = [{ schema: 0, kind: 'wiring', s1: 'none', relevance: false, xFirst: false }];
 
   // --- cell F: a lane that exists and refused every call -----------------------------------------
   const F = [];

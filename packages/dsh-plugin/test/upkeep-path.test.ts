@@ -1,5 +1,5 @@
 /**
- * The upkeep path, end to end, from session events to segments, edges and the plan gate.
+ * The upkeep path, end to end, from session events to segments and edges.
  *
  * These tests exist because every live session so far has shown the same shape: upkeep reports events enqueued
  * and applied, and `upkeepSegments: 0` - so the counters prove the queue ran and prove nothing about whether it
@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { defaultPolicy } from '@s1cap/core';
+import { defaultPolicy, S1_DEFERRED } from '@s1cap/core';
 
 import { createStepObserver } from '../src/step-observer.ts';
 import type { StepObserver } from '../src/step-observer.ts';
@@ -17,17 +17,13 @@ import type { StepObserver } from '../src/step-observer.ts';
 interface Harness {
   observer: StepObserver;
   ticks: (() => void)[];
-  seenByGate: string[];
-  seenTodos: { content: string; status: string }[][];
   scored: unknown[];
   records: unknown[];
   session: { id: string; kind: string; seq: number }[];
 }
 
-function harness(opts: { withGate?: boolean; withScorer?: boolean; withSession?: boolean } = {}): Harness {
+function harness(opts: { withScorer?: boolean; withSession?: boolean } = {}): Harness {
   const ticks: (() => void)[] = [];
-  const seenByGate: string[] = [];
-  const seenTodos: { content: string; status: string }[][] = [];
   const scored: unknown[] = [];
   const records: unknown[] = [];
   const session: { id: string; kind: string; seq: number }[] = [];
@@ -48,20 +44,6 @@ function harness(opts: { withGate?: boolean; withScorer?: boolean; withSession?:
           },
         }
       : {}),
-    ...(opts.withGate === true
-      ? {
-          planGate: {
-            consider: async (text: string) => {
-              seenByGate.push(text);
-              return undefined;
-            },
-            considerTodos: async (todos: { content: string; status: string }[]) => {
-              seenTodos.push(todos);
-              return undefined;
-            },
-          },
-        }
-      : {}),
     ...(opts.withScorer === true
       ? {
           scoreBatch: async (current: unknown, candidates: readonly unknown[]) => {
@@ -71,7 +53,7 @@ function harness(opts: { withGate?: boolean; withScorer?: boolean; withSession?:
         }
       : {}),
   });
-  return { observer, ticks, seenByGate, seenTodos, scored, records, session };
+  return { observer, ticks, scored, records, session };
 }
 
 /** Wait for the queue's async handler to settle; the flush itself is synchronous. */
@@ -163,18 +145,41 @@ test('a turn boundary drains the queue, so the last message of a turn is not lef
   assert.ok(h.observer.stats().upkeepSegments > 0, 'and it became a segment');
 });
 
-test('the plan gate is offered the model\'s output once the turn drains', async () => {
-  const h = harness({ withGate: true });
-  for (const event of sessionEvents()) h.observer.noteSessionEvent(event);
+/**
+ * The plan gate used to be exercised here: two tests drove the observer with a gate attached and asserted that the
+ * model's own output - and a `todo/write` event - reached it.
+ *
+ * Both are deleted with the wiring they tested. The observer no longer has a `planGate` option at all, because the
+ * policy field is gone: round `20261002-2037` produced zero `plan_gate` records in any artifact of the round, since
+ * the gate can read a plan only from a numbered list in an assistant message or a `todo/write` session event and the
+ * model wrote neither (`packages/core/src/types.ts` has the evidence). The mechanism itself is still tested, one
+ * layer down, in `plan-gate.test.ts`: what was removed is the claim that C2 ran it.
+ *
+ * What is asserted here instead is the part of that wiring that was a *counting* decision and survives the removal:
+ * a `todo/write` event is still a lifecycle event, so it is still counted as empty and still costs the graph
+ * nothing. If a gate is ever wired back in, it belongs before this early return - a `todo/write` carries no message
+ * and would otherwise never be seen.
+ */
+test('a todo/write event is a lifecycle event: counted, and no segment', async () => {
+  const h = harness();
+  h.observer.noteSessionEvent({
+    type: 'todo/write',
+    data: {
+      todos: [
+        { content: 'read the failing test', status: 'pending' },
+        { content: 'patch the assertion', status: 'in_progress' },
+        { content: 'write a numbered plan in prose instead', status: 'pending' },
+      ],
+    },
+  });
   h.ticks.forEach((tick) => tick());
   await settle();
 
-  assert.ok(h.seenByGate.length > 0, 'the gate was offered the model\'s output');
-  assert.ok(
-    h.seenByGate.some((t) => t.includes('inventory the layout')),
-    'including the plan, which arrives merged with the reasoning part',
-  );
-  assert.ok(!h.seenByGate.some((t) => t.includes('inspect this repository')), 'never the user\'s own message');
+  const stats = h.observer.stats();
+  assert.equal(stats.upkeepEmpty, 1, 'it adapts to no message, so it is counted as an empty event');
+  assert.equal(stats.upkeepSegments, 0, 'and it produces no segment');
+  assert.equal(stats.graphSegments, 0, 'so the graph holds nothing from it');
+  assert.equal(stats.errors, 0, 'and nothing threw');
 });
 
 test('a batch scorer is called for the window once there is a previous segment to score against', async () => {
@@ -187,6 +192,42 @@ test('a batch scorer is called for the window once there is a previous segment t
   const stats = h.observer.stats();
   assert.ok(stats.upkeepScoredPairs > 0, 'and the pairs are counted');
   assert.ok(stats.graphEdges > 0, 'a weight above the threshold produced an edge');
+  assert.equal(stats.upkeepDeferredPairs, 0, 'nothing was held back by a scorer that answers');
+});
+
+test('a scorer that defers its windows is counted, not scored, and the graph holds no edge for it', async () => {
+  // The wiring half of `S1_DEFERRED` (`backpressure.test.ts` holds the mechanism). What this pins is that the
+  // observer's counters separate "the backend answered little" from "we stopped asking": a deferred window is
+  // neither a lexical score nor an edge, and `upkeepDeferredPairs` is where it is reported.
+  const ticks: (() => void)[] = [];
+  const records: unknown[] = [];
+  let calls = 0;
+  const observer = createStepObserver({
+    policy: defaultPolicy(),
+    emit: (event) => records.push(event),
+    now: () => 1_790_000_000_000,
+    contextWindow: 128_000,
+    reserveOutputTokens: 8_000,
+    fixedOverheadTokens: 1_200,
+    lambdaMs: 36 * 60 * 60 * 1000,
+    maxLagTurns: 2,
+    schedule: (tick) => ticks.push(tick),
+    scoreBatch: async () => {
+      calls += 1;
+      return S1_DEFERRED;
+    },
+  });
+  for (const event of sessionEvents()) observer.noteSessionEvent(event);
+  ticks.forEach((tick) => tick());
+  await settle();
+
+  const stats = observer.stats();
+  assert.ok(calls > 0, 'the scorer was asked, and declined');
+  assert.equal(stats.upkeepJudgedPairs, 0, 'the backend judged nothing');
+  assert.equal(stats.upkeepScoredPairs, 0, 'and nothing was offered, so nothing is counted as scored');
+  assert.ok(stats.upkeepDeferredPairs > 0, `the held-back pairs are counted (${stats.upkeepDeferredPairs})`);
+  assert.equal(stats.graphEdges, 0, 'no edge was invented from a window that was never judged');
+  assert.equal(stats.errors, 0, 'and a deferral is not an error');
 });
 
 test('the session-content stream is fed the RawEvents that entered the graph, and only those', async () => {
@@ -217,35 +258,6 @@ test('the session-content stream is fed the RawEvents that entered the graph, an
  * something S1CAP measures. Those two statements are the whole test, and the tension between them is why it
  * exists.
  */
-test('a plan written with the todo tool reaches the gate, although it carries no message', async () => {
-  // The wiring, not the parser (that is pinned in plan-gate.test.ts). `todo/write` adapts to nothing — it is a
-  // lifecycle event — so it hits the `raw.length === 0` early return, and asking the gate after that return is
-  // exactly how a tool-planning model ends up with an empty decision column and counters that all look healthy.
-  const h = harness({ withGate: true });
-  h.observer.noteSessionEvent({
-    type: 'todo/write',
-    data: {
-      todos: [
-        { content: 'read the failing test', status: 'pending' },
-        { content: 'patch the assertion', status: 'in_progress' },
-        { content: 'write a numbered plan in prose instead', status: 'pending' },
-      ],
-    },
-  });
-  h.ticks.forEach((tick) => tick());
-  await settle();
-
-  assert.equal(h.seenTodos.length, 1, 'the gate was asked once');
-  assert.deepEqual(
-    h.seenTodos[0]?.map((t) => t.content),
-    ['read the failing test', 'patch the assertion', 'write a numbered plan in prose instead'],
-    'every item, in the order the host logged it',
-  );
-  assert.equal(h.seenByGate.length, 0, 'and it did not also arrive as an assistant message');
-  const stats = h.observer.stats();
-  assert.equal(stats.upkeepEmpty, 1, 'it is still a lifecycle event as far as upkeep counting is concerned');
-  assert.equal(stats.errors, 0);
-});
 
 test('a delivered context block never becomes a segment, but the session file still records it', async () => {
   const h = harness({ withSession: true });

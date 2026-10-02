@@ -48,7 +48,8 @@ import type { Tuning } from './credentials.ts';
 import { createStepObserver } from './step-observer.ts';
 import type { StepObserver } from './step-observer.ts';
 import { createS1Relevance } from './s1-relevance.ts';
-import { createPlanGate } from './plan-gate-runtime.ts';
+import { createBackpressure } from './s1-backpressure.ts';
+import type { Backpressure } from './s1-backpressure.ts';
 
 export interface S1CapPluginConfig extends AssemblyPolicy {
   /** master switch: anything other than true keeps the plugin completely inert (default false)
@@ -493,6 +494,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * The session id on the pre-step payload: `agent.session.id`, the same path the observer reads.
+ *
+ * It is read here, and not taken from the assembly record, because the delivery report is now written on steps
+ * that assemble nothing - and on those the assembly record does not exist. The alternative was to drop the field
+ * exactly where the refusals are, which would make `context_delivery` records split into two shapes by whether
+ * the step could deliver, in the one file this project reads to tell those two apart.
+ */
+function readPayloadSessionId(payload: unknown): string {
+  if (!isRecord(payload)) return 'unassigned';
+  const agent = payload['agent'];
+  if (!isRecord(agent)) return 'unassigned';
+  const session = agent['session'];
+  if (!isRecord(session)) return 'unassigned';
+  const id = session['id'];
+  return typeof id === 'string' && id !== '' ? id : 'unassigned';
+}
+
 export interface PreStepOptions {
   observer?: StepObserver;
   /** the cell name, recorded on every delivery record: whether delivery was possible is a property of the cell */
@@ -537,32 +556,23 @@ export function preStepMiddleware(
       }
     }
     const decision = await next();
-    let observation: StepObservation | undefined;
-    try {
-      // Segment, recall and assemble for real, and record the result in the control plane. `observe()` never
-      // throws, and neither does this catch: a failed observation costs the record, never the step.
-      observation = await observer?.observe(payload);
-    } catch (err) {
-      ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
-    }
-
-    // Context delivery - the step where an assembled layout becomes what the model is shown.
-    //
-    // The first three guards are the harness's own, read out of the packaged `dsh-agent` source rather than
-    // assumed: a rejected or aborted decision goes back exactly as it arrived, and a decision without messages
-    // has nothing to rewrite. Everything after them is ours, and every failure in it returns the untouched
-    // decision: the failure mode of the intervention is that it does not happen, never a broken round.
-    if (options === undefined || observation === undefined) return decision;
     const record = decision as { kind?: unknown; messages?: unknown; signal?: { aborted?: boolean } };
     const before = Array.isArray(record.messages) ? record.messages.length : 0;
+    // `position.step`, for the one reason the delivery module reads it: the harness treats "step 1 with nothing
+    // claimed" as no step at all, and that is a more specific cause than "the decision carried no messages".
+    const step = isRecord(payload) && typeof payload['step'] === 'number' ? payload['step'] : 0;
     const report = (delivered: boolean, reason: string, extra: Partial<TelemetryEvent> = {}): void => {
       try {
-        options.emit({
+        options?.emit({
           type: 'context_delivery',
           schema: TELEMETRY_SCHEMA_VERSION,
           ts: Date.now(),
-          ...(typeof observation?.event.sessionId === 'string' ? { sessionId: observation.event.sessionId } : {}),
-          cell: options.cell,
+          // The session id used to be read off the assembly record, which is now absent on exactly the steps that
+          // are reported here without having assembled anything. It is the same session either way, and the
+          // payload carries it: `agent.session.id`, read the way the observer reads it, with `unassigned` only
+          // when the payload does not expose one - which is a fact about the payload, not a missing value.
+          sessionId: readPayloadSessionId(payload),
+          cell: options?.cell ?? 'unassigned',
           delivered,
           reason,
           messagesBefore: before,
@@ -572,14 +582,30 @@ export function preStepMiddleware(
           inserted: 0,
           blocks: [],
           payloadId: '',
-          order: observation?.layout.order ?? [],
+          order: [],
           ...extra,
         } as TelemetryEvent);
       } catch (err) {
         ctx.logger?.warn?.(`[s1cap] context_delivery record rejected: ${String(err)}`);
       }
     };
-    if (record.kind === 'reject' || record.signal?.aborted === true || !Array.isArray(record.messages)) {
+
+    // The cheap check, and it has to be cheap because it is the whole point of it: whether this step can receive a
+    // block at all, decided from the harness's own decision and *before* anything is assembled.
+    //
+    // `decision.messages` is the step's increment - what the harness is about to append to the log - so an empty
+    // one means there is no request for a block to be part of, and `deliverContext` refuses on exactly this
+    // condition ("the decision carried no messages"). That refusal was always right; what was wrong was paying for
+    // it. A measured diagnostic round assembled 1,205,029 recalled tokens over 277 steps and delivered 1,597 of
+    // them (0.133%), because 275 of those steps reached the assembler - the walk, the anchor wait, T's rebuild -
+    // before anyone asked whether the assembled view had anywhere to go. The same condition is not a quirk of
+    // that cell: the control cell's refusals are 74 of 76 for the same reason.
+    //
+    // A rejected or aborted decision is the same cheap class and is reported in the same place, for the same
+    // reason: three fields tell us the answer, and the assembly is downstream of all three.
+    const stepMessages = record.messages;
+    const deliverable = Array.isArray(stepMessages) && stepMessages.length > 0;
+    if (record.kind === 'reject' || record.signal?.aborted === true || !Array.isArray(stepMessages)) {
       report(
         false,
         record.kind === 'reject'
@@ -590,6 +616,38 @@ export function preStepMiddleware(
       );
       return decision;
     }
+    // A step that cannot receive context still gets *read*: the observer ingests the payload's segments into the
+    // graph and stops before the assembly. Skipping the observation outright would leave the graph missing exactly
+    // the steps the harness claims nothing for, which in the measured round was 275 of 277 - the segments would
+    // simply never exist.
+    let observation: StepObservation | undefined;
+    try {
+      // Segment, recall and assemble for real, and record the result in the control plane. `observe()` never
+      // throws, and neither does this catch: a failed observation costs the record, never the step.
+      observation = await observer?.observe(payload, { assemble: deliverable });
+    } catch (err) {
+      ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
+    }
+    if (!deliverable) {
+      // Reported in the delivery module's own words, because the record has to stay the same record: the report
+      // scripts count refusals by `delivered: false` and read this reason, and a new sentence here would make the
+      // same event look like a different one. What is new is only that the step no longer paid for it first. The
+      // harness's sharper first-step reason is kept ahead of it, exactly as `deliverContext` orders the two.
+      report(
+        false,
+        step === 1
+          ? 'step 1 with no claimed messages: the harness treats this as no step at all'
+          : 'the decision carried no messages',
+      );
+      return decision;
+    }
+
+    // Context delivery - the step where an assembled layout becomes what the model is shown.
+    //
+    // The harness's own guards ran above, before the assembly; everything after here is ours, and every failure in
+    // it returns the untouched decision: the failure mode of the intervention is that it does not happen, never a
+    // broken round.
+    if (options === undefined || observation === undefined) return decision;
     try {
       const result = options.deliver(observation, decision as Record<string, unknown>, payload);
       if (!result.delivered || result.messages === null) {
@@ -759,7 +817,7 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   let client: S1Client | undefined = initial.client;
 
   ctx.logger?.info(
-    `[s1cap] cell=${config.cell} tas=${String(config.tas.on)} tier1=${config.recall.tier1} planGate=${String(config.planGate.on)} laya=${String(layaConfig.enabled)}`,
+    `[s1cap] cell=${config.cell} tas=${String(config.tas.on)} tier1=${config.recall.tier1} admissionLimit=${config.s1.admissionLimit} laya=${String(layaConfig.enabled)}`,
   );
   ctx.logger?.info(`[s1cap] s1 backend: ${describeS1Backend(backend)}`);
   if (resolved.conflicts.length > 0) ctx.logger?.warn('[s1cap] this session makes no System-1 calls (provider=none)');
@@ -780,13 +838,12 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
   // semantics are not verified yet, and a wrong window would silently distort every budget number.
   let observer: StepObserver | undefined;
   /**
-   * The two System-1 components, hoisted for the same reason `observer` is: they are constructed inside the
+   * The System-1 scorer, hoisted for the same reason `observer` is: it is constructed inside the
    * enabled-branch and reported by `/s1` outside it. A `const` in the inner block is correct at the construction
    * site and invisible to the status command, which is how a declared-and-constructed component can look present
    * in the log while the counter that would prove it ran cannot be printed.
    */
   let relevance: ReturnType<typeof createS1Relevance> | undefined;
-  let planGate: ReturnType<typeof createPlanGate> | undefined;
   /**
    * Sink counters, closure-level so `/s1` can read them. This project's dominant failure is a component that is
    * constructed and wired but never actually fed - the block-scoped `sink`/`sessionSink` live inside the
@@ -808,6 +865,15 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
    * "constructed where it cannot be reached" shape this project keeps meeting.
    */
   let controlLogRef: ControlPlaneLog | undefined;
+  /**
+   * The System-1 admission gate, hoisted out of the observation branch for the same reason `controlLogRef` is, and
+   * for a reason a test found: it is *created* inside that branch but *read* by the `/s1` status handler, which is
+   * registered outside it. Declared in there, `observation: "off"` - a supported configuration - made the status
+   * route throw `ReferenceError: backpressure is not defined` instead of answering, and every test that applies the
+   * plugin without observation caught it. The object is created only when observation is on, which is the only case
+   * that scores anything; a status route reading `undefined` answers `null` for it rather than failing.
+   */
+  let backpressure: Backpressure | undefined;
   /** one assemble() per session; awaited by the first pre-step call (a short round can exit before a fire-and-forget promise settles)
  */
   let priming: Promise<void> | undefined;
@@ -1033,8 +1099,21 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     // came from the lexical fallback, with `s1CallRecords: 0`. A delegate that answers `undefined` when there is no
     // client is the same thing the missing object meant, so behaviour is unchanged when nothing is configured —
     // `packages/core/src/assoc-graph.ts` treats an `undefined` batch as "score these lexically".
+    //
+    // One gate per plugin activation, shared by everything that asks this backend (see `s1-backpressure.ts`). It is
+    // built here rather than per scorer because the limit is a property of the *backend*: two scorers each holding
+    // their own half of the budget would together still exceed it. The binding itself is declared outside this
+    // branch, because `/s1` reads it from outside too.
+    backpressure = createBackpressure({
+      maxInFlight: config.s1.admissionLimit,
+      onWarn: (message) => ctx.logger?.warn?.(message),
+    });
     relevance = createS1Relevance({
       decide: async (state, questions) => {
+        // No client means no backend to ask, and that is a *state*, not a saturated backend: `undefined` keeps the
+        // documented behaviour for it (score this window lexically, once, and move on) rather than deferring a
+        // window that has nothing to wait for. Nothing is acquired on this path either - there is no endpoint whose
+        // load the gate could be measuring.
         if (client === undefined) return undefined;
         const count = Object.keys(questions).length;
         try {
@@ -1053,30 +1132,26 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         }
       },
       questionsPerCall: config.s1.questionsPerCall,
+      // The admission gate. One cell saturated the shared backend by itself in round `20261002-2037` - 5 992
+      // requests at 2.70/s over 2 220 s, 64.4 % of them refused, none of them backing off - because the upkeep
+      // queue starts several scoring loops per tick and each of them asks for its whole window. The gate caps what
+      // this cell may have in flight and stops asking when the backend says no; a window it does not send comes
+      // back to the graph as deferred, so its pairs are held rather than bought from the lexical fallback. The gate
+      // is consulted inside the scorer, immediately before each request, so a retry is rationed by it too.
+      backpressure,
       onWarn: (message) => ctx.logger?.warn?.(message),
     });
     if (client !== undefined) {
       ctx.logger?.info?.(
-        `[s1cap] relevance: S1 batch scoring active (${describeS1Backend(backend)}, up to ${config.s1.questionsPerCall} candidates per call)`,
+        `[s1cap] relevance: S1 batch scoring active (${describeS1Backend(backend)}, up to ${config.s1.questionsPerCall} candidates per call, ${config.s1.admissionLimit} request(s) in flight, ${config.s1.retryAttempts} attempt(s) per request)`,
       );
     }
-    // The plan gate scores the model's own candidate plans with a choice question. It is advisory: the order is
-    // computed and recorded, and nothing in this plugin feeds it back into a prompt or a stop decision.
-    planGate = createPlanGate(
-      { policy: config, emit: (event) => controlLog.emit(event), onWarn: (m) => ctx.logger?.warn?.(m) },
-      async (state, questions) => {
-        if (client === undefined) return undefined;
-        const count = Object.keys(questions).length;
-        try {
-          const result = await client.decide(state, questions);
-          recordS1Call('decide', 'choice', count, result, s1SessionScope);
-          return result;
-        } catch (err) {
-          recordS1Failure('decide', 'choice', count, err, s1SessionScope);
-          return undefined;
-        }
-      },
-    );
+    // There was a plan gate here. It is gone from the policy, the presets, this wiring and the report; the reason
+    // and the evidence are in `packages/core/src/types.ts` beside the missing `planGate` field. In short: round
+    // `20261002-2037` records no `plan_gate` event in any artifact, because the gate can only read a numbered plan
+    // from an assistant message or a `todo/write` session event and the model produced neither. A knob that is on
+    // in the wiring and cannot fire makes C2 - the arm whose whole purpose is to be the full configuration - claim
+    // an ordering step it never ran.
     observer = createStepObserver({
       policy: config,
       // Every session gets its own graph, and the graph is written to disk as it changes, so "start a new chat"
@@ -1094,17 +1169,20 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         // installed, so a property that does not exist on the declared type ships silently.
         return relevance === undefined ? Promise.resolve(undefined) : relevance(state, candidates);
       },
-      planGate: {
-        consider: async (...args) => {
-          s1SessionScope = String(args[1] ?? s1SessionScope);
-          return planGate?.consider(...(args as Parameters<typeof planGate.consider>));
-        },
-        considerTodos: async (...args) => {
-          s1SessionScope = String(args[1] ?? s1SessionScope);
-          return planGate?.considerTodos(...(args as Parameters<typeof planGate.considerTodos>));
-        },
-        stats: () => planGate?.stats() ?? null,
-      },
+      /**
+       * The most pairs one upkeep tick may offer, across every segment it folds in.
+       *
+       * `scoreNew` scores each segment that arrived since the last call against its whole window, and the upkeep
+       * queue starts several of those per tick, so without a budget the first tick of a session that has already
+       * accumulated history offers `segments x w` pairs in one burst - which the backend refuses. The measured run
+       * walked 1 976 845 candidate-segment positions for 1 597 that reached the model.
+       *
+       * 2 048 is around a hundred requests at the configured 20 questions per call: enough that steady-state
+       * upkeep (one new segment, a window of `w`) is never cut short, small enough that a cold start or a burst
+       * cannot become the burst the admission limit punishes. A pair the budget holds back is **deferred**, not
+       * scored lexically: the graph does not advance its cursor over it, so the next tick offers it again.
+       */
+      maxPairsPerSweep: 2048,
       emit: (event) => {
         try {
           controlLog.emit(event);
@@ -1177,7 +1255,8 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         // unconditionally now so that a late-arriving client is picked up, which makes "the object is there" a
         // statement about nothing and "there is a client to call" the fact worth writing down.
         relevance: client !== undefined,
-        planGate: client !== undefined,
+        // No `planGate` key: the policy field is gone, and a wiring record that still announced one would be the
+        // exact artifact this removal exists to stop producing - a run stating a component it does not have.
         xFirst: config.xFirst,
         recall: { d: config.recall.depth, r: config.recall.threshold, w: config.recall.window, wait: config.recall.anchorWaitMs },
         tas: config.tas,
@@ -1520,7 +1599,6 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           },
           tail: config.tail,
           xFirst: config.xFirst,
-          planGate: config.planGate,
           s1: {
             provider: backend.provider,
             // What the config asks for, next to what the session actually resolved to. The two differ whenever a
@@ -1532,6 +1610,15 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
             model: backend.model,
             key: redactKey(backend.apiKey),
             questionsPerCall: config.s1.questionsPerCall,
+            // How many requests this cell may have in flight, and what the gate has actually done with that
+            // budget. `relevance.stats().blocked` says how many windows were held back; this says whether the
+            // reason was the in-flight cap or an open breaker, and whether the backend has since answered again.
+            // Without it, the blocked count alone cannot distinguish "this cell is at its own limit" from "the
+            // backend is refusing everything" - the two situations the measured run could not tell apart either.
+            admissionLimit: config.s1.admissionLimit,
+            // `null` when observation is off: nothing scores, so there is no gate to report. A status route that
+            // threw here instead would take `/s1` down for a configuration the plugin supports.
+            backpressure: backpressure?.stats() ?? null,
           },
           // The interpreter is reported here and not only on the panel's route: "which python will this run
           // use" is a question an operator asks at the command line, and `runtime.summary()` answers everything
@@ -1539,10 +1626,10 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           // back to a different interpreter, or to none, was invisible from `/s1` entirely.
           laya: { ...runtime.summary(), pythonPath: layaConfig.pythonPath ?? null },
           // Each component reports its own counters, because "constructed" and "called" are different states and
-          // only the counters can tell them apart. `relevance.calls` and `planGate.calls` are the two numbers
-          // that say whether the System-1 path ran at all in this process.
+          // only the counters can tell them apart. `relevance.calls` is the number that says whether the System-1
+          // path ran at all in this process; `relevance.blocked` is the one that says whether the run stopped
+          // asking, and `backpressure` under `s1` says why. There is no `planGate` entry: the component is gone.
           relevance: relevance?.stats() ?? null,
-          planGate: planGate?.stats() ?? null,
           observation: observer
             ? { mode: resolved.observation, sink: resolved.telemetry.controlJsonl, ...observer.stats() }
             : { mode: resolved.observation, steps: 0, observed: 0, skipped: 0, errors: 0 },
@@ -1756,7 +1843,6 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
                   cell: config.cell,
                   tas: effective.tas.on,
                   tier1: config.recall.tier1,
-                  planGate: effective.planGate.on,
                   deliver: effective.deliver,
                   xFirst: effective.xFirst,
                   s1: { provider: backend.provider, configuredProvider: config.s1.provider, mode: backend.mode, baseUrl: backend.baseUrl },

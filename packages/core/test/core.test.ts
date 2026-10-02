@@ -392,7 +392,10 @@ test('assemble: tier1 off (C0/C1) leaves the recalled block empty by design', ()
   });
   assert.deepEqual(res.layout.recalled, []);
   assert.equal(res.layout.stateProxy, undefined);
-  assert.equal(policy.planGate.on, false);
+  // C0's two ordering switches, asserted where the assembler is: no TAS, no S1 selection. The plan gate used to be
+  // a third line here and is no longer a policy field at all (`packages/core/src/types.ts` says why); its absence
+  // is asserted in authority.test.ts, where the cell presets are pinned.
+  assert.equal(policy.tas.on, false);
   assert.equal(policy.recall.tier1, 'off');
 });
 

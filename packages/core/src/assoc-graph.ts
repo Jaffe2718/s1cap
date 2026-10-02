@@ -87,12 +87,42 @@ export interface RgSnapshot {
   scoredPairs: number;
   /** pairs the backend actually answered, where `scoredPairs` counts the ones it was merely offered */
   judgedPairs?: number;
+  /**
+   * Pairs the run declined to offer because the backend was saturated, and the segments still waiting for a
+   * window. Both survive a restart like every other counter here: a session that resumed and forgot what it had
+   * postponed would report coverage computed from a denominator that lost the omission.
+   */
+  deferredPairs?: number;
+  deferredSegments?: number;
 }
+
+/**
+ * The batch scorer's answer for "not now" — distinct from `undefined`, which means "no backend".
+ *
+ * A saturated backend and an absent backend are two different facts and must not share a signal. `undefined`
+ * makes the graph score the window with its local lexical fallback and advance its cursor, which is right for a
+ * session that has no System-1 lane at all: the graph keeps working and says `lexical` on every edge. It is wrong
+ * for a backend that is refusing right now, because the pair would be paid for once as a lexical row and would
+ * never be asked about again — the `scored` cursor is one-way — so the very work the backend was too busy to do
+ * would be silently downgraded rather than deferred.
+ *
+ * Returning this sentinel instead says: do not score this window, do not advance the cursor, and count the pairs
+ * as deferred. `scoreNew` then hands the segment back on a later tick with the same window.
+ *
+ * It is an exported constant rather than a class because both sides must agree on one identity: the graph tests
+ * `batch === S1_DEFERRED` and the scorer returns the same object, so no field can drift out of sync with a
+ * reader.
+ */
+export const S1_DEFERRED: unique symbol = Symbol.for('s1cap.s1-deferred');
+
+export type S1Deferral = typeof S1_DEFERRED;
 
 export class AssociationGraph {
   #segments = new Map<string, Segment>();
   /** insertion order, for the scoring window */
   #order: string[] = [];
+  /** membership test for #order, so `addSegments` is not quadratic in a long session */
+  #known = new Set<string>();
   /** how many entries of #order have been scored already */
   #scored = 0;
   /** cumulative pair comparisons - the number recall.window is meant to bound */
@@ -105,6 +135,21 @@ export class AssociationGraph {
    * out. Two numbers that can be subtracted are worth more than one that has to be trusted.
    */
   #judgedPairs = 0;
+  /**
+   * Segments that were *not offered* to the batch scorer because the backend was saturated, and the pairs that
+   * went with them.
+   *
+   * Separated from `scoredPairs` on purpose, and it is the whole reason `judgedPairs / scoredPairs` stays an
+   * honest coverage ratio. A deferred segment never reaches the scorer, so counting its window in `scoredPairs`
+   * would print "the backend judged 4 152 of 860 672 pairs" for a run that in fact never asked about most of
+   * them — a coverage number computed from work that was never offered. Instead the offer is not counted at all
+   * and the omission is counted here, beside it. Measured on round `20261002-2037`: `scoredPairs` 860 672,
+   * `judgedPairs` 4 152, no deferral accounting of any kind, and 3 859 refused calls between them.
+   */
+  #deferredPairs = 0;
+  #deferredSegments = 0;
+  /** how far the deferral count has been taken; see `deferSegment` in `scoreNew` */
+  #deferralCounted = 0;
   #edges = new Map<string, AssociationEdge>();
   /** every scored pair, above and below the threshold, by `${from}->${to}`; see `ScoredPair` */
   #scores = new Map<string, ScoredPair>();
@@ -126,7 +171,10 @@ export class AssociationGraph {
   addSegments(segments: Iterable<Segment>): void {
       for (const s of segments) {
         this.#segments.set(s.id, s);
-        if (!this.#order.includes(s.id)) this.#order.push(s.id);
+        if (!this.#known.has(s.id)) {
+          this.#known.add(s.id);
+          this.#order.push(s.id);
+        }
       }
   }
 
@@ -154,32 +202,121 @@ export class AssociationGraph {
     scoreBatch?: (
       current: Segment,
       candidates: readonly Segment[],
-    ) => readonly number[] | undefined | Promise<readonly number[] | undefined>;
+    ) => readonly number[] | undefined | S1Deferral | Promise<readonly number[] | undefined | S1Deferral>;
+    /**
+     * The most pairs one call may offer, across every segment it walks.
+     *
+     * `scoreNew` scores *every* segment that arrived since the last call, and each of them against its whole
+     * window: a tick that folds in a burst of session events therefore offers `segments x w` pairs at once. The
+     * `recall.window` bound is a bound on one segment, not on a call, and the difference was measured: round
+     * `20261002-2037` walked 860 672 pairs for 4 152 judgements - 0.48 % - across a 2219.7 s run whose backend
+     * refused 64.4 % of the 5 992 requests it was sent, because each in-flight tick kept offering its own window
+     * regardless of what the last one was told.
+     *
+     * This is a per-call budget, not a smaller window: a segment whose window was cut short is **deferred**, the
+     * cursor does not advance over it, and the next call offers it again - with the same window - against a
+     * backend that may by then be answering. Pairs already scored are never re-offered, so the `scored` cursor and
+     * `docs/CELLS-RUN.md`'s "no pair is paid for twice" both still hold.
+     *
+     * Undefined means no budget. Callers that score locally (the lexical fallback, `window-curve.mjs`, the tests)
+     * want every pair at once and are not charged by it; a batch scorer that can be refused should set it.
+     */
+    maxPairsPerSweep?: number;
   }): {
     scoredPairs: number;
     judgedPairs: number;
     edges: number;
+    /** pairs in this call's windows that were left for a later call because the backend could not take them */
+    deferredPairs: number;
+    /** how many segments were held back; their windows are offered again on the next call */
+    deferredSegments: number;
   } {
     const windowN = Math.max(1, Math.trunc(opts.windowN));
+    const maxPairs =
+      opts.maxPairsPerSweep === undefined ? Number.POSITIVE_INFINITY : Math.max(1, Math.trunc(opts.maxPairsPerSweep));
     const scorer = opts.score ?? lexicalScore;
     let scoredPairs = 0;
     let judgedPairs = 0;
     let edges = 0;
-    while (this.#scored < this.#order.length) {
-      const id = this.#order[this.#scored] as string;
-      this.#scored += 1;
+    let deferredPairs = 0;
+    let deferredSegments = 0;
+    /**
+     * The highest segment whose window has been *counted* as deferred, plus one. Monotonic, like `#scored`, and
+     * the reason a sweep can count the whole backlog behind a budget stop without inflating the total when it is
+     * called again on the next sweep. See `deferSegment` and `countDeferredSuffix` below.
+     */
+    let lastOffered = this.#scored;
+    /**
+     * Count one segment's window as deferred, at most once.
+     *
+     * The cursor does not advance over a deferred segment, so the next sweep walks it again and would add its
+     * window to the total a second time - reporting more deferred pairs than the session has. `deferSegment`'s
+     * guard is what makes the counting idempotent across sweeps, and `countDeferredSuffix` relies on that instead
+     * of trying to remember what it counted last time.
+     */
+    const deferSegment = (index: number, pairs: number): void => {
+      if (index < this.#deferralCounted) return;
+      this.#deferralCounted = index + 1;
+      deferredPairs += pairs;
+      deferredSegments += 1;
+    };
+    /**
+     * Count the windows of every segment from `index` on that this call did not offer.
+     *
+     * A walk, not a request: no scorer is called and the cursor does not move. `#scored` is always ≤ `index` here -
+     * the cursor never passes a segment that was not offered - so "from `index` on" is exactly the set of segments
+     * still waiting, and counting from the front of that set each time is both complete and idempotent. Without
+     * that, a backlog of tens of thousands of pairs behind one budget stop would be reported as the size of one
+     * window, which is the one direction this accounting must not lean.
+     */
+    const countDeferredSuffix = (index: number): void => {
+      for (let i = index; i < this.#order.length; i += 1) {
+        if (i < this.#deferralCounted) continue;
+        const id = this.#order[i] as string;
+        if (!this.#segments.has(id)) continue;
+        const from = Math.max(0, i - windowN);
+        let pairs = 0;
+        for (let j = from; j < i; j += 1) if (this.#segments.has(this.#order[j] as string)) pairs += 1;
+        if (pairs > 0) deferSegment(i, pairs);
+      }
+    };
+    while (lastOffered < this.#order.length) {
+      const id = this.#order[lastOffered] as string;
       const current = this.#segments.get(id);
-      if (current === undefined) continue;
-      const from = Math.max(0, this.#scored - 1 - windowN);
+      if (current === undefined) {
+        // Nothing to score for this entry, so the cursor moves over it. Counted with the segments that were
+        // offered, because "this entry cost nothing" and "this entry was postponed" are different facts.
+        lastOffered += 1;
+        this.#scored = lastOffered;
+        continue;
+      }
+      const from = Math.max(0, lastOffered - windowN);
       // Collect the window first so a batch scorer sees it as a unit. The pairs counted here are the same
       // pairs either way: w decides how much is scored, not who does the scoring.
       const candidates: Segment[] = [];
-      for (let i = from; i < this.#scored - 1; i += 1) {
+      for (let i = from; i < lastOffered; i += 1) {
         const other = this.#segments.get(this.#order[i] as string);
         if (other !== undefined) candidates.push(other);
       }
-      if (candidates.length === 0) continue;
+      if (candidates.length === 0) {
+        lastOffered += 1;
+        this.#scored = lastOffered;
+        continue;
+      }
+      // The per-call budget. Tested only when something has already been offered this call: the cursor never
+      // passes a segment that was not offered, so a budget that refused the *first* segment would stop on it
+      // forever - a backlog it could never work through. The budget therefore bounds a sweep's size, not whether
+      // it can make progress, and the pair count of a single window is already bounded by `w`.
+      if (scoredPairs > 0 && scoredPairs + candidates.length > maxPairs) {
+        countDeferredSuffix(lastOffered);
+        break;
+      }
+      // Offered from here on: `#scored` is where the next call resumes, and it moves only past a segment the
+      // scorer has taken (or one that had no window at all).
+      const index = lastOffered;
+      lastOffered += 1;
       scoredPairs += candidates.length;
+      this.#scored = index + 1;
 
       let weights: readonly number[];
       // Which scorer produced the weights, so the edge can say so. `undefined` from the batch scorer means the
@@ -187,10 +324,20 @@ export class AssociationGraph {
       // that edge `'s1'` was a provenance lie, not merely an untyped literal.
       let byBackend = false;
       if (opts.scoreBatch !== undefined) {
+        const batch = await opts.scoreBatch(current, candidates);
+        if (batch === S1_DEFERRED) {
+          // Not now. The offer is withdrawn rather than paid for: `scoredPairs` gives the pair back and the
+          // cursor steps back onto this segment, so the window is offered again - whole - on a later call.
+          // Counting it as offered-but-unjudged instead would make `judgedPairs / scoredPairs` fall for a reason
+          // the reader cannot see, and scoring it lexically would spend the pair for good.
+          this.#scored -= 1;
+          scoredPairs -= candidates.length;
+          countDeferredSuffix(index);
+          break;
+        }
         // `undefined` is the batch scorer's way of saying "I could not answer this one" - a backend that
         // timed out, or a level the answer did not carry. That degrades to the local lexical scorer for this
         // segment, which is less accurate but never wrong by omission: a system with no System-1 still works.
-        const batch = await opts.scoreBatch(current, candidates);
         byBackend = batch !== undefined;
         // Offered versus judged, counted where the difference is decided: the backend answered this window, or the
         // fallback did. `scoredPairs` cannot tell the two apart, and reading it as "judged" is what made a 9.7%
@@ -233,7 +380,9 @@ export class AssociationGraph {
     }
     this.#scoredPairs += scoredPairs;
     this.#judgedPairs += judgedPairs;
-    return { scoredPairs, judgedPairs, edges };
+    this.#deferredPairs += deferredPairs;
+    this.#deferredSegments += deferredSegments;
+    return { scoredPairs, judgedPairs, edges, deferredPairs, deferredSegments };
   }
   getSegment(id: string): Segment | undefined {
     return this.#segments.get(id);
@@ -349,8 +498,38 @@ export class AssociationGraph {
       .sort((a, b) => b.w - a.w);
   }
 
-    stats(): { segments: number; edges: number; scoredPairs: number; judgedPairs: number } {
-      return { segments: this.#segments.size, edges: this.#edges.size, scoredPairs: this.#scoredPairs, judgedPairs: this.#judgedPairs };
+    stats(): {
+      segments: number;
+      edges: number;
+      scoredPairs: number;
+      judgedPairs: number;
+      deferredPairs: number;
+    } {
+      return {
+        segments: this.#segments.size,
+        edges: this.#edges.size,
+        scoredPairs: this.#scoredPairs,
+        judgedPairs: this.#judgedPairs,
+        deferredPairs: this.#deferredPairs,
+      };
+  }
+
+  /**
+   * Pairs the run declined to offer because the backend was saturated, cumulative.
+   *
+   * Read beside `scoredPairs`, never inside it. A deferred pair was not offered to any scorer, so adding it to
+   * the denominator would report coverage over work that never happened; leaving it out and saying nothing would
+   * hide the work the run chose not to do. `scoredPairs + deferredPairs` is the window the session's arrival
+   * order would have offered, `judgedPairs / scoredPairs` stays the share of what *was* offered that the backend
+   * answered, and `deferredPairs` is the size of the omission with its reason already stated by the scorer.
+   */
+  get deferredPairs(): number {
+    return this.#deferredPairs;
+  }
+
+  /** Segments whose window has not been offered yet; their pairs are the `deferredPairs` above. */
+  get deferredSegments(): number {
+    return this.#deferredSegments;
   }
 
   /**
@@ -370,6 +549,8 @@ export class AssociationGraph {
       scored: this.#scored,
       scoredPairs: this.#scoredPairs,
       judgedPairs: this.#judgedPairs,
+      deferredPairs: this.#deferredPairs,
+      deferredSegments: this.#deferredSegments,
     };
   }
 
@@ -385,6 +566,9 @@ export class AssociationGraph {
     if (snap === undefined || (snap.schema !== RG_SNAPSHOT_SCHEMA && snap.schema !== 1)) return graph;
     for (const segment of snap.segments ?? []) graph.#segments.set(segment.id, segment);
     graph.#order = (snap.order ?? []).filter((id) => graph.#segments.has(id));
+    // The membership set follows the order it was built from, so `addSegments` after a restore cannot append a
+    // duplicate of an id the snapshot already carried.
+    graph.#known = new Set(graph.#order);
     for (const edge of snap.edges ?? []) {
       graph.#edges.set(`${edge.from}->${edge.to}`, edge);
       graph.#link(edge.from, edge.to);
@@ -394,6 +578,11 @@ export class AssociationGraph {
     graph.#scored = Math.max(0, Math.min(graph.#order.length, Math.trunc(snap.scored ?? 0)));
     graph.#scoredPairs = Math.max(0, Math.trunc(snap.scoredPairs ?? 0));
     graph.#judgedPairs = Math.max(0, Math.trunc(snap.judgedPairs ?? 0));
+    graph.#deferredPairs = Math.max(0, Math.trunc(snap.deferredPairs ?? 0));
+    graph.#deferredSegments = Math.max(0, Math.trunc(snap.deferredSegments ?? 0));
+    // The deferral cursor is re-derived from what the snapshot says was deferred: deferrals are counted from the
+    // front of the order and never uncounted, so the count and the cursor describe the same prefix.
+    graph.#deferralCounted = graph.#deferredSegments;
     return graph;
   }
 

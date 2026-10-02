@@ -22,6 +22,17 @@
  *      as existing. The correction is counted and printed: it only ever turns a would-be blank cell
  *      into "exists", never the other way round.
  *
+ *      One **documented tolerance** sits beside that correction, and it is bounded rather than general:
+ *      a segment whose recorded stamp is later than the invocation that *selected* it may still have
+ *      existed when it was selected, because the association-graph upkeep writes the row asynchronously
+ *      and lags the assembly by a few tens of milliseconds. Round `20261002-2037` is the case that
+ *      forced it: `--cell C2` exited 1 on assembly #1, whose selected segment carried `ts` 37 ms after
+ *      the assembly and 26 ms after the delivery that carried it, over 277 invocations of otherwise
+ *      usable evidence. `ASYNC_LAG_TOLERANCE_MS` is the window, it is applied to every segment in the
+ *      same direction, and it is counted and printed (`lagCells`). Beyond it the figure is still
+ *      refused: a selection that precedes its segment's existence by more than the window is a
+ *      contradiction, not a race, and `--self-test` asserts both sides of that line.
+ *
  *   2. `recall candidate` — the segment's id is a node of that invocation's recorded `recallTree`
  *      (excluding the root, which is the anchor the walk started from). `recallTree` is the shape of
  *      the walk that produced the step's recall: every hit `recall` returned, ids only. `candidates`
@@ -482,6 +493,19 @@ function loadMessageTexts(runDir, cell, stepInfo) {
 const ATTRIBUTION_WINDOW_MS = 120000;
 /** How far after its invocation a message a step carried may be stamped before the match is refused. */
 const CARRY_SLACK_MS = 60000;
+/**
+ * How far after an invocation a segment's row may be stamped and still count as having existed for it.
+ *
+ * This is the async-upkeep lag, and it is a property of the system rather than a slack in the reader:
+ * `AssociationGraph.addSegments` runs on the upkeep queue, which is deferred by `schedule` (a `setTimeout`), while
+ * `assembly.ts` is the step's own stamp. A segment that a step carried - and, in a delivered block, that the run
+ * *selected* - can therefore be written a few tens of milliseconds after the invocation that used it. Measured in
+ * round `20261002-2037`: 37 ms, with the delivery that carried the segment 26 ms after the assembly. 250 ms is an
+ * order of magnitude above the observed lag and three orders below `ATTRIBUTION_WINDOW_MS`, so it cannot absorb a
+ * real ordering error: the self-test's "a selection that does not exist yet" defect is 50 ms late and still fails,
+ * and a separate self-test case asserts that a lag inside this window draws instead of throwing.
+ */
+const ASYNC_LAG_TOLERANCE_MS = 250;
 
 function attributeToSteps(invocations, steps, what) {
   const claims = new Map();
@@ -621,7 +645,27 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
     const place = places[k];
     const strict = new Set(snapshot.segments.filter((s) => s.ts <= a.ts).map((s) => s.id));
     const carryIds = carried.get(k).ids;
-    const existed = new Set([...strict, ...carryIds]);
+    /**
+     * Did this segment exist at this invocation?
+     *
+     * Two recorded facts, in order of strength: the creation stamp (`ts <= assembly.ts`), and the step's own tape
+     * payload (the ids the step carried, which the upkeep lane had not necessarily written yet). The third and
+     * weakest is the bounded async-upkeep lag above - a row stamped just after the invocation that used it. It is
+     * applied to the id set and to the selected-id check through this one function, so the two can never disagree
+     * about a cell.
+     */
+    const existedAt = (id) => {
+      const segment = snapshot.byId.get(id);
+      if (segment === undefined) return false;
+      if (segment.ts <= a.ts) return true;
+      if (carryIds.includes(id)) return true;
+      return segment.ts - a.ts <= ASYNC_LAG_TOLERANCE_MS;
+    };
+    const lagIds = snapshot.segments
+      .filter((s) => s.ts > a.ts && s.ts - a.ts <= ASYNC_LAG_TOLERANCE_MS)
+      .map((s) => s.id)
+      .filter((id) => !carryIds.includes(id));
+    const existed = new Set([...strict, ...carryIds, ...lagIds]);
     const treeList = treeIds(a.recallTree);
     const root = Object.keys(a.recallTree)[0] ?? null;
     const candidates = treeList.filter((id) => id !== root);
@@ -685,9 +729,14 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
     if (selected !== null) {
       for (const entry of selected) {
         for (const row of entry.rows) {
-          if (!existed.has(row)) {
+          if (!existedAt(row)) {
+            const segment = snapshot.byId.get(row);
+            const late = segment === undefined ? 0 : segment.ts - a.ts;
             fail(`assembly #${k + 1} selected ${row}, which did not exist at ts ${a.ts} — a segment cannot be `
-              + 'selected before it exists');
+              + `selected before it exists${late > ASYNC_LAG_TOLERANCE_MS
+                ? ` (its row is stamped ${late} ms after the invocation, beyond the ${ASYNC_LAG_TOLERANCE_MS} ms `
+                  + 'async-upkeep tolerance: the ordering is a contradiction, not a race)'
+                : ''}`);
           }
         }
         if (entry.rows.includes(root)) {
@@ -701,6 +750,7 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
       place,
       strictIds: strict,
       carryIds,
+      lagIds,
       existed,
       root,
       candidates,
@@ -740,6 +790,11 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
   }
 
   const carryCells = columns.reduce((n, c) => n + c.carryIds.filter((id) => !c.strictIds.has(id)).length, 0);
+  // Cells that exist only because of the bounded async-upkeep lag - neither by their creation stamp nor by the
+  // step's own payload. Counted apart from the carry, because they are a different justification: the carry is a
+  // recorded fact about what the step handed the graph, this is a race with a measured size.
+  const lagCells = columns.reduce((n, c) => n + c.lagIds.length, 0);
+  const maxLagMs = columns.reduce((n, c) => Math.max(n, ...c.lagIds.map((id) => (snapshot.byId.get(id)?.ts ?? 0) - c.record.ts), 0), 0);
   const selectedTotal = columns.reduce((n, c) => n + c.record.selected, 0);
   const identityColumns = columns.filter((c) => c.selected !== null).length;
   const identityRows = counts.selectedIds;
@@ -751,6 +806,9 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
     rows,
     counts,
     carryCells,
+    lagCells,
+    maxLagMs,
+    lagToleranceMs: ASYNC_LAG_TOLERANCE_MS,
     unsegmentedCarry,
     selectedTotal,
     identityColumns,
@@ -809,17 +867,154 @@ function niceStep(range, ticks) {
   return mag * 10;
 }
 
+// ---------------------------------------------------------------------------------------------
+// 7b. Aggregation — what a 277 x 1 398 matrix has to become before it can be drawn
+//
+// The live case: cell C2 of round `20261002-2037` is 277 invocations by 1 398 segments. Drawn exactly it is
+// `width="1240" height="42957"` and 56.7 MB of `<rect>` - a document no viewer opens and no reader scrolls, which
+// is the same as no figure at all. Above the ceilings below the matrix is therefore rolled up: consecutive
+// invocations become column blocks, consecutive segments (in append order) become row blocks, and one drawn cell
+// is one block. The same run at the defaults is 1240 x 8789 and 4.2 MB.
+//
+// **The states survive the roll-up, and that is the whole design.** A block is `candidate` if its walk returned
+// anything in it, `selected` if the delivered payload named anything in it, `root` if it holds a walk root,
+// `existed` if anything in it existed, and `absent` only when nothing did. The strongest recorded fact wins, so a
+// roll-up can never turn a hit into a blank; what it can no longer show is *which* cell inside the block carried
+// it, which is why the caption states the block size and the summary line says the figure is aggregated.
+//
+// Nothing is dropped from the counts: the per-invocation table below the matrix is always exact (one row per
+// invocation), the bar panel keeps the maximum recorded count in each column block, and every state total in the
+// summary line is computed from the full matrix before any of this happens.
+//
+// The per-invocation table is what keeps the height in the thousands: 277 rows of 20 px plus a 120-row grid is
+// ~8 800 px, so this figure is for scrolling to a region rather than for taking in at once. That is a deliberate
+// trade against 43 000 px, and the summary line states the drawn size so a caller can see which one it got.
+// ---------------------------------------------------------------------------------------------
+
+/** Ceilings above which the matrix is rolled up. 120 rows is ~3200 px of grid: tall, and openable. */
+const MAX_COLS_EXACT = 120;
+const MAX_ROWS_EXACT = 120;
+
+/** Divisions used when a total is not a multiple of the block count; the remainder is spread, never dropped. */
+function blocksOf(count, blockCount) {
+  const out = [];
+  const size = Math.floor(count / blockCount);
+  let extra = count - size * blockCount;
+  let at = 0;
+  for (let i = 0; i < blockCount; i += 1) {
+    const width = size + (extra > 0 ? 1 : 0);
+    if (extra > 0) extra -= 1;
+    out.push({ from: at, to: at + width, width });
+    at += width;
+  }
+  return out;
+}
+
+/**
+ * The drawn grid: either the exact matrix, or a block roll-up of it. The renderer reads only this, so the two
+ * modes cannot drift apart in how a state is drawn.
+ */
+function layoutOf(model, opts = {}) {
+  const maxCols = opts.maxCols ?? MAX_COLS_EXACT;
+  const maxRows = opts.maxRows ?? MAX_ROWS_EXACT;
+  const exactCols = model.columns.length;
+  const exactRows = model.rows.length;
+  const colBlocks = Math.min(exactCols, maxCols);
+  const rowBlocks = Math.min(exactRows, maxRows);
+  const aggregated = colBlocks < exactCols || rowBlocks < exactRows;
+  if (!aggregated) {
+    return {
+      aggregated: false,
+      mode: 'exact',
+      note: `one cell per (segment, invocation): ${exactCols} x ${exactRows}, unaggregated`,
+      nCols: exactCols,
+      nRows: exactRows,
+      colBlocks: model.columns.map((_, i) => ({ from: i, to: i + 1, width: 1 })),
+      rowBlocks: model.rows.map((_, i) => ({ from: i, to: i + 1, width: 1 })),
+      cells: model.rows.map((r, ri) => r.cells.map((c) => ({ ...c, state: c.state, overlay: c.overlay, col: 1, row: 1, r: ri }))),
+      colCounts: model.columns.map((c) => ({ candidates: c.record.candidates, selected: c.record.selected })),
+      columns: model.columns,
+      rows: model.rows,
+    };
+  }
+  const colRanges = blocksOf(exactCols, colBlocks);
+  const rowRanges = blocksOf(exactRows, rowBlocks);
+  const rank = { absent: 0, existed: 1, root: 2, candidate: 3, selected: 4, passage: 5 };
+  const cells = [];
+  const stateTally = { absent: 0, candidate: 0, root: 0, existed: 0, selectedIds: 0, selectedPassage: 0 };
+  for (const range of rowRanges) {
+    const line = [];
+    for (const crange of colRanges) {
+      let state = 'absent';
+      let overlay = '';
+      for (let r = range.from; r < range.to; r += 1) {
+        const row = model.rows[r];
+        for (let c = crange.from; c < crange.to; c += 1) {
+          const cell = row.cells[c];
+          if (rank[cell.state] > rank[state]) state = cell.state;
+          if (cell.overlay !== '' && rank[cell.overlay] > rank[overlay === '' ? 'absent' : overlay]) overlay = cell.overlay;
+        }
+      }
+      stateTally[state] += 1;
+      if (overlay === 'selected') stateTally.selectedIds += 1;
+      if (overlay === 'passage') stateTally.selectedPassage += 1;
+      line.push({ state, overlay, col: crange.width, row: range.width, r: range.from });
+    }
+    cells.push(line);
+  }
+  return {
+    aggregated: true,
+    mode: 'aggregated',
+    note: `aggregated: ${colRanges.length} column block(s) of ~${Math.round(exactCols / colBlocks)} invocation(s) `
+      + `x ${rowRanges.length} row block(s) of ~${Math.round(exactRows / rowBlocks)} segment(s); one cell is one block, `
+      + 'shaded by the strongest recorded state in it',
+    nCols: colRanges.length,
+    nRows: rowRanges.length,
+    colBlocks: colRanges,
+    rowBlocks: rowRanges,
+    cells,
+    // The bar panel keeps the recorded counts, rolled up by maximum: `assembly.candidates` is a count per
+    // invocation, and a block's bar answers "what did the busiest invocation in this block return".
+    colCounts: colRanges.map((r) => ({
+      candidates: Math.max(...model.columns.slice(r.from, r.to).map((c) => c.record.candidates)),
+      selected: Math.max(...model.columns.slice(r.from, r.to).map((c) => c.record.selected)),
+    })),
+    columns: colRanges.map((r) => model.columns[r.from]),
+    rows: rowRanges.map((r) => ({ ...model.rows[r.from], blockFrom: r.from, blockTo: r.to, blockWidth: r.width })),
+    stateTally,
+  };
+}
+
+/**
+ * One row label for a block of rows. A block can hold several kinds, so the label says how many rows it stands
+ * for and names its first and last segment rather than pretending to be one segment.
+ */
+function blockRowLabel(row) {
+  const width = row.blockWidth ?? 1;
+  const at = row.blockFrom ?? row.row;
+  if (width === 1) {
+    return `${at} ${row.segment.kind} ${row.segment.tokens}t ${rowLabelId(row.segment.id)}`
+      + `${row.segment.chunkOf ? ` +${shortId(row.segment.chunkOf, 6)}` : ''}`;
+  }
+  return `${at}–${row.blockTo - 1} (${width}) —`;
+}
+
 function renderFigure(model, meta) {
   const { columns, rows } = model;
-  const nCols = columns.length;
-  const nRows = rows.length;
+  // What is actually drawn: the exact matrix when it fits, a block roll-up of it when it does not. Everything
+  // below reads `grid`, so the two modes cannot disagree about how a state is drawn or counted.
+  const grid = layoutOf(model, meta.grid);
+  const exactCols = columns.length;
+  const exactRows = rows.length;
+  const nCols = grid.nCols;
+  const nRows = grid.nRows;
   const plotLeft = MARGIN + GUTTER;
   const plotWidth = W - MARGIN - plotLeft;
   const colPitch = plotWidth / nCols;
   const cellW = Math.max(24, colPitch - 8);
   const colX = (i) => plotLeft + i * colPitch + (colPitch - cellW) / 2;
 
-  const maxCount = Math.max(1, ...columns.map((c) => Math.max(c.record.candidates, c.record.selected)));
+  const maxCount = Math.max(1, ...grid.colCounts.map((c) => Math.max(c.candidates, c.selected)));
   const barStep = niceStep(maxCount * 1.15, 4);
   const axisMax = Math.max(barStep, Math.ceil((maxCount * 1.15) / barStep) * barStep);
 
@@ -876,6 +1071,10 @@ function renderFigure(model, meta) {
     { key: 'sel', label: 'sel', w: 44, align: 'end' },
     { key: 'depth', label: 'depth', w: 54, align: 'end' },
     { key: 'pairs', label: 'pairs j/s', w: 84, align: 'end' },
+    // Deferred pairs, beside the coverage ratio the table already prints. A live cell can reach seven digits here
+    // (round `20261002-2037` walked 860 672 pairs), so the column is wide enough for one and shows an em dash when
+    // the run recorded nothing rather than a zero it cannot support.
+    { key: 'deferred', label: 'deferred', w: 72, align: 'end' },
     { key: 'fallback', label: 'recorded fallback', w: 118 },
     { key: 'ids', label: 'selected ids (recorded?)', w: 0 },
   ];
@@ -915,16 +1114,17 @@ function renderFigure(model, meta) {
   body.push(`  <line x1="${plotLeft}" y1="${baseY}" x2="${(plotLeft + plotWidth).toFixed(1)}" y2="${baseY}" class="axis"/>`);
   body.push(`  <text x="${plotLeft - 10}" y="${(baseY + 15).toFixed(1)}" class="axis-label" text-anchor="end">recall hits / selected</text>`);
   const barW = Math.min(30, (cellW - 10) / 2);
-  columns.forEach((column, i) => {
+  grid.columns.forEach((column, i) => {
+    const count = grid.colCounts[i];
     const groupCx = plotLeft + i * colPitch + colPitch / 2;
     const x0 = groupCx - barW - 3;
     const x1 = groupCx + 3;
-    const candH = Math.max(column.record.candidates > 0 ? 1.5 : 0, (column.record.candidates / axisMax) * barsH);
-    const selH = Math.max(column.record.selected > 0 ? 1.5 : 0, (column.record.selected / axisMax) * barsH);
+    const candH = Math.max(count.candidates > 0 ? 1.5 : 0, (count.candidates / axisMax) * barsH);
+    const selH = Math.max(count.selected > 0 ? 1.5 : 0, (count.selected / axisMax) * barsH);
     body.push(`  <rect class="bar" data-kind="candidates" data-col="${i + 1}" x="${x0.toFixed(1)}" y="${(baseY - candH).toFixed(1)}" width="${barW.toFixed(1)}" height="${candH.toFixed(1)}" fill="${COLOUR.barSoft}"/>`);
     body.push(`  <rect class="bar" data-kind="selected" data-col="${i + 1}" x="${x1.toFixed(1)}" y="${(baseY - selH).toFixed(1)}" width="${barW.toFixed(1)}" height="${selH.toFixed(1)}" fill="${COLOUR.bar}"/>`);
-    body.push(`  <text x="${(x0 + barW / 2).toFixed(1)}" y="${(baseY - candH - 5).toFixed(1)}" class="bar-value" text-anchor="middle">${column.record.candidates}</text>`);
-    body.push(`  <text x="${(x1 + barW / 2).toFixed(1)}" y="${(baseY - selH - 5).toFixed(1)}" class="bar-value" text-anchor="middle">${column.record.selected}</text>`);
+    body.push(`  <text x="${(x0 + barW / 2).toFixed(1)}" y="${(baseY - candH - 5).toFixed(1)}" class="bar-value" text-anchor="middle">${count.candidates}</text>`);
+    body.push(`  <text x="${(x1 + barW / 2).toFixed(1)}" y="${(baseY - selH - 5).toFixed(1)}" class="bar-value" text-anchor="middle">${count.selected}</text>`);
     // The two badges are the honest half of this chart: whether the selected ids exist for this
     // invocation, and whether the recorded selection came from the recency window rather than a walk.
     if (column.fallback !== '') {
@@ -940,42 +1140,47 @@ function renderFigure(model, meta) {
 
   // -- matrix --------------------------------------------------------------------------------
   const { at: mAt } = bands[2];
+  const blockClause = grid.aggregated
+    ? ` — AGGREGATED: the matrix is ${exactCols} x ${exactRows} and is drawn as blocks (see the note below)`
+    : '';
   body.push(`<g class="band" data-band="matrix" transform="translate(0,${mAt})">`);
-  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">The matrix — ${nRows} segments (rows, oldest at the bottom) × ${nCols} recall invocations (columns)</text>`);
+  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">The matrix — ${nRows} rows (oldest at the bottom) × ${nCols} columns${escapeXml(blockClause)}</text>`);
   matrixNote.forEach((line, i) => {
     body.push(`  <text x="${MARGIN}" y="${42 + i * 15}" class="panel-note">${escapeXml(line)}</text>`);
   });
   body.push(`  <line x1="${MARGIN}" y1="${matrixTop - 8}" x2="${W - MARGIN}" y2="${matrixTop - 8}" class="axis"/>`);
   const rowY = (row) => matrixTop + (nRows - 1 - row) * (ROW_H + ROW_GAP);
-  rows.forEach((row, r) => {
+  grid.rows.forEach((row, r) => {
     const yy = rowY(r);
     body.push(`  <line x1="${MARGIN}" y1="${(yy + ROW_H + 1).toFixed(1)}" x2="${W - MARGIN}" y2="${(yy + ROW_H + 1).toFixed(1)}" class="grid-faint"/>`);
     body.push(`  <text x="${plotLeft - 12}" y="${(yy + ROW_H / 2 + 4).toFixed(1)}" class="row-label" text-anchor="end">`
-      + `${row.row} ${escapeXml(row.segment.kind)} ${row.segment.tokens}t ${escapeXml(rowLabelId(row.segment.id))}`
-      + `${row.segment.chunkOf ? ` +${escapeXml(shortId(row.segment.chunkOf, 6))}` : ''}</text>`);
-    row.cells.forEach((cell, c) => {
+      + `${escapeXml(blockRowLabel(row))}</text>`);
+    grid.cells[r].forEach((cell, c) => {
       const x = colX(c);
       const stroke = cell.state === 'absent' ? COLOUR.absentEdge : 'none';
       const fill = cell.state === 'absent' ? COLOUR.absent : cell.state === 'candidate' ? COLOUR.candidate : COLOUR.existed;
-      body.push(`  <rect class="cell" data-row="${row.row}" data-col="${c + 1}" data-state="${cell.state}"`
+      body.push(`  <rect class="cell" data-row="${cell.r}" data-col="${c + 1}" data-state="${cell.state}"`
+        + `${grid.aggregated ? ` data-block="${cell.row}x${cell.col}"` : ''}`
         + `${cell.overlay ? ` data-overlay="${cell.overlay}"` : ''} x="${x.toFixed(1)}" y="${yy.toFixed(1)}"`
         + ` width="${cellW.toFixed(1)}" height="${ROW_H}" fill="${fill}"${stroke === 'none' ? '' : ` stroke="${stroke}"`}/>`);
       if (cell.state === 'candidate') {
-        body.push(`  <text x="${(x + cellW / 2).toFixed(1)}" y="${(yy + ROW_H / 2 + 3).toFixed(1)}" class="cell-mark" text-anchor="middle">hit</text>`);
+        body.push(`  <text x="${(x + cellW / 2).toFixed(1)}" y="${(yy + ROW_H / 2 + 3).toFixed(1)}" class="cell-mark" text-anchor="middle">${grid.aggregated ? '·' : 'hit'}</text>`);
       }
       if (cell.state === 'root') {
         body.push(`  <path d="M ${(x + 6).toFixed(1)} ${(yy + ROW_H - 6).toFixed(1)} l 4.5 -8 l 4.5 8 z" fill="${COLOUR.ink}" class="root-mark"/>`);
       }
       if (cell.overlay) {
         const dashed = cell.overlay === 'passage' ? ' stroke-dasharray="4 3"' : '';
-        body.push(`  <rect class="ring" data-row="${row.row}" data-col="${c + 1}" data-overlay="${cell.overlay}"`
+        body.push(`  <rect class="ring" data-row="${cell.r}" data-col="${c + 1}" data-overlay="${cell.overlay}"`
           + ` x="${(x + 1.5).toFixed(1)}" y="${(yy + 1.5).toFixed(1)}" width="${(cellW - 3).toFixed(1)}"`
           + ` height="${ROW_H - 3}" fill="none" stroke="${COLOUR.ring}" stroke-width="2.5"${dashed}/>`);
       }
     });
   });
   body.push(`  <line x1="${MARGIN}" y1="${(matrixTop + gridH + 1).toFixed(1)}" x2="${W - MARGIN}" y2="${(matrixTop + gridH + 1).toFixed(1)}" class="axis"/>`);
-  body.push(`  <text x="${MARGIN}" y="${(matrixTop + gridH + 22).toFixed(1)}" class="panel-note">row 0 is the oldest segment of ${nRows}; every row above it is one segment later in the graph's append order.</text>`);
+  body.push(`  <text x="${MARGIN}" y="${(matrixTop + gridH + 22).toFixed(1)}" class="panel-note">${escapeXml(grid.aggregated
+    ? `Row 0 is the oldest segment; each drawn row stands for ${grid.rowBlocks[0].width === 1 ? '1 segment' : `up to ${Math.max(...grid.rowBlocks.map((b) => b.width))} segments`} of the graph's append order, and each column for ${Math.max(...grid.colBlocks.map((b) => b.width))} invocation(s). The per-invocation table below is exact.`
+    : `row 0 is the oldest segment of ${exactRows}; every row above it is one segment later in the graph's append order.`)}</text>`);
   body.push('</g>');
 
   // -- legend ---------------------------------------------------------------------------------
@@ -1034,6 +1239,9 @@ function renderFigure(model, meta) {
       sel: String(a.selected),
       depth: String(a.bfsDepth),
       pairs: `${a.judgedPairs ?? '?'}/${a.scoredPairs ?? '?'}`,
+      // A reading, or a dash: a run whose assembly records predate the field has no deferral number, and printing 0
+      // for it would claim nothing was ever held back.
+      deferred: a.deferredPairs === undefined ? '—' : String(a.deferredPairs),
       fallback: column.fallback === '' ? '—' : column.fallback,
       ids: column.selected === null
         ? (a.selected === 0 ? 'none selected (count 0)' : `not recorded — count only (${a.selected})`)
@@ -1090,7 +1298,7 @@ function renderFigure(model, meta) {
   </style>`;
   const banner = '<!-- generated by scripts/s1-activity.mjs (S1CAP recall activity); self-contained, no script, no external font -->';
   return `${banner}
-<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" data-chart="s1-activity" role="img" aria-label="${escapeXml(meta.title)}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" data-chart="s1-activity" data-chart-mode="${grid.mode}" role="img" aria-label="${escapeXml(meta.title)}">
   <title>${escapeXml(meta.title)}</title>
   <rect x="0" y="0" width="${W}" height="${height}" fill="#ffffff"/>
   ${style}
@@ -1104,12 +1312,15 @@ ${body.join('\n')}
 //
 // One line, so a caller can sanity-check the figure without opening it: the dimensions, how many cells
 // of each state, and — the number that decides how much of the picture is missing — how many selected
-// segments have a recorded identity and how many are a count with no id behind it.
+// segments have a recorded identity and how many are a count with no id behind it. It also states the
+// drawing mode (exact or aggregated, and at what block size) and the async-upkeep lag it tolerated, so a
+// caller that expected an exact matrix can see that it did not get one without parsing the SVG.
 // ---------------------------------------------------------------------------------------------
 
 function summaryLine(model, meta) {
   const { counts, columns } = model;
   const cells = counts.absent + counts.candidate + counts.root + counts.existed;
+  const grid = meta.gridInfo;
   return `s1-activity: ${meta.cell} @ ${meta.runName} — ${columns.length} invocations x ${model.rows.length} segments `
     + `(${cells} cells): not-created ${counts.absent}, candidate ${counts.candidate}, walk-root ${counts.root}, `
     + `existed-not-returned ${counts.existed} · selected ${model.selectedTotal} `
@@ -1117,7 +1328,13 @@ function summaryLine(model, meta) {
     + `${model.passageColumns > 0 ? ` + ${counts.selectedPassage} passage-only row(s)` : ''}, count-only ${model.countOnly}) `
     + `· knobs w=${model.knobs.w} r=${model.knobs.r} d=${model.knobs.d}`
     + `${model.knobs.wait === undefined ? '' : ` wait=${model.knobs.wait}`}`
-    + ` · ${model.carryCells} same-step carry cell(s)`;
+    + ` · ${model.carryCells} same-step carry cell(s)`
+    + ` · ${model.lagCells} async-lag cell(s) within ${model.lagToleranceMs} ms (max ${model.maxLagMs} ms)`
+    + ` · drawing ${grid.mode}${grid.aggregated
+      ? ` (${columns.length}x${model.rows.length} exact, drawn as ${grid.nCols}x${grid.nRows} blocks of up to `
+        + `${Math.max(...grid.colBlocks.map((b) => b.width))}x${Math.max(...grid.rowBlocks.map((b) => b.width))})`
+      : ` (${grid.nCols}x${grid.nRows})`}`
+    + ' · SVG only (no rasteriser in this repository: a PNG path would need a dependency this tool does not take)';
 }
 
 /**
@@ -1158,9 +1375,29 @@ function explainLines(model) {
 
 function usage() {
   return [
-    'usage: node scripts/s1-activity.mjs --run <run-dir> --cell <name> [--out <run-dir>/report/s1-activity.svg] [--explain]',
+    'usage: node scripts/s1-activity.mjs --run <run-dir> --cell <name> [--out <run-dir>/report/s1-activity.svg]',
+    '                                   [--grid <maxCols>x<maxRows>] [--explain]',
     '       node scripts/s1-activity.mjs --self-test',
+    '',
+    'Output is SVG only. There is no PNG path: rasterising an SVG needs a dependency (sharp, canvas, resvg) that this',
+    'repository does not take for a figure whose geometry is already asserted as text, so a `--out *.png` is refused',
+    'rather than written as an SVG under a PNG name.',
+    '',
+    `Matrices larger than ${MAX_COLS_EXACT} columns or ${MAX_ROWS_EXACT} rows are drawn aggregated (consecutive invocations`,
+    'and consecutive segments roll up into blocks, shaded by the strongest recorded state in each). --grid raises or',
+    'lowers those ceilings; the summary line always states which mode was used, and every count stays exact.',
   ].join('\n');
+}
+
+/** `--grid <cols>x<rows>`: the aggregation ceilings, for a caller that wants the exact matrix whatever its size. */
+function parseGrid(value) {
+  if (value === undefined) return undefined;
+  const m = /^(\d+)x(\d+)$/.exec(value);
+  if (m === null) fail(`--grid must look like 120x200 (columns x rows), got ${JSON.stringify(value)}`);
+  const maxCols = Number(m[1]);
+  const maxRows = Number(m[2]);
+  if (maxCols < 1 || maxRows < 1) fail(`--grid must be at least 1x1, got ${JSON.stringify(value)}`);
+  return { maxCols, maxRows };
 }
 
 function run(options) {
@@ -1190,9 +1427,24 @@ function run(options) {
     : '-';
   const knobs = `w=${model.knobs.w} r=${model.knobs.r} d=${model.knobs.d}`
     + `${model.knobs.wait === undefined ? '' : ` wait=${model.knobs.wait}ms`}`;
+  // What the figure will actually be, decided before the captions are written so the subtitle can say it.
+  const gridInfo = layoutOf(model, options.grid);
+  const lagClause = model.lagCells > 0
+    ? ` A further ${model.lagCells} cell(s) exist only because of the bounded async-upkeep lag: those segments' rows are `
+      + `stamped after the invocation, by at most ${model.maxLagMs} ms, inside the documented ${model.lagToleranceMs} ms window `
+      + '(the graph write follows the assembly, and the round that forced this window measured 37 ms).'
+    : '';
+  const aggregateClause = gridInfo.aggregated
+    ? ` The matrix is drawn AGGREGATED: ${model.columns.length} x ${model.rows.length} exact cells become `
+      + `${gridInfo.nCols} x ${gridInfo.nRows} blocks, each shaded by the strongest recorded state in it, because the exact `
+      + `figure would be ${model.columns.length} columns x ${model.rows.length} rows. Every count in this document is still `
+      + 'computed from the full matrix, and the per-invocation table below is exact.'
+    : '';
   const meta = {
     runName,
     cell: options.cell,
+    grid: options.grid,
+    gridInfo,
     title: `S1CAP recall activity — cell ${options.cell}, round ${displayName}`,
     subtitle: [
       `${model.columns.length} recall invocations × ${model.rows.length} segments (the cell's final segment count), `
@@ -1203,12 +1455,19 @@ function run(options) {
       `cell states: not yet created ${model.counts.absent} · recall candidate ${model.counts.candidate} · `
         + `walk root ${model.counts.root} · existed but not returned ${model.counts.existed}`
         + ` · selected ids recorded ${model.identityRows} of ${model.selectedTotal}`,
+      gridInfo.note,
     ],
     countsNote: 'left bar: assembly.candidates (the walk\'s hits) · right bar: assembly.selected (how many were taken). '
-      + 'Both are recorded counts; the ring below is the only recorded per-segment identity of a selection.',
-    matrixNote: 'one cell per (segment, invocation). Filled = the recorded walk returned that segment; dim = it existed and '
-      + 'the walk did not return it; blank = it did not exist yet. A ring marks a delivered selection, which is where a '
-      + 'selected id is written down. Row labels: `+parent` marks one chunk of a longer event, so `id#n` is the chunk.',
+      + 'Both are recorded counts; the ring below is the only recorded per-segment identity of a selection.'
+      + (gridInfo.aggregated ? ' In a column block the bars are the largest recorded count in that block.' : ''),
+    matrixNote: gridInfo.aggregated
+      ? 'one cell per BLOCK of (segments, invocations) — see the fourth subtitle line for the block size. Filled = the recorded '
+        + 'walk returned something in the block; dim = something existed in it and the walk did not return it; blank = nothing in '
+        + 'it existed yet. A ring marks a block in which a delivered payload named a segment, which is where a selected id is '
+        + 'written down. A `·` in a filled block is a rolled-up hit, not a single one.'
+      : 'one cell per (segment, invocation). Filled = the recorded walk returned that segment; dim = it existed and '
+        + 'the walk did not return it; blank = it did not exist yet. A ring marks a delivered selection, which is where a '
+        + 'selected id is written down. Row labels: `+parent` marks one chunk of a longer event, so `id#n` is the chunk.',
     notes: [
       `The selected identity is recorded for ${model.identityColumns} of ${model.columns.length} invocations. assembly.selected `
         + 'is a count: the control plane stores no per-segment id list for it, and recallTree is the candidate walk rather '
@@ -1219,7 +1478,7 @@ function run(options) {
       `"Existed but not returned" is not "judged irrelevant": the walk only follows edges at or above r=${model.knobs.r}, from the `
         + `anchor it chose, and a pair inside the window that was never scored has no edge to follow. ${model.carryCells} cell(s) `
         + 'exist by their own step\'s recorded payload although their creation stamp is a few milliseconds later than the '
-        + `invocation (the graph write follows the assembly) — counted, not silently tolerated.${unsegmentedClause}`,
+        + `invocation (the graph write follows the assembly) — counted, not silently tolerated.${lagClause}${aggregateClause}${unsegmentedClause}`,
     ],
     tableNote: 'seq is the plugin\'s own running message counter, not a step number; the turn/step column is attributed by time '
       + '(the pre-step hook runs immediately before its step/start event). "ids: not recorded" means the run holds a count and no id list.',
@@ -1231,7 +1490,9 @@ function run(options) {
         + `${tape.payloads.length} step payload record(s)`,
       `session store (turn/step attribution): ${elidePath(rel(stepInfo.path))}`,
       `delivered payload text: ${messages.sources.map((p) => elidePath(rel(p))).join(' + ')}`,
-      'self-contained SVG: no script, no external font, no network — the figure stands alone.',
+      'self-contained SVG: no script, no external font, no network — the figure stands alone. **SVG only**: this tool',
+      'writes no PNG, because a rasteriser is a dependency (sharp/canvas/resvg) that this repository does not take for a',
+      'figure no test can read back. A `.png` path is refused rather than written as an SVG under a PNG name.',
     ],
   };
   const svg = renderFigure(model, meta);
@@ -1277,6 +1538,12 @@ const FIXTURE_SEGMENTS = [
  * at passage granularity), a walk selected again from a delivered payload, and a fallback selection
  * whose ids the run never wrote down — the case the figure must show as a count and not as a state.
  * `defects` each break exactly one recorded relation, so the tool has to fail rather than draw around it.
+ *
+ * `defects.lagSelected` is the one that does *not* break a relation: it moves a selected segment's creation stamp
+ * `lagSelected` ms past the invocation that selected it, which is what the association-graph upkeep does on a live
+ * run (round `20261002-2037` measured 37 ms). Inside `ASYNC_LAG_TOLERANCE_MS` that is a race and the figure draws;
+ * `defects.selectNotYetExisting` stamps a selected segment 600 ms past its invocation, which is outside the window
+ * and is therefore refused - the two cases are the two sides of the one bound the tolerance draws.
  */
 function fixtureInvocations(defects = {}) {
   const inv = [
@@ -1369,10 +1636,16 @@ function buildFixture(dir, defects = {}) {
   const segments = defects.dropSegment
     ? FIXTURE_SEGMENTS.filter((s) => s.id !== defects.dropSegment)
     : FIXTURE_SEGMENTS;
-  const snapshot = {
+  const stamped = defects.lagSelected !== undefined
+    ? segments.map((s) => (s.id === 'P#1' ? { ...s, ts: 3000 + defects.lagSelected } : s))
+    // A selected segment stamped 600 ms after the invocation that selected it: outside the async-upkeep window, so
+    // the figure must refuse rather than draw a segment that did not exist when it was chosen.
+    : defects.selectNotYetExisting === true
+      ? segments.map((s) => (s.id === 'r2' ? { ...s, ts: 3600 } : s))
+      : segments;  const snapshot = {
     schema: 2,
     order: segments.map((s) => s.id),
-    segments: segments.map((s) => ({ sessionId: FIXTURE_SESSION, role: 'user', taskTag: 'user', ...s })),
+    segments: stamped.map((s) => ({ sessionId: FIXTURE_SESSION, role: 'user', taskTag: 'user', ...s })),
     edges: [],
     scores: [],
     scored: segments.length,
@@ -1388,7 +1661,6 @@ function buildFixture(dir, defects = {}) {
     kind: 'wiring',
     s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' },
     relevance: true,
-    planGate: true,
     xFirst: true,
     recall: { d: 2, r: 0.55, w: 1024, wait: 10000 },
     tas: { on: true, tMaxChars: 8000, updatePolicy: 'perTask' },
@@ -1478,13 +1750,21 @@ function selfTest() {
     // (1) the state counts, from the fixture's own arithmetic
     assertEqual(model.columns.length, 5, 'invocations');
     assertEqual(model.rows.length, FIXTURE_SEGMENTS.length, 'row count is the final segment count');
-    assertEqual(model.counts.absent, 9, 'not-yet-created cells');
+    // 7 cells are later than their invocation, and of those 2 are inside the async-upkeep tolerance, so they count
+    // as existing instead of blank: `u2` at invocation #1 (ts 1100, 100 ms after the assembly that selected it - the
+    // runtime-context message that arrives in the same step as `u1`, which the tape payload carries but the graph
+    // did not yet hold) and `r2` at invocation #3 (ts 3050, 50 ms after the assembly that selected it). The
+    // tolerance is doing exactly what it is for, and this is the count it moves: 9 blank cells before the window
+    // existed, 7 now.
+    assertEqual(model.counts.absent, 7, 'not-yet-created cells');
+    assertEqual(model.lagCells, 2, 'cells that exist only because of the bounded async-upkeep lag');
+    assertEqual(model.maxLagMs, 100, 'the largest lag this fixture tolerates, in ms');
     assertEqual(model.counts.candidate, 5, 'candidate cells');
     assertEqual(model.counts.root, 3, 'walk-root cells');
-    assertEqual(model.counts.existed, 18, 'existed-but-not-returned cells');
+    assertEqual(model.counts.existed, 20, 'existed-but-not-returned cells');
     assertEqual(model.counts.absent + model.counts.candidate + model.counts.root + model.counts.existed,
       model.columns.length * model.rows.length, 'the four states partition the matrix');
-    say('state counts: absent 9, candidate 5, walk-root 3, existed 18 over 5x7 cells');
+    say('state counts: absent 7, candidate 5, walk-root 3, existed 20 over 5x7 cells (2 by the async-lag window)');
 
     // (2) selection identity, and its absence, are both read rather than assumed
     assertEqual(model.identityColumns, 3, 'invocations whose delivered payload records the selected ids');
@@ -1501,7 +1781,11 @@ function selfTest() {
     // (3) the same-step carry is the recorded correction it claims to be, and only that
     assertEqual(model.carryCells, 1, 'cells that exist only because the step\'s own payload carried them');
     assertTrue(model.columns[0].existed.has('u1'), 'the first invocation sees the segment its payload carried');
-    assertTrue(!model.columns[0].existed.has('u2'), 'and not one that arrived later in the same step');
+    // And the correction is scoped to the payload, not to the step: `u2` is in the same step and in the same window,
+    // but it is the async-lag tolerance (100 ms), not the carry, that admits it. `carryIds` is the boundary.
+    assertTrue(!model.columns[0].carryIds.includes('u2'), 'a segment the step did not carry is not a carry');
+    assertTrue(model.columns[0].lagIds.includes('u2'), 'it is admitted by the bounded async-lag window instead');
+    assertTrue(model.columns[0].strictIds.size === 0, 'and nothing in this fixture is strict at invocation #1');
     say('same-step carry: 1 cell, from the step payload record on the tape');
 
     // --- the figure itself -------------------------------------------------------------------
@@ -1516,6 +1800,11 @@ function selfTest() {
     assertTrue(out.svg.includes('ids: not recorded'), 'a count without an id says so above the matrix too');
     assertTrue(out.svg.includes('recency-window'), 'the recorded fallback flag is shown');
     assertTrue(out.svg.includes('>2048 *<'), 'a per-invocation window that differs from w is marked in the table');
+    // The drawing mode is on the root element, so a reader (or a test) can tell an aggregated figure from an exact
+    // one without guessing from the geometry.
+    assertTrue(out.svg.includes('data-chart-mode="exact"'),
+      'a matrix that fits the ceilings is drawn exactly, and says so on the root element');
+    assertTrue(out.line.includes('drawing exact (5x7)'), 'and the summary line states the mode and the drawn size');
 
     // Geometry, read back out of the finished document rather than recomputed: every cell lies in
     // its row and column, cells do not overlap, and every band lies inside the document.
@@ -1533,10 +1822,10 @@ function selfTest() {
     assertTrue(cells.every((c) => c.x >= 0 && c.y >= 0 && c.x + c.w <= docW && c.y + c.h <= docH), 'every cell is inside the document');
     const stateTally = {};
     for (const c of cells) stateTally[c.state] = (stateTally[c.state] ?? 0) + 1;
-    assertEqual(stateTally.absent ?? 0, 9, 'the drawn blank cells equal the derived count');
+    assertEqual(stateTally.absent ?? 0, 7, 'the drawn blank cells equal the derived count');
     assertEqual(stateTally.candidate ?? 0, 5, 'the drawn candidate cells equal the derived count');
     assertEqual(stateTally.root ?? 0, 3, 'the drawn walk-root cells equal the derived count');
-    assertEqual(stateTally.existed ?? 0, 18, 'the drawn dim cells equal the derived count');
+    assertEqual(stateTally.existed ?? 0, 20, 'the drawn dim cells equal the derived count');
     assertEqual((doc.match(/class="ring"/g) ?? []).length, 5, 'one ring per recorded selected row');
     for (const m of doc.matchAll(/<g class="band"[^>]*transform="translate\(0,(-?[\d.]+)\)"/g)) {
       assertTrue(Number(m[1]) >= 0 && Number(m[1]) <= docH, `band offset ${m[1]} is inside the document`);
@@ -1555,10 +1844,92 @@ function selfTest() {
     }
     say('figure: cells tile the matrix, rings match the recorded selections, no caption overflows');
 
+    // --- aggregation: the same run, drawn as blocks -------------------------------------------
+    //
+    // The live case this exists for: cell C2 of round `20261002-2037` is 277 invocations x 1 398 segments, and drawn
+    // exactly that is `width="1240" height="42957"` and 56.7 MB of `<rect>`. The claim to check is not that the
+    // figure got smaller - it is that it got smaller **without changing what it says**: every state total is still
+    // computed from the full matrix, and what a block adds is only "the strongest recorded fact in here".
+    {
+      const small = run({ run: runDir, cell: 'C9', grid: { maxCols: 3, maxRows: 3 } });
+      assertTrue(small.svg.includes('data-chart-mode="aggregated"'), 'a matrix over the ceilings is drawn aggregated');
+      assertTrue(small.svg.includes('AGGREGATED'), 'and the matrix panel says so where a reader will see it');
+      assertTrue(small.line.includes('drawing aggregated'), 'and so does the summary line');
+      assertTrue(small.line.includes('5x7 exact, drawn as 3x3 blocks'), 'naming the exact size it replaced');
+      // Counts are the full matrix's, not the blocks': these are the same numbers the exact figure prints.
+      assertEqual(small.model.counts.absent, model.counts.absent, 'aggregation does not change the derived blank count');
+      assertEqual(small.model.counts.candidate, model.counts.candidate, 'nor the candidate count');
+      assertEqual(small.model.counts.existed, model.counts.existed, 'nor the existed count');
+      assertEqual(small.model.selectedTotal, model.selectedTotal, 'nor the recorded selection total');
+      assertEqual(small.model.countOnly, model.countOnly, 'nor the count-without-id total');
+      assertTrue(small.line.includes('not-created 7, candidate 5, walk-root 3, existed-not-returned 20'),
+        'the summary line prints the same state counts as the exact figure');
+      // What the roll-up costs, stated rather than hidden: a state can only be promoted, never erased, so no block
+      // is blank unless every cell in it was - which is the one thing the aggregated figure can still say for
+      // certain. The expected number of blank blocks is computed from the fixture's own matrix here, and then the
+      // drawn blocks are checked against it.
+      const layout = layoutOf(small.model, { maxCols: 3, maxRows: 3 });
+      const rowSpans = [[0, 3], [3, 5], [5, 7]];
+      const colSpans = [[0, 2], [2, 4], [4, 5]];
+      let expectedBlankBlocks = 0;
+      for (const [r0, r1] of rowSpans) {
+        for (const [c0, c1] of colSpans) {
+          let anyExisted = false;
+          for (let r = r0; r < r1; r += 1) {
+            for (let c = c0; c < c1; c += 1) if (model.rows[r].cells[c].state !== 'absent') anyExisted = true;
+          }
+          if (!anyExisted) expectedBlankBlocks += 1;
+        }
+      }
+      assertEqual(layout.cells.flat().length, 9, 'nine blocks tile the aggregated matrix');
+      assertTrue(layout.cells.flat().every((c) => c.col >= 1 && c.row >= 1), 'every block records how many cells it stands for');
+      assertEqual(layout.cells.flat().filter((c) => c.state === 'absent').length, expectedBlankBlocks,
+        `a block is blank only when every cell in it was (${expectedBlankBlocks} of 9 here)`);
+      assertTrue(layout.cells.flat().filter((c) => c.state !== 'absent').length >= model.counts.candidate + model.counts.root,
+        'and every block that holds a hit or a walk root is drawn as one');
+      const ringed = layout.cells.flat().filter((c) => c.overlay !== '');
+      assertTrue(ringed.length > 0 && ringed.length <= layout.cells.flat().filter((c) => c.state !== 'absent').length,
+        'a delivered selection is ringed on its block, and never on a block drawn blank');
+      assertEqual(ringed.length, 4,
+        'two selections in different invocations can share a column block, which is exactly what the roll-up hides: '
+        + '5 rings exactly, 4 blocks ringed here');
+      // The table below the matrix is the exact per-invocation record in both modes: aggregation is a drawing
+      // decision, never a reporting one.
+      assertTrue(small.svg.includes('>2048 *<'), 'the per-invocation table is still exact under aggregation');
+      assertTrue(small.svg.includes('not recorded — count only (2)'), 'and still reports the count-only selection');
+      say('aggregation: 5x7 -> 3x3 blocks, same state totals, the exact table kept below');
+    }
+
+    // --- the async-upkeep lag, inside and outside its window ----------------------------------
+    {
+      const dir = mkdtempSync(join(tmp, 'lag-'));
+      const fixture = buildFixture(dir, { lagSelected: 200 });
+      const lagged = run({ run: fixture, cell: 'C9' });
+      assertTrue(lagged.model.lagCells >= 1, `the row stamped after its invocation is counted, got ${lagged.model.lagCells}`);
+      assertTrue(lagged.model.columns[2].existed.has('P#1'),
+        'a segment whose row is stamped 200 ms after the invocation still existed for it (inside the 250 ms window)');
+      assertTrue(lagged.line.includes(`3 async-lag cell(s) within ${ASYNC_LAG_TOLERANCE_MS} ms (max 200 ms)`),
+        'and the summary line states the lag it tolerated, and how large it was');
+      assertTrue(lagged.model.columns[2].selected !== null, 'the selection that forced this window now draws');
+      say('async-upkeep lag: a row 200 ms after its invocation draws and is counted, not silently tolerated');
+    }
+
+    // --- output format: SVG only, and a .png is refused ---------------------------------------
+    {
+      const dir = mkdtempSync(join(tmp, 'png-'));
+      const fixture = buildFixture(dir);
+      const code = main(['--run', fixture, '--cell', 'C9', '--out', join(dir, 's1-activity.png')]);
+      assertEqual(code, 2, 'a .png output path is refused with a status, not written as an SVG under a PNG name');
+      assertTrue(!existsSync(join(dir, 's1-activity.png')), 'and no file is left at that name');
+      assertTrue(usage().includes('SVG only') && usage().includes('no PNG path'),
+        'the usage text says plainly that the tool is SVG-only and why');
+      say('output: SVG only; `--out *.png` exits 2 with the reason (no rasteriser dependency in this repository)');
+    }
+
     // --- the summary line ---------------------------------------------------------------------
     assertTrue(out.line.startsWith('s1-activity: C9 @ round-fixture'), 'the summary names the cell and the run');
     assertTrue(out.line.includes('5 invocations x 7 segments (35 cells)'), 'the summary prints the dimensions');
-    assertTrue(out.line.includes('not-created 9, candidate 5, walk-root 3, existed-not-returned 18'), 'the summary prints every state');
+    assertTrue(out.line.includes('not-created 7, candidate 5, walk-root 3, existed-not-returned 20'), 'the summary prints every state');
     assertTrue(out.line.includes('ids recorded 3 on 3/5 invocations'), 'the summary prints the recorded-identity coverage');
     assertTrue(out.line.includes('2 passage-only row(s)'), 'the summary prints the passage-granularity rows');
     assertTrue(out.line.includes('count-only 2'), 'the summary prints how many selections have no id behind them');
@@ -1668,7 +2039,18 @@ function main(argv) {
     return 2;
   }
   const out = value('out') ?? join(resolve(runDir), 'report', 's1-activity.svg');
-  const result = run({ run: runDir, cell });
+  // The one thing this tool will not do with the output path: pretend to write a raster. An `.svg` document under a
+  // `.png` name is worse than a missing file - the caller's next step renders nothing and reports it as a figure.
+  if (/\.png$/i.test(out)) {
+    process.stderr.write(
+      's1-activity: this tool writes SVG only, and `--out` ends in .png. There is no rasteriser in this repository: '
+      + 'a PNG path needs a dependency (sharp, canvas, resvg) that this figure does not justify, and adding one to a '
+      + 'script whose geometry is asserted as text is the kind of weight this project does not take. Write the SVG '
+      + 'and convert it where the conversion belongs (a viewer, a document build), or name an .svg output.\n',
+    );
+    return 2;
+  }
+  const result = run({ run: runDir, cell, grid: parseGrid(value('grid')) });
   // `--out -` writes the SVG to stdout, so the summary goes to stderr there: a caller redirecting the
   // document into a file must get the document, and the sanity-check line must not land inside it.
   const say = out === '-' ? (line) => process.stderr.write(line) : (line) => process.stdout.write(line);

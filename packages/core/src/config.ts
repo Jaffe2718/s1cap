@@ -59,13 +59,14 @@ export const NUMBER_RULES: readonly NumberRule[] = [
   // 0.25 - it fired on 9 of 9 steps of a live run. Eight segments is already far past "nothing was selected".
   { path: 'recall.minRecalledSegments', min: 1, max: 8, integer: true },
   { path: 'tail.k', min: 0, max: 20, integer: true },
-  { path: 'planGate.maxPlans', min: 1, max: 8, integer: true },
-  { path: 'planGate.attemptCap', min: 1, max: 8, integer: true },
-  { path: 'planGate.abstainConfidence', min: 0, max: 1 },
   { path: 's1.questionsPerCall', min: 1, max: 64, integer: true },
   // attempts for one refused System-1 call; 1 is the single attempt this used to be, 5 is the ceiling because a
   // refusal costs a wait each time and the harness has to stay responsive
   { path: 's1.retryAttempts', min: 1, max: 5, integer: true },
+  // Requests this cell may have in flight at once. 64 is a ceiling rather than a recommendation - the local Laya
+  // admits 16 and refuses the rest - and it is here so that a mis-set value is an error rather than a cell that
+  // quietly recreates the 64.4%-refused run this field exists to prevent. See `AssemblyPolicy.s1.admissionLimit`.
+  { path: 's1.admissionLimit', min: 1, max: 64, integer: true },
 ];
 
 export const ENUM_RULES: readonly { path: string; values: readonly string[] }[] = [
@@ -86,7 +87,7 @@ export const ENUM_RULES: readonly { path: string; values: readonly string[] }[] 
  * from a profile, and is reported as an unknown path. A flag that exists in the type and in the cell, and in
  * neither of the two places that decide it, is worse than a flag that does not exist: it looks configured.
  */
-export const BOOLEAN_PATHS: readonly string[] = ['tas.on', 'planGate.on', 'xFirst', 'deliver'];
+export const BOOLEAN_PATHS: readonly string[] = ['tas.on', 'xFirst', 'deliver'];
 
 /**
  * Fixed by design, not configuration: the harness owns termination, and association-graph
@@ -123,7 +124,6 @@ const KNOWN_TOP_LEVEL: readonly string[] = [
   'tas',
   'recall',
   'tail',
-  'planGate',
   's1',
   'telemetry',
 ];

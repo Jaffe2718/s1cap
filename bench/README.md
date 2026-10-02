@@ -3,11 +3,22 @@
 The design space is the 2×2 ablation — `tas.on`/`xFirst` against S1 governance — and **the scheme runs three cells:
 C0, C1 and C2.** Cell presets live in `cells/`; runners land with M2 (`docs/AGENT_BRIEF.md` §9).
 
-| Cell | `tas.on` + `xFirst` | S1 governance (selection + plan gate) |
+| Cell | `tas.on` + `xFirst` | S1 governance (recall selection) |
 |---|---|---|
 | C0 baseline | off / off | off (native compaction only) |
 | C1 TAS alone | **on / on** | off |
 | C2 full | **on / on** | **on** |
+
+**The plan gate is no longer part of that governance, in any cell.** It was, until 2026-10-02: C2 carried
+`planGate: { on: true, ... }` and the wiring record announced `planGate: true`. Round `20261002-2037` — the round C2
+was written for — contains **zero** `plan_gate` records in any of its artifacts across 277 steps, because the gate can
+only read a plan from a numbered list in an assistant message or a `todo/write` session event, and that run produced
+neither. The knob is removed from the presets, the policy, the config schema, the status route and the report rather
+than given a new plan source: adding one would change what C2 *is* mid-study, and the C1-vs-C2 contrast below is a
+comparison between the two cells that were actually run. `packages/core/src/types.ts` carries the full reasoning, and
+`bench/cells/C2.json`'s `_meta.planGateRemoved` the evidence. The mechanism is kept and still unit-tested
+(`packages/core/src/plan-gate.ts`, `packages/dsh-plugin/src/plan-gate-runtime.ts`) for whichever arm next has a plan
+source the model writes to. Nothing takes over its role.
 
 `tas.on` and `xFirst` are independent switches that this table's presets happen to move together — `tas.on` decides
 whether the state proxy T exists at all (the trace-as-state mechanism from paper T), while `xFirst` decides whether
@@ -22,7 +33,10 @@ returning `ok: true`.
 disables recall *selection*, but association-graph upkeep is not gated on it, so a scorer would still run and both
 arms would report System-1 calls — 363 and 257 of them in round `20261001-1300`. `provider: none` makes the lane
 absent rather than merely unscoped, which is what a no-System-1 control has to be: zero System-1 calls, tokens and
-time. C2 keeps `provider: jev` and its retries. A live profile pairs `provider: none` with `laya.enabled: false`,
+time. C2 keeps a live local lane (`provider: laya-serve`, per `bench/cells/C2.json`) with `retryAttempts: 2` for a
+single refusal and `admissionLimit: 8` for a backend that is refusing everything — see that file's `_meta.retry` and
+`_meta.admissionLimit` for the measured run behind both. A live profile pairs `provider: none` with
+`laya.enabled: false`,
 because `laya.enabled: true` beside `provider: none` is a reported conflict (`singleBackendIssues`,
 `packages/s1-client/src/resolve.ts`); `laya` is a profile key, so that recipe sits in each preset's `_meta` rather
 than in the preset itself.

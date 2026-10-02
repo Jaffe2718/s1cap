@@ -124,6 +124,17 @@ export interface AssemblyEvent {
    * because `scoredPairs` alone was read as coverage and reported 18528 while 1796 pairs had been judged.
    */
   judgedPairs?: number;
+  /**
+   * Pairs the run declined to offer at all, because the System-1 backend was saturated and the scorer held the
+   * window back for a later tick (`S1_DEFERRED`).
+   *
+   * A third number rather than part of `scoredPairs`, and the distinction is the point: `scoredPairs` is what was
+   * put to a scorer, so folding deferred pairs into it would report coverage over work that never happened, while
+   * leaving them out entirely would hide work the run chose not to do. `judgedPairs / scoredPairs` stays the
+   * share of what *was* offered that the backend answered; this field and `scoredPairs` together are the window
+   * the session's arrival order would have offered.
+   */
+  deferredPairs?: number;
   seq: number;
   candidates: number;
   selected: number;

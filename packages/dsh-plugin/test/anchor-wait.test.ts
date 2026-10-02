@@ -156,7 +156,7 @@ test('wait=0 disables the wait entirely', async () => {
 });
 
 /**
- * The fixture the two remaining tests share, and the constraints that shaped it - none of which were obvious, and all
+ * The fixture the three seeded tests share, and the constraints that shaped it - none of which were obvious, and all
  * of which cost a rejected attempt:
  *
  *   - `unjudgedWithin` only looks *backwards* from the anchor, so a user turn at index 0 of the graph has nothing to
@@ -164,13 +164,15 @@ test('wait=0 disables the wait entirely', async () => {
  *   - `scoreNew` walks the graph in order and scores each segment against the segments *before* it, so a segment that
  *     is already in the graph and has not been processed keeps a row that a later pass may or may not fill. Seeding
  *     the graph through `rgStore` is what puts such a segment there.
- *   - the anchor is `window[anchor]`, where `anchor` indexes the payload's segments and `window` is the graph's order.
- *     The two only coincide when the graph's order *ends* with the payload's segments, so the payload here is a suffix
- *     of the seeded graph. A payload that carries a brand-new message instead makes the anchor come out as the seeded
- *     graph's first segment, and the wait then reports nothing.
+ *   - the anchor is the newest `user` segment of the graph's order, so a payload that adds a *new* user message moves
+ *     the anchor onto that message and the wait is then about its row, not the seeded turn's. This fixture therefore
+ *     carries the seeded turn itself, which is the live shape: the conversation is already in the graph, the step
+ *     re-carries the task, and the anchor's row is what may or may not be scored when assembly asks for it.
  *
- * The result is close to the live shape: the conversation is already in the graph, the step carries the task, and the
- * anchor's row is what may or may not be scored by the time assembly asks for it.
+ * An earlier version of this comment explained the fixture through the index-space bug: the anchor was
+ * `window[payloadAnchor]`, so the payload had to be a suffix of the graph or the walk rooted on the wrong segment.
+ * That is fixed in `observeStep` (and tested in `packages/core/test/observer.test.ts`), and the payload here no longer
+ * has to be shaped around it.
  */
 function seededGraph(): AssociationGraph {
   const graph = new AssociationGraph();
@@ -183,15 +185,11 @@ function seededGraph(): AssociationGraph {
 }
 
 /**
- * The seeded conversation's own tail, so the anchor index lands on a segment that has a predecessor.
+ * The seeded conversation's own tail, so the anchor lands on a segment that has a predecessor.
  *
- * The shape of this payload is dictated by an index-space detail in `observeStep` that is worth stating, because a
- * fixture that ignores it passes while proving nothing: the anchor is `window[anchor]`, where `anchor` is the position
- * of the payload's last user turn *within the payload* and `window` is the graph's ordered segments. Those two spaces
- * only agree when the graph's order starts where the payload's does - which is not the case for a session that resumed
- * from a snapshot. So the payload here starts with a non-user segment, which puts its user turn at index 1 and makes
- * `window[1]` the seeded user turn. A payload of `[u1]` alone would put the anchor on `window[0]`, the seeded system
- * prompt, and the wait would then correctly report that a segment with no predecessors has nothing to wait for.
+ * The payload's own last user turn and the graph's newest one are the same segment here, which is the normal case and
+ * the one the wait is about: `u1` has `sys` in front of it inside the window, so there is a pair whose row the backend
+ * may not have written yet.
  */
 const SEEDED_TAIL = [
   { id: 'r1', role: 'assistant', content: [{ type: 'reasoning', text: 'the comparison is off by one' }] },
@@ -238,14 +236,20 @@ test('a wait that reaches its deadline proceeds, and reports the remainder exact
   );
   const lines = h.probes.filter((p) => p.kind === 'anchor-wait');
   assert.equal(lines.length, 1, 'one probe line for the whole wait');
-  assert.deepEqual(lines[0], { schema: 0, kind: 'anchor-wait', ms: 1_000, polls: 2, unknown: 1 });
+  assert.deepEqual(lines[0], { schema: 0, kind: 'anchor-wait', ms: 1_000, polls: 2, unknown: 1, waited: true, gaveUp: true });
 });
 
-test('an idle queue with nothing in flight is not waited on at all', async () => {
+test('an idle queue with nothing in flight is not waited on, and the fail-open path says so', async () => {
   // The guard that keeps the wait off the critical path when it cannot help. The anchor's row is unjudged and the graph
   // is exactly the one that made the test above wait; what is different is that no scoring call is running and nothing
-  // is queued, so no amount of waiting could complete the row. The diagnostic is still written - the fail-open rule is
-  // about to admit the pairs, and the record has to say so - but the step pays one check and no sleep.
+  // is queued, so no amount of waiting could complete the row.
+  //
+  // The step then proceeds down the fail-open path - `assemble()` admits the pair as relevant, which is the owner's
+  // rule for an unknown judgement - and that is a decision the record has to state. It used to be written as a
+  // *completed* wait with `polls: 0`: a real round's tape carries `{ms:10000, polls:0, unknown:2}`, which reads as a
+  // wait that ran and polled nothing, and the reader had no way to tell it from the stand-down it actually was. The
+  // line now carries `waited: false` and the warning says why, which is the difference between "we tried and lost"
+  // and "we never tried, and admitted these pairs unjudged".
   const h = harness({ anchorWaitMs: 10_000, seed: seededGraph() });
   const observation = await h.observer.observe({ sessionId: SESSION, messages: SEEDED_TAIL, step: 1 });
 
@@ -255,7 +259,18 @@ test('an idle queue with nothing in flight is not waited on at all', async () =>
   assert.equal(stats.observed, 1, 'the step was observed');
   assert.ok(observation !== undefined, 'and it assembled');
   assert.equal(stats.upkeep.applied, 0, 'no queue work was applied, because there was none');
-  assert.equal(h.warns.filter((w) => w.includes('anchor wait gave up')).length, 1, 'the remainder is still reported');
+
+  const lines = h.probes.filter((p) => p.kind === 'anchor-wait');
+  assert.deepEqual(lines, [{ schema: 0, kind: 'anchor-wait', ms: 10_000, polls: 0, unknown: 1, waited: false, gaveUp: true }]);
+  const standDowns = h.warns.filter((w) => w.includes('anchor wait not started'));
+  assert.equal(standDowns.length, 1, `the remainder is still reported, and as what it is: ${JSON.stringify(h.warns)}`);
+  assert.match(standDowns[0] ?? '', /nothing queued and no scoring call in flight/);
+  assert.match(standDowns[0] ?? '', /fail-open rule admits its 1 pair\(s\)/);
+  assert.equal(
+    h.warns.filter((w) => w.includes('anchor wait gave up')).length,
+    0,
+    'and it is not also reported as a wait that ran out of time',
+  );
 });
 
 /**
@@ -277,13 +292,13 @@ test('a row the lexical fallback wrote is not a complete row: the wait still rep
 
   assert.ok(observation !== undefined, 'the step assembled');
   assert.deepEqual(h.slept, [], 'nothing is running that could judge the row, so no sleep is spent');
-  const giveUps = h.warns.filter((w) => w.includes('anchor wait gave up'));
-  assert.equal(giveUps.length, 1, `a fallback row leaves the pair unjudged: ${JSON.stringify(h.warns)}`);
-  assert.match(giveUps[0] ?? '', /1 pair\(s\) inside the window still unjudged/);
+  const standDowns = h.warns.filter((w) => w.includes('anchor wait not started'));
+  assert.equal(standDowns.length, 1, `a fallback row leaves the pair unjudged: ${JSON.stringify(h.warns)}`);
+  assert.match(standDowns[0] ?? '', /1 pair\(s\)/);
   assert.deepEqual(
     h.probes.filter((p) => p.kind === 'anchor-wait'),
-    [{ schema: 0, kind: 'anchor-wait', ms: 10_000, polls: 0, unknown: 1 }],
-    'and the count the fail-open rule will admit is reported',
+    [{ schema: 0, kind: 'anchor-wait', ms: 10_000, polls: 0, unknown: 1, waited: false, gaveUp: true }],
+    'and the count the fail-open rule will admit is reported, with the path it took',
   );
 });
 

@@ -42,10 +42,14 @@ test('the layout axis actually varies across the ablation, in the direction the 
   // And the factors stay orthogonal: the two ordered cells share the TAS half, so what separates them is S1
   // governance, and the baseline has neither half on.
   assert.equal(cellPolicy('C1').tas.on !== cellPolicy('C2').tas.on, false, 'C1 and C2 both order by TAS');
-  assert.equal(cellPolicy('C1').planGate.on !== cellPolicy('C2').planGate.on, true, 'the gate varies within the ordered pair');
   assert.equal(cellPolicy('C1').recall.tier1 !== cellPolicy('C2').recall.tier1, true, 'and so does recall selection');
   assert.equal(cellPolicy('C0').tas.on, false, 'while the baseline orders nothing');
-  assert.equal(cellPolicy('C0').planGate.on, false, 'and gates nothing');
+  // The plan gate used to be asserted here as the second half of what separates C1 from C2. It is gone, and the
+  // assertion that replaces it is the one that keeps it gone: no cell carries a gate, because a gate that cannot
+  // fire is not a factor of the ablation (`types.ts` carries the measurement).
+  for (const cell of CELLS) {
+    assert.equal('planGate' in cellPolicy(cell), false, `${cell}: no plan gate is configured`);
+  }
 });
 
 test('every cell leaves the assembled layout readable, whichever side x lands on', () => {
@@ -66,24 +70,21 @@ test('every cell leaves the assembled layout readable, whichever side x lands on
  * the record only said "off" because the cell name in the log is the cell *asked for*, not the policy that ran.
  */
 test('a cell preset is what the runtime actually starts from, and an override still wins', () => {
-  // C0 is the baseline: no TAS, no selection, no gate, chronological, and it delivers nothing.
+  // C0 is the baseline: no TAS, no selection, chronological, and it delivers nothing.
   const c0 = validatePolicy({ cell: 'C0' });
   assert.equal(c0.ok, true, JSON.stringify(c0.errors));
   assert.equal(c0.policy.tas.on, false, 'C0 must not order by TAS');
   assert.equal(c0.policy.recall.tier1, 'off', 'C0 must not select');
-  assert.equal(c0.policy.planGate.on, false, 'C0 has no gate');
   assert.equal(c0.policy.xFirst, false, 'C0 is chronological');
   assert.equal(c0.policy.deliver, false, 'C0 is the only cell that leaves history to the harness');
 
-  // C1 is TAS alone: it orders and delivers, and neither half of S1 governance runs.
+  // C1 is TAS alone: it orders and delivers, and the one half of S1 governance it runs is recall selection.
   const c1 = validatePolicy({ cell: 'C1' });
   assert.equal(c1.ok, true, JSON.stringify(c1.errors));
   assert.equal(c1.policy.tas.on, true, 'C1 orders by TAS');
   assert.equal(c1.policy.recall.tier1, 'off', 'C1 must not select');
-  assert.equal(c1.policy.planGate.on, false, 'C1 has no gate');
 
-  // C1/C2: ordered, and delivering. C2 additionally runs both halves of S1 governance, and it is the contrast
-  // C1 has to beat.
+  // C1/C2: ordered, and delivering. C2 additionally runs recall selection, and it is the contrast C1 has to beat.
   for (const cell of ['C1', 'C2'] as Cell[]) {
     const p = validatePolicy({ cell }).policy;
     assert.equal(p.tas.on, true, `${cell} orders by TAS`);
@@ -92,7 +93,14 @@ test('a cell preset is what the runtime actually starts from, and an override st
   }
   const c2 = validatePolicy({ cell: 'C2' }).policy;
   assert.equal(c2.recall.tier1, 'embed', 'C2 selects');
-  assert.equal(c2.planGate.on, true, 'C2 gates');
+  // What C2's "full configuration" is made of, stated so a future addition has to be argued for here: the state
+  // proxy, recall selection, the x-first layout, delivery, and the System-1 lane's own settings. Nothing else -
+  // there is no plan gate in the preset, the policy, the schema or the report.
+  assert.deepEqual(
+    Object.keys(c2).filter((k) => k !== 'cell').sort(),
+    ['assemblyDeadlineMs', 'cache', 'deliver', 'recall', 'rgMaintenance', 's1', 'tail', 'tas', 'termination', 'xFirst'],
+    'the policy surface is exactly this, and a new knob is a change to the ablation',
+  );
 
   // Precedence: the cell is the base, an explicit knob in the patch is the deviation, and it wins.
   const deviated = validatePolicy({ cell: 'C0', deliver: true, xFirst: true });

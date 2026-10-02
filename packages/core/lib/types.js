@@ -180,14 +180,29 @@ export const CORE_SCHEMA_VERSION = 1         ;
                                                                                             
      
                    
-             
-                
-                                   
-                     
-                               
-                       
-                              
     
+                                                                                     
+    
+                                                                                                   
+                                                                                                              
+                                                                                                               
+                                                                                                               
+                                                                                                             
+                                                                                                                
+                                                                                                                
+                                                                                                                
+                                                                                                            
+                        
+    
+                                                                                                           
+                                                                                                                
+                                                                                                              
+                                                                                                             
+                                                                                                             
+                                                                                                               
+                                                                                                                 
+                                                                                          
+     
        
                              
                                                                           
@@ -219,6 +234,27 @@ export const CORE_SCHEMA_VERSION = 1         ;
                                                                
        
                           
+       
+                                                                                                               
+      
+                                                                                                       
+                                                                                                      
+                                                                                                                  
+                                                                                                              
+      
+                                                                                                                 
+                                                                                                                 
+                                                                                                               
+                                                                                                           
+                                                                                                                
+                                                                                                        
+      
+                                                                                                               
+                                                                                                                  
+                                                                                                                 
+                                                                                                            
+       
+                           
     
  
 
@@ -354,8 +390,7 @@ export function defaultPolicy()                 {
     tail: { k: 3 },
     xFirst: true,
     deliver: false,
-    planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
-    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20, retryAttempts: 1 },
+    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20, retryAttempts: 1, admissionLimit: 8 },
   };
 }
 
@@ -367,7 +402,6 @@ export function cellPolicy(cell      )                 {
     case 'C0': // baseline: chronological append, native compaction only
       p.tas.on = false;
       p.recall.tier1 = 'off';
-      p.planGate.on = false;
       // The baseline is the one cell that does not take history management away from the harness: it delivers
       // nothing, so what it measures is the harness doing what it would have done anyway. The other two cells
       // deliver their assembled view, because "TAS alone" and the full configuration are statements about what
@@ -381,12 +415,12 @@ export function cellPolicy(cell      )                 {
     case 'C1': // TAS alone: the state proxy exists and x sits before recalled history, no System-1 selection
       p.tas.on = true;
       p.recall.tier1 = 'off';
-      p.planGate.on = false;
       p.deliver = true;
       p.xFirst = true;
       break;
     case 'C2':
-      // the full configuration: TAS ordering plus S1 governance (recall selection + plan gate), x-first layout
+      // the full configuration: TAS ordering plus S1 governance (recall selection), x-first layout. The second
+      // half of that governance used to be a plan gate; it is gone, and the comment above `s1` says why.
       p.deliver = true;
       p.xFirst = true;
       break;

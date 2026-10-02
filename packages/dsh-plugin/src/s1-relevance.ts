@@ -46,9 +46,12 @@
  * is counted in `S1RelevanceStats` rather than left silent - a retry nobody can see is how "the backend was
  * slow" stayed indistinguishable from "the backend was refusing" for a whole round.
  */
-import { S1CancelledError, S1HttpError, S1TimeoutError, noul, normalize } from '@s1cap/s1-client';
+import { S1CancelledError, S1HttpError, S1TimeoutError, S1_RETRYABLE_STATUS, noul, normalize } from '@s1cap/s1-client';
 import type { NoulAnswer } from '@s1cap/s1-client';
-import type { Segment } from '@s1cap/core';
+import type { Segment, S1Deferral } from '@s1cap/core';
+import { S1_DEFERRED } from '@s1cap/core';
+
+import type { Backpressure } from './s1-backpressure.ts';
 
 /**
  * How much of each segment is shown to the backend.
@@ -151,6 +154,21 @@ export interface S1RelevanceOptions {
    * request in the same instant - the load the 503 was complaining about.
    */
   sleep?(ms: number): Promise<void>;
+  /**
+   * The admission gate for the backend, when one is supplied.
+   *
+   * Without it this scorer asks for every window it is handed, one batch after another, and a saturated backend
+   * answers `503` to most of them: round `20261002-2037` sent 5 992 requests at 2.70/s over 2 220 s and 64.4 %
+   * were refused, because the upkeep queue does not await its async handler and several `scoreNew` loops were
+   * therefore in flight at once. Retrying each refusal - which is what `retryAttempts` does, correctly, waiting
+   * the server's own `Retry-After` - does not help against a backend that is refusing *everything*; it is one
+   * more request inside the same admission window.
+   *
+   * With a gate, a request that cannot be admitted is not sent, and the window is handed back as `S1_DEFERRED` so
+   * the graph defers it (`assoc-graph.ts`) instead of scoring it lexically: the pair is neither paid for nor lost,
+   * and the omission is counted. See `s1-backpressure.ts` for the policy and its measured justification.
+   */
+  backpressure?: Backpressure;
 }
 
 export interface S1RelevanceStats {
@@ -188,14 +206,30 @@ export interface S1RelevanceStats {
    * apart when reading `/s1` after a bad round.
    */
   gaveUpAfterRetries: number;
+  /**
+   * Windows the admission gate did not let through, so they were handed back to the graph as `S1_DEFERRED`.
+   *
+   * The number that separates "the backend answered badly" from "we stopped asking". Nothing was scored for
+   * these windows in either direction - not by the backend and not by the fallback - so they are neither a
+   * failure nor a judgement; the graph's `deferredPairs` is the same event counted in pairs.
+   */
+  blocked: number;
+  /** of `blocked`, the ones held back because the cell's own in-flight budget was full */
+  blockedByLimit: number;
+  /** of `blocked`, the ones held back because the breaker was open after a run of refusals */
+  blockedByBreaker: number;
+  /** true once the gate has held anything back in this session */
+  backpressured: boolean;
 }
 
 export interface S1Relevance {
   /**
    * Weights for `candidates`, in order. Returns `undefined` when no backend answered, which is the caller's
-   * signal to use its fallback rather than to treat every pair as unrelated.
+   * signal to use its fallback rather than to treat every pair as unrelated; returns `S1_DEFERRED` when the
+   * backend is saturated and the window was not offered at all, which is the caller's signal to hold the pairs
+   * for a later tick instead of buying them from the fallback.
    */
-  (current: Segment, candidates: readonly Segment[]): Promise<readonly number[] | undefined>;
+  (current: Segment, candidates: readonly Segment[]): Promise<readonly number[] | undefined | S1Deferral>;
   stats(): S1RelevanceStats;
 }
 
@@ -240,6 +274,10 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
     retries: 0,
     reducedBatches: 0,
     gaveUpAfterRetries: 0,
+    blocked: 0,
+    blockedByLimit: 0,
+    blockedByBreaker: 0,
+    backpressured: false,
   };
   const perCall = Math.max(1, Math.trunc(opts.questionsPerCall ?? 16));
   const clock = opts.now ?? Date.now;
@@ -248,7 +286,10 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
   /** one line, not one per segment: "no backend" is a mode, and a mode repeated per segment is noise */
   let reportedNoClient = false;
 
-  const scoreBatch = async (current: Segment, candidates: readonly Segment[]): Promise<readonly number[] | undefined> => {
+  const scoreBatch = async (
+    current: Segment,
+    candidates: readonly Segment[],
+  ): Promise<readonly number[] | undefined | S1Deferral> => {
     if (candidates.length === 0) return [];
     const started = clock();
     const out = new Array<number>(candidates.length).fill(0);
@@ -287,6 +328,40 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
         batch = [];
         for (let i = cursor; i < candidates.length && batch.length < size; i += 1) batch.push(i);
         if (batch.length < natural) stats.reducedBatches += 1;
+
+        // Admission, before a single question is rendered: the backend takes 16 requests at once and refuses the
+        // rest, so a request that cannot be admitted this instant is not worth composing. A refusal here is not a
+        // failure and is not retried - the window goes back to the graph as `S1_DEFERRED`, which holds the pairs
+        // without scoring them lexically, and the next upkeep tick offers them again.
+        //
+        // It is checked per attempt rather than per batch, because a retry is a second request and is exactly what
+        // the gate exists to ration. The wait between two attempts is `Retry-After`, which the gate does not
+        // replace: `retryAttempts` still governs one refusal, and the gate governs a backend that refuses all of
+        // them.
+        // Admission, taken immediately before the request and never released by it: `decide` is the frame that
+        // makes the call, so it hands the slot back to the gate when the request settles. Acquired per *chunk*
+        // and reused across its retries - a retry is the same request being asked again, and charging the gate
+        // twice for it would let one refused window exhaust a budget meant for windows.
+        let admittedThisChunk = false;
+        if (opts.backpressure !== undefined && !admittedThisChunk) {
+          const admission = opts.backpressure.tryAcquire();
+          if (!admission.ok) {
+            stats.blocked += 1;
+            stats.backpressured = true;
+            if (admission.reason === 'breaker-open') stats.blockedByBreaker += 1;
+            else stats.blockedByLimit += 1;
+            // Reported once per state change rather than once per window: the gate is a mode, and a line per
+            // deferred window on a saturated backend is a log nobody reads.
+            if (stats.blocked === 1 || stats.blocked % 50 === 0) {
+              opts.onWarn?.(
+                `[s1cap] relevance: not asking (${admission.reason}); ${stats.blocked} window(s) held back so far. ` +
+                  'Their pairs are reported as the graph\'s `deferredPairs` and are not scored lexically.',
+              );
+            }
+            return S1_DEFERRED;
+          }
+          admittedThisChunk = true;
+        }
 
         // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
         // the candidate's position in the window, so the model can still tell which part of the history it is
@@ -330,12 +405,18 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
           // and it is handled here rather than by a TypeError on `result.answers`, which is what it used to be.
           // It is also not retried: there is no endpoint to ask again.
           if (result === undefined) {
+            // The gate was charged for a request that was never made: `decide` answered "there is no backend",
+            // which it can do without touching the network (no client, or a provider resolved to `none`). Handing
+            // the slot back keeps the in-flight count a measure of requests rather than of calls to a thunk.
+            opts.backpressure?.recordSuccess();
             if (!reportedNoClient) {
               reportedNoClient = true;
               opts.onWarn?.('[s1cap] relevance: no System-1 client is answering; windows are scored lexically');
             }
             return undefined;
           }
+          // The backend answered this request, which is what closes the breaker: not a timer, and not a guess.
+          opts.backpressure?.recordSuccess();
           answers = result.answers;
           stats.calls += 1;
           stats.inputTokens += result.usage?.input_tokens ?? 0;
@@ -348,6 +429,16 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
           // a backend that answered something unusable. They used to arrive here as one TypeError.
           if (err instanceof S1TimeoutError) stats.timedOut += 1;
           else if (err instanceof S1CancelledError) stats.cancelled += 1;
+          // What the gate is told, and why it is this narrow. A *refusal* - a retryable status, which is Laya's
+          // `503 server busy` and the 429/gateway family - is the backend saying "not now", and a run of them is
+          // the saturation the breaker exists for. A transport timeout is the opposite signal at the same
+          // counter: the backend was working on the request for 30 s, so pausing would add a pause to a server
+          // that is merely slow. A cancellation is the caller's decision. Only the first is a refusal.
+          if (err instanceof S1HttpError && S1_RETRYABLE_STATUS.includes(err.status)) {
+            opts.backpressure?.recordRefusal();
+          } else {
+            opts.backpressure?.recordSuccess();
+          }
 
           const retryable = isRetryable(err);
           const elapsed = clock() - started;

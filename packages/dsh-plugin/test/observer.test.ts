@@ -157,6 +157,89 @@ test('a step that produced nothing delivers nothing and still reports why', asyn
   assert.equal(emitted.length, 0, 'with no assembly there is no delivery to report');
 });
 
+// --- Defect 1: a decision that carries no messages is not paid for ---
+
+/**
+ * The measured defect, as a test.
+ *
+ * A real three-cell round produced 277 assemblies and 2 deliveries: 275 of the steps had a decision with no
+ * messages, `deliverContext` refused all 275 with "the decision carried no messages", and every one of them had
+ * already been assembled - the walk, the anchor wait, T's rebuild, 1,205,029 recalled tokens assembled against
+ * 1,597 delivered. The refusal is correct and stays; what these two tests pin is that the work now stops before
+ * it is spent, and that the read still happens.
+ */
+test('a decision with no messages costs no assembly, and the step is still read into the graph', async () => {
+  const records: { type?: unknown }[] = [];
+  const observer = observerWith(records);
+  const { middleware, emitted } = preStep(observer);
+  const decision = { kind: 'accept', messages: [] as unknown[] };
+
+  const returned = await middleware({ messages: MESSAGES, step: 7 }, async () => decision);
+
+  assert.equal(returned, decision, 'the harness sees its own object');
+  assert.equal(records.length, 0, 'no assembly record: the walk was never run, so there is nothing to record');
+  const stats = observer.stats();
+  assert.equal(stats.steps, 1, 'the step was seen');
+  assert.equal(stats.ingestOnly, 1, 'counted as a skip, not as a failure to read');
+  assert.equal(stats.observed, 0);
+  assert.equal(stats.empty, 0, 'and not as an unreadable payload: the two diagnoses are opposite');
+  assert.equal(stats.lastSegments, MESSAGES.length, 'the payload was segmented, which is what keeps the graph whole');
+
+  const delivery = emitted.find((e) => e.type === 'context_delivery');
+  assert.ok(delivery !== undefined, 'the refusal is still reported, on every step');
+  assert.equal(delivery?.delivered, false);
+  // The sentence is unchanged on purpose: the report scripts count refusals by it, and this event is the same
+  // event it always was. Only its cost changed.
+  assert.equal(delivery?.reason, 'the decision carried no messages');
+  assert.equal(delivery?.messagesBefore, 0, 'and the field the analysis reads says the same thing it said before');
+});
+
+test('a step that can receive context is assembled in full', async () => {
+  const records: { type?: unknown }[] = [];
+  const observer = observerWith(records);
+  const { middleware } = preStep(observer);
+  const decision = { kind: 'enter', messages: [{ id: 'u7', role: 'user' }] };
+
+  await middleware({ messages: MESSAGES, step: 8 }, async () => decision);
+
+  assert.equal(records.length, 1, 'one assembly, as before');
+  const stats = observer.stats();
+  assert.equal(stats.observed, 1);
+  assert.equal(stats.ingestOnly, 0, 'the two conditions are disjoint, which is the whole finding');
+});
+
+/**
+ * The two conditions the middleware decides on, at the seam where it decides them.
+ *
+ * `assemble: false` is what stops the work, so it has to be asserted on the call rather than inferred from a
+ * counter: a middleware that got the condition backwards would skip the two steps that *can* deliver, and the
+ * delivery records alone cannot tell that apart from a cell that selected nothing.
+ */
+test('the middleware asks for an assembly exactly when the decision can receive one', async () => {
+  const seen: (boolean | undefined)[] = [];
+  const noop = (): undefined => undefined;
+  const spy = {
+    async observe(_payload: unknown, options?: { assemble?: boolean }) {
+      seen.push(options?.assemble);
+      return undefined;
+    },
+    noteSessionEvent: noop,
+    setSystemPrompt: noop,
+    probe: noop,
+    flushUpkeep: () => 0,
+    stats: () => ({}) as never,
+  } as unknown as StepObserver;
+  const middleware = preStepMiddleware(harness().ctx, { observer: spy, cell: 'C2', emit: () => undefined, deliver: () => SKIPPED });
+
+  await middleware({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'enter', messages: [{ id: 'a' }] }));
+  await middleware({ messages: MESSAGES, step: 2 }, async () => ({ kind: 'enter', messages: [] }));
+  // A rejected step is the other cheap class: nothing to deliver, and no reason to assemble either.
+  await middleware({ messages: MESSAGES, step: 3 }, async () => ({ kind: 'reject', messages: [{ id: 'b' }] }));
+  await middleware({ messages: MESSAGES, step: 4 }, async () => ({ kind: 'enter', signal: { aborted: true }, messages: [{ id: 'c' }] }));
+
+  assert.deepEqual(seen, [true, false], 'only the step with claimed messages is assembled');
+});
+
 test('a delivery that returns a list returns it, and a throwing one changes nothing', async () => {
   const records: unknown[] = [];
   const observer = observerWith(records);
@@ -223,8 +306,8 @@ test('a payload without a message list is skipped, not guessed at', async () => 
   const observer = observerWith(records);
   const middleware = preStepMiddleware(harness().ctx, observer);
 
-  await middleware({ step: 1 }, async () => ({ kind: 'accept', messages: [] }));
-  await middleware(undefined, async () => ({ kind: 'accept', messages: [] }));
+  await middleware({ step: 1 }, async () => ({ kind: 'accept', messages: [{ id: 'u' }] }));
+  await middleware(undefined, async () => ({ kind: 'accept', messages: [{ id: 'u' }] }));
 
   assert.equal(records.length, 0);
   const stats = observer.stats();
@@ -237,7 +320,10 @@ test('a broken emitter is counted and never breaks the round', async () => {
   const observer = observerWith([], { throws: true });
   const ctx = harness();
   const middleware = preStepMiddleware(ctx.ctx, observer);
-  const decision = { kind: 'accept', messages: [] };
+  // The decision carries the claimed message, because a step that can receive context is the only kind that
+  // assembles: an empty decision is now answered before the walk, and a broken emitter would then never be
+  // reached, which would make this test pass without testing anything.
+  const decision = { kind: 'accept', messages: [{ id: 'u1', role: 'user' }] };
 
   const returned = await middleware({ messages: MESSAGES, step: 1 }, async () => decision);
 
@@ -288,14 +374,25 @@ test('enabled + observation log writes the record to the configured sink, isolat
   const h = harness();
   apply(h.ctx, {
     enabled: true,
+    // `deliver` is off in the base policy (a layout nobody receives is the safe default; `cellPolicy('C2')` is
+    // what turns it on), so this is stated here rather than inherited: the fixture has to be a step that is
+    // assembled *and* shown, or the test exercises the refusal path while looking like it exercises the sink.
+    deliver: true,
     s1: { provider: 'none' },
     laya: { enabled: false },
     telemetry: { sessionJsonl: session, controlJsonl: control },
   });
 
   const handler = h.handlers.get('agent/pre-step');
-  await handler?.({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'accept', messages: [] }));
-  await handler?.({ messages: MESSAGES, step: 2 }, async () => ({ kind: 'accept', messages: [] }));
+  // The decision carries a claimed message, and that is the fixture keeping up with the behaviour rather than the
+  // assertion being relaxed: since 2026-10-02 a decision with no messages is *ingested but not assembled* (it
+  // cannot receive context, so the walk is not paid for - see "a decision with no messages costs no assembly"
+  // above), and this test's subject is the record a real assembly writes to the configured sink. A fixture that
+  // claimed nothing would write no assembly record at all, and the two-line assertion below would pass for the
+  // wrong reason.
+  const claimed = { id: 'u7', role: 'user', content: [{ type: 'text', text: 'and now the fix' }] };
+  await handler?.({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'accept', messages: [claimed] }));
+  await handler?.({ messages: MESSAGES, step: 2 }, async () => ({ kind: 'accept', messages: [claimed] }));
 
   const lines = readFileSync(control, 'utf8').trim().split('\n');
   // Two kinds of control record per step now: the assembly, and the delivery report that says whether the model
@@ -303,7 +400,15 @@ test('enabled + observation log writes the record to the configured sink, isolat
   // without it, "assembled" and "delivered" were indistinguishable in every log this project produced.
   const records = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
   assert.equal(records.filter((r) => r['type'] === 'assembly').length, 2, 'one assembly per observed step');
-  assert.equal(records.filter((r) => r['type'] === 'context_delivery').length, 2, 'one delivery report per step');
+  const deliveries = records.filter((r) => r['type'] === 'context_delivery');
+  assert.equal(deliveries.length, 2, 'one delivery report per step');
+  // The fixture claims a message so that this is a *delivered* step rather than a refused one, and the report says
+  // so: with `delivered: false` here the whole test would still pass while exercising only the refusal path, which
+  // is the shape of fixture that let "assembled" and "shown" look alike in the first place.
+  assert.ok(
+    deliveries.every((d) => d['delivered'] === true),
+    `each of these steps was assembled *and* delivered, which is what the sink is being asked to record: ${JSON.stringify(deliveries.map((d) => d['reason']))}`,
+  );
   const record = records.find((r) => r['type'] === 'assembly') as Record<string, unknown>;
   assert.equal(record['schema'], 1);
   assert.equal(record['seq'], 0, 'the first observed step starts the observation sequence');
@@ -376,7 +481,10 @@ test('a captured system prompt becomes the pinned block, and the anchor wait can
   assert.ok(statsBefore.systemPromptTokens > 0, 'the prompt is tokenised for the pinned block');
   assert.equal(ticks.length, 1, 'one deferred tick was scheduled, not one per event');
 
-  await middleware({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'accept', messages: [] }));
+  // The decision carries a claimed message, and that is load-bearing since the no-message skip exists: a step with
+  // nothing to deliver is answered before the assembly, so an empty decision here would assert nothing about the
+  // pinned block. The session events above are still what supply the prompt.
+  await middleware({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'accept', messages: [{ id: 'u9', role: 'user' }] }));
 
   const record = records[records.length - 1];
   assert.ok((record?.blocks?.['pinned'] ?? 0) > 0, 'the pinned block is no longer empty');
@@ -413,70 +521,14 @@ test('upkeep lag is visible in the stats and clears when the tick runs', async (
   assert.equal(observer.stats().upkeep.overLag, false);
 });
 
-test('the plan gate is offered the model\'s own output, whether it arrives as a message or a trace', async () => {
-  // The bug this pins: a message whose parts are only text adapts to `assistant`, but a message carrying
-  // reasoning *and* text - which is what this model emits on every turn - adapts to `trace`. Filtering on
-  // `assistant` alone inspected nothing for a whole live session while the model was writing numbered plans
-  // throughout, and the only visible symptom was a counter reading zero.
-  const seen: string[] = [];
-  const ticks: (() => void)[] = [];
-  const observer = createStepObserver({
-    policy: defaultPolicy(),
-    emit: () => undefined,
-    now: () => 0,
-    contextWindow: 128_000,
-    reserveOutputTokens: 8_000,
-    fixedOverheadTokens: 1_200,
-    lambdaMs: 1,
-    maxLagTurns: 2,
-    schedule: (tick) => ticks.push(tick),
-    planGate: {
-      consider: async (text: string) => {
-        seen.push(text);
-        return undefined;
-      },
-    },
-  });
-
-  // The envelope is the measured one: `{type, seq, time, data}`, with the message inside `data` - directly for
-  // user messages, under `data.message` for assistant ones. The top-level `message` these fixtures used to carry
-  // exists on no real event, so they passed while every live content event produced nothing.
-  observer.noteSessionEvent({
-    type: 'assistant/message',
-    seq: 1,
-    data: {
-      turn: 1,
-      step: 1,
-      message: {
-        role: 'assistant',
-        content: [
-          { type: 'reasoning', text: 'I should lay out the steps.' },
-          { type: 'text', text: '1. inventory\n2. read the config' },
-        ],
-      },
-    },
-  });
-  // and a plain text-only message, which is the other shape
-  observer.noteSessionEvent({
-    type: 'assistant/message',
-    seq: 2,
-    data: { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: '3. map the modules\n4. summarize' }] } },
-  });
-  // a user message must never be offered: the gate reorders the model's plans, not the user's instructions
-  observer.noteSessionEvent({
-    type: 'user/message',
-    seq: 3,
-    data: { role: 'user', content: [{ type: 'text', text: '1. do this\n2. then that' }] },
-  });
-
-  ticks[0]?.();
-  ticks[1]?.();
-  // The queue's handler is async (the scorer and the gate are both network calls), so the flush returns before
-  // the handler settles. Draining the microtask queue is part of the assertion, not padding.
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(seen.length, 2, `expected the two model messages, got ${JSON.stringify(seen)}`);
-  assert.ok(seen.some((t) => t.includes('inventory')), 'the trace form is offered');
-  assert.ok(seen.some((t) => t.includes('map the modules')), 'the text-only form is offered');
-  assert.ok(!seen.some((t) => t.includes('then that')), 'a user message is not a candidate plan');
-});
+/**
+ * The plan gate used to be exercised here: the observer was handed a gate and this test asserted that the model's
+ * own output reached it, in both the `assistant` and the `trace` shape.
+ *
+ * It is deleted with the wiring it tested - the observer has no `planGate` option any more, because the policy field
+ * is gone (`packages/core/src/types.ts` carries the measurement: round `20261002-2037` recorded no `plan_gate` event
+ * in any artifact). The trap it documented is worth keeping in view for whoever wires a gate back in: a message
+ * whose parts are only text adapts to `assistant`, and one carrying reasoning *and* text - which is what this model
+ * emits - adapts to `trace` with both merged, so filtering on `assistant` alone inspects nothing while the model
+ * writes numbered plans the whole time.
+ */

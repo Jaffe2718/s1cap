@@ -180,14 +180,29 @@ export interface AssemblyPolicy {
    * claims about what the model is shown, and a delivered-nothing cell cannot support them.
    */
   deliver: boolean;
-  planGate: {
-    on: boolean;
-    /** candidate plans m (<= 3) */
-    maxPlans: number;
-    /** attempt cap M (>= 1) */
-    attemptCap: number;
-    abstainConfidence: number;
-  };
+  /*
+   * THERE IS NO `planGate` FIELD HERE, AND THAT IS A MEASURED DECISION (2026-10-02).
+   *
+   * The full-configuration cell carried `planGate: { on: true, ... }` and the wiring record stated
+   * `planGate: true`, so the arm looked like it ran a plan-ordering step. It never did. Round `20261002-2037`
+   * contains **zero** `plan_gate` records in any artifact of the round - not the cell's control plane, not its
+   * tape, not the session stream - across 277 steps and 289 tool calls, because the gate's only two inputs are
+   * things the model never produced: a numbered or bulleted plan in an assistant message, and a `todo/write`
+   * session event. That round emitted neither (`extractPlans` reads nothing from the model's prose; the session
+   * event stream carries no `todo/write` at all), so `plan-gate-runtime.ts` never reached the branch that emits
+   * its record. A knob that is on in the wiring and structurally inert is worse than no knob: it makes the full
+   * configuration look like it does something it does not, in the one cell whose whole purpose is to be the
+   * full configuration.
+   *
+   * So the *policy field* is gone: the cell presets, the config schema, the status route and the report no
+   * longer offer or describe a plan gate. What stays is the mechanism itself - `packages/core/src/plan-gate.ts`
+   * (`orderPlans`, `normalizeProbs`, `AttemptController`), `packages/dsh-plugin/src/plan-gate-runtime.ts` and
+   * the `plan_gate` telemetry record - because it is a documented part of the design with its own tests, and
+   * because deleting it would delete the measurement of what the gate does when it is fed. Nothing calls it:
+   * the role it was supposed to play in C2 was never played by it, and nothing takes over - the honest reading
+   * of the run is that the ordering half of "full configuration" was TAS alone, exactly as in C1, and any future
+   * arm that wants a plan gate has to feed it a plan source the model actually writes to.
+   */
   s1: {
     provider: S1ProviderName;
     /** "" = use the provider default (or the Laya runtime's host/port) */
@@ -219,6 +234,27 @@ export interface AssemblyPolicy {
      * be retried is not the same evidence as one that did not.
      */
     retryAttempts: number;
+    /**
+     * How many System-1 requests this cell may have **in flight at once** — the backend's own admission limit.
+     *
+     * A property of the backend, not a tuning preference, which is why it is a policy field: the local
+     * `laya-serve` this project runs admits 16 concurrent requests and answers `503 server busy` with
+     * `Retry-After: 1` to everything beyond that, rather than queueing (docs/LAYA_RUNTIME.md §6b). A cell that is
+     * *at* the limit is a cell whose next request is the one that gets refused, so the default sits below it.
+     *
+     * It exists because the upkeep queue drains up to `maxPerFlush` events per tick **without awaiting the async
+     * handler between them** (`packages/core/src/upkeep-queue.ts`), so N queued segments mean N scoring loops in
+     * flight, each issuing its own batches. Serialising inside one segment bounds nothing across segments, and
+     * round `20261002-2037` is what that costs: 5 992 requests at 2.70 requests/s over 2 219.7 s, of which
+     * 3 859 (64.4 %) were refused, with the refusal rate above a third in every thirty-second bucket of the run
+     * and no sign of recovery. One cell saturated the backend by itself and kept asking for 37 minutes.
+     *
+     * A request that cannot be admitted is not retried, not queued and **not scored lexically**: the window is
+     * deferred to a later tick (`S1_DEFERRED` in `packages/core/src/assoc-graph.ts`) and the pairs are counted in
+     * the graph's `deferredPairs`, which the assembly record prints beside `judgedPairs / scoredPairs`. Coverage
+     * therefore stays the honest ratio of what was offered, and what was skipped is a number with a reason.
+     */
+    admissionLimit: number;
   };
 }
 
@@ -354,8 +390,7 @@ export function defaultPolicy(): AssemblyPolicy {
     tail: { k: 3 },
     xFirst: true,
     deliver: false,
-    planGate: { on: true, maxPlans: 3, attemptCap: 2, abstainConfidence: 0.5 },
-    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20, retryAttempts: 1 },
+    s1: { provider: 'jev', baseUrl: '', model: '', apiKey: '', questionsPerCall: 20, retryAttempts: 1, admissionLimit: 8 },
   };
 }
 
@@ -367,7 +402,6 @@ export function cellPolicy(cell: Cell): AssemblyPolicy {
     case 'C0': // baseline: chronological append, native compaction only
       p.tas.on = false;
       p.recall.tier1 = 'off';
-      p.planGate.on = false;
       // The baseline is the one cell that does not take history management away from the harness: it delivers
       // nothing, so what it measures is the harness doing what it would have done anyway. The other two cells
       // deliver their assembled view, because "TAS alone" and the full configuration are statements about what
@@ -381,12 +415,12 @@ export function cellPolicy(cell: Cell): AssemblyPolicy {
     case 'C1': // TAS alone: the state proxy exists and x sits before recalled history, no System-1 selection
       p.tas.on = true;
       p.recall.tier1 = 'off';
-      p.planGate.on = false;
       p.deliver = true;
       p.xFirst = true;
       break;
     case 'C2':
-      // the full configuration: TAS ordering plus S1 governance (recall selection + plan gate), x-first layout
+      // the full configuration: TAS ordering plus S1 governance (recall selection), x-first layout. The second
+      // half of that governance used to be a plan gate; it is gone, and the comment above `s1` says why.
       p.deliver = true;
       p.xFirst = true;
       break;

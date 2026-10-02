@@ -304,9 +304,14 @@ interface AssemblyPolicy {
   recall: { threshold: number; depth: number; fanout: number; tier1: 'embed' | 's1' | 'off';
             embedModel?: string; budgetRatio: number; minRecalledShare: number };
   tail: { k: number };                                    // verbatim recent turns always kept
-  planGate: { on: boolean; maxPlans: number; attemptCap: number; abstainConfidence: number };
+  // no `planGate` field: removed 2026-10-02. It was `{ on, maxPlans, attemptCap, abstainConfidence }`, it was `on`
+  // for C2, and it could not fire: round `20261002-2037` wrote zero `plan_gate` records because the model produced
+  // no numbered plan and no `todo/write` event. The mechanism (§5.4) is kept and tested; the knob is gone from the
+  // policy, the presets, the config schema and the report. `packages/core/src/types.ts` carries the decision.
   s1: { provider: 'jev' | 'laya-serve' | 'edgejev' | 'kev' | 'none';
-        baseUrl?: string; model?: string; questionsPerCall: number };
+        baseUrl?: string; model?: string; questionsPerCall: number;
+        retryAttempts: number;                            // attempts for one refused call (waits `Retry-After`)
+        admissionLimit: number };                         // requests in flight at once; the backend refuses above its own limit
         // no request deadline, deliberately: it was `timeoutMs`, and as a policy field it decided which scorer
         // judged a pair. The transport guard is `S1_TRANSPORT_TIMEOUT_MS` in the client and is not tunable.
 }
@@ -378,7 +383,16 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 
 ### 5.4 Plan gate (factor S1G on) — S1 decision backend
 
-- Trigger: assistant emits a tool-call batch; if `planGate.on` and >1 plausible plan exists (harness prompted — system addendum asks for ≤`maxPlans` (3) alternative plans as structured JSON when ambiguity is high; default elicitation `on-demand`).
+> **Not wired into any cell as of 2026-10-02, and this section is the design rather than the wiring.** The gate is
+> reached only by a numbered plan in an assistant message or a `todo/write` session event; round `20261002-2037` —
+> the round C2 carried `planGate: true` for — produced neither, and wrote zero `plan_gate` records into any artifact
+> across 277 steps. The knob has therefore been removed from `AssemblyPolicy`, the presets, the config schema, the
+> status route and the report, and its trigger below is written in the conditional because it was never met. The
+> mechanism in `packages/core/src/plan-gate.ts` and `packages/dsh-plugin/src/plan-gate-runtime.ts` is kept and
+> unit-tested: an arm that has a plan source the model actually writes to can wire it back, and this section
+> describes what it would then do.
+
+- Trigger: assistant emits a tool-call batch; if a plan gate is on and >1 plausible plan exists (harness prompted — system addendum asks for ≤`maxPlans` (3) alternative plans as structured JSON when ambiguity is high; default elicitation `on-demand`).
 - **Dataflow (topology frozen 2026-09-28):** the LLM's candidate plans go **directly to the S1 decision backend** for the choice scoring; the PLAN GATE consumes the returned probabilities + confidence and applies normalization, abstention, ordering and the attempt cap, then hands the ordered plan to execution. The gate does not make the System-1 call itself.
 - **One choice question per plan set:** `state = {task brief, x, T}`; options = plan summaries (≤8; Jev handles 255 natively, Laya caps ~20 at defaults — the cap protects the local path); `criteria` = "Which plan is most likely to complete the task correctly with the least wasted work?"
 - **Normalize probabilities server-side** (Jev invariants not guaranteed, §1.2).
@@ -459,11 +473,17 @@ Report **cache-hit rate before/after each assembly change** per call — the TAS
 
 ### 9.1 Design — 2×2 crossing, three arms run (within-task pairing)
 
-| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: selection + plan gate) | System-1 lane |
+| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: recall selection) | System-1 lane |
 |---|---|---|---|
 | C0 baseline | off / off (chronological, x last) | off (native compaction only) | none (`s1.provider: "none"`) |
 | C1 | **on / on** (`[pinned\|T\|x\|history]`) | off | none (`s1.provider: "none"`) |
-| C2 full | **on / on** | **on** | live provider, `retryAttempts: 2` |
+| C2 full | **on / on** | **on** | live provider, `retryAttempts: 2`, `admissionLimit: 8` |
+
+Factor B was "selection + plan gate" and is now selection alone: the gate was configured `on` for C2 and could not
+fire (§5.4), so a table that lists it as part of the factor claims a difference between C1 and C2 that the run did
+not have. `admissionLimit` is the cell's back-pressure against a backend that refuses rather than queues — see
+`bench/cells/C2.json`'s `_meta.admissionLimit` for the measured round (5 992 requests, 64.4 % refused at 2.70/s)
+behind it.
 
 `tas.on` and `xFirst` are independent switches that the presets here move together — `tas.on` is whether the state
 proxy T exists at all (the trace-as-state mechanism of paper T), `xFirst` is whether the current task x sits before

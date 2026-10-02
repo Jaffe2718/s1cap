@@ -316,6 +316,103 @@ test('a step whose recall found nothing records recallTree as {}, not as a missi
   assert.deepEqual(JSON.parse(JSON.stringify(obs.event)).recallTree, {}, 'and it survives the JSONL serialisation');
 });
 
+// --- the anchor: which segment the walk is rooted on ---
+
+/**
+ * The anchor is the newest `user` segment *of the graph's window*, and this is the test that fails without it.
+ *
+ * The defect it pins, measured on a real three-cell round: `anchor` was a position in the payload's segment list
+ * and it was used to index the graph's append-ordered array (`window[anchor]`). The two index spaces only agree
+ * when the graph's order begins where the payload's does, which is not the live case - the payload holds the
+ * current question after its own first segment - so 273 of 277 invocations rooted the walk on
+ * `34b2115f-…-#3`: the tail chunk of turn 1's `AGENTS.md` block. Every record looked healthy, and the tree was a
+ * faithful account of a walk from the wrong question.
+ *
+ * The fixture is the live shape and nothing more: the earlier turn is already in the graph, and the step carries
+ * the current question plus the `AGENTS.md` chunks that sit in front of it. The payload's last user turn is at
+ * index 3 of its own segment list; index 3 of the graph is `u1`, which is what the old expression returned.
+ */
+test('the walk is rooted on the current question, not on the segment that index happens to name in the graph', async () => {
+  const policy = cellPolicy('C2');
+  policy.tail.k = 1;
+  const graph = new AssociationGraph();
+  const at = BASE.now;
+  // Turn 1: exactly the shape the live round's root came from - a long instruction block split into chunks, whose
+  // tail chunk is a `user` segment, plus the task the user actually asked.
+  graph.addSegments([
+    { id: 'u1', sessionId: BASE.sessionId, kind: 'user', seq: 1, ts: at, tokens: 40, text: 'the task from turn 1' },
+    { id: 'agents#1', sessionId: BASE.sessionId, kind: 'user', seq: 2, ts: at, tokens: 60, text: 'AGENTS.md, chunk 1' },
+    { id: 'agents#3', sessionId: BASE.sessionId, kind: 'user', seq: 3, ts: at, tokens: 60, text: 'AGENTS.md, chunk 3' },
+    { id: 'a1', sessionId: BASE.sessionId, kind: 'assistant', seq: 4, ts: at, tokens: 30, text: 'turn 1 answer' },
+  ]);
+  // The turn-1 task recalls well; the instruction chunks do too, which is why the wrong root was not obvious.
+  const link = (from: string, to: string, w: number) =>
+    graph.upsertEdge({ from, to, w, wTier1: w, source: 's1-noul', verifiedAt: at, provenance: 'test' });
+  link('u1', 'a1', 0.9);
+  link('agents#3', 'agents#1', 0.9);
+  link('agents#3', 'a1', 0.85);
+  // The current question's own row, scored as the backend would have scored it, so the walk from `u2` finds
+  // something and the tree is the walk rather than the recency fallback.
+  link('u2', 'a1', 0.95);
+  link('u2', 'agents#1', 0.5);
+  graph.addSegments([
+    { id: 'u2', sessionId: BASE.sessionId, kind: 'user', seq: 5, ts: at, tokens: 20, text: 'now fix the parser instead' },
+  ]);
+
+  // Turn 2 opens: on the payload path the harness claims only the new question. `agents#1`/`agents#3` are in front
+  // of it, so the payload's own last user turn sits at index 3 - and so does `u1` in the graph.
+  const obs = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 6,
+    scoreOnStepPath: false,
+    messages: [
+      { id: 'agents#1', role: 'user', content: [{ type: 'text', text: 'AGENTS.md, chunk 1' }] },
+      { id: 'agents#3', role: 'user', content: [{ type: 'text', text: 'AGENTS.md, chunk 3' }] },
+      { id: 'sys2', role: 'system', content: [{ type: 'text', text: 'You are a coding agent.' }] },
+      { id: 'u2', role: 'user', content: [{ type: 'text', text: 'now fix the parser instead' }] },
+    ],
+  });
+  assert.equal(obs.kind, 'assembled');
+  if (obs.kind !== 'assembled') return;
+
+  assert.equal(obs.layout.anchor.id, 'u2', 'the root is the question this step carries');
+  const roots = Object.keys(obs.event.recallTree ?? {});
+  assert.deepEqual(roots, ['u2'], 'and the tree is the walk from it, not a walk from a turn-1 segment');
+  // `u1` and `agents#3` are reachable from the current question through `a1`, and being reachable is not the
+  // defect: the defect was being the *seed*. Both trees hold the same ids - which is exactly why counting nodes,
+  // edges or candidates could never have shown it - and they differ in which node everything hangs from. With the
+  // old expression the root here was `u1`, one step earlier than the graph's fourth segment, and every step of the
+  // run inherited whichever turn-1 chunk that index happened to name.
+  assert.ok(obs.layout.tail.some((s) => s.id === 'a1'), 'the newest turns are still the pool the tail is drawn from');
+  assert.ok(
+    obs.event.recallTree !== undefined && Object.keys(obs.event.recallTree).length === 1,
+    'one root, and it is the current question rather than a chunk of turn 1',
+  );
+
+  // The two positions are named when they disagree, and they are positions in different arrays - the payload's
+  // segment list (3) and the graph's append order (4). Reporting them is what makes the distinction legible.
+  //
+  // The second step carries the new question alone, which is the shape a real payload has after a turn boundary:
+  // the payload's own anchor is 0 and the graph's is still 4, and the walk still roots on `u2`.
+  const mismatches: { payloadAnchor: number; windowAnchor: number; payloadId: string; windowId: string }[] = [];
+  await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 7,
+    scoreOnStepPath: false,
+    messages: [{ id: 'u2', role: 'user', content: [{ type: 'text', text: 'now fix the parser instead' }] }],
+    onAnchorMismatch: (detail) => mismatches.push(detail),
+  });
+  assert.deepEqual(
+    mismatches,
+    [{ payloadAnchor: 0, windowAnchor: 4, payloadId: 'u2', windowId: 'u2' }],
+    'the mismatch names both positions and both ids, and the window one is the anchor that was used',
+  );
+});
+
 // --- the bounded anchor wait (recall.anchorWaitMs): the hook, and its containment ---
 
 /**
