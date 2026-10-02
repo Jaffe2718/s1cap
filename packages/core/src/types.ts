@@ -125,7 +125,33 @@ export interface AssemblyPolicy {
     depth: number;
     /** per-node expansion fanout k */
     fanout: number;
-    tier1: 'embed' | 's1' | 'off';
+    /**
+     * Which tier-1 candidate generator runs. **`'s1'` and `'off'` are the implemented values and they are the only
+     * ones** (2026-10-02).
+     *
+     * The design (`docs/FORMULAS.md` §2) defines tier-1 as a choice between an embedding ANN and one batched
+     * `noul` call. Only the second exists. A grep for `embed`/`embedding` across every `src/` tree under
+     * `packages/` returns this
+     * field, its default, one comment and one `EdgeSource` value nothing assigns - no embedder, no index - and
+     * `source: 'embed'` is never written to an edge: the recorded graph of round `20261002-2037` holds `s1-noul`
+     * 1 824, `lexical` 253 976 and **0** embed edges. The only read of this field anywhere in the implementation
+     * was `policy.recall.tier1 !== 'off'` (`packages/core/src/assembler.ts`), so a cell that declared `'embed'`
+     * ran `'s1'` and was described by a mechanism it did not use - the "composes, appears in every dump, is never
+     * read" pattern this repository keeps finding. C2's recipe names the tier that runs.
+     *
+     * A legacy `'embed'` is therefore **rejected**, not treated as "not off": `validatePolicy`
+     * (`packages/core/src/config.ts`) gives it its own error naming the missing implementation and keeps the
+     * cell's own value. `'off'` keeps its meaning exactly - it disables recall *selection*, while association-graph
+     * upkeep is not gated on it and keeps running.
+     */
+    tier1: 'off' | 's1';
+    /**
+     * Declared, and read by nothing: it is the embed mode's model name (see `tier1`), and that mode is not
+     * implemented. A **non-empty** value is reported by `validatePolicy` as a warning, so a profile cannot set it
+     * and believe an embedder is running; the empty string - what `cordis.patch.yml` ships - means "not set" and
+     * is silent. Kept rather than deleted because removing a config path is its own decision, and because the
+     * warning is what makes the field's status readable from a run instead of from a grep.
+     */
     embedModel?: string;
     /** share of the token budget available to recalled blocks (ρ) */
     budgetRatio: number;
@@ -175,9 +201,23 @@ export interface AssemblyPolicy {
    * `context-delivery.ts` existed, and it is why the ablation cells had nothing to ablate — every cell produced a
    * layout record and the model saw the full history in all of them.
    *
-   * The baseline cell C0 keeps this off, which is what makes it a baseline: it is the only cell that lets the
-   * harness manage history natively. C1 and C2 turn it on, because "TAS alone" and the full configuration are
-   * claims about what the model is shown, and a delivered-nothing cell cannot support them.
+   * **C2 is the only cell that turns it on (2026-10-02), because C2 is the only cell that can deliver.** Delivery
+   * has exactly one channel and one block: `deliverContext` renders `recalled` and nothing else (`T` is
+   * deliberately never sent - `packages/dsh-plugin/src/context-delivery.ts`), and with `recall.tier1 === 'off'`
+   * that block is empty by construction, because the whole recall path - the walk, the unjudged fail-open and the
+   * recency fallback - sits behind one guard in `assemble()` (`packages/core/src/assembler.ts`). C1 carried
+   * `deliver: true` beside `tier1: 'off'`, so every assembly of that arm refused with "nothing to insert:
+   * relevance selected no turns" and the harness's own decision reached the model untouched. Measured in round
+   * `20261002-2037`: 76 assemblies, **0** with a non-empty recalled block; and in round `20261001-1300` the arm
+   * then read as "TAS alone" delivered nothing either - 13 assemblies, 13 refusals, 0 `delivered: true`.
+   *
+   * A switch that is reported `on` and cannot fire is the defect this project keeps re-finding (`planGate` is the
+   * other), so C1 is a **second control arm** now: its TAS switches stay as recorded configuration, but nothing is
+   * delivered, and the model reads what C0's model reads. Keeping it is deliberate - C0 vs C1 must show no
+   * difference, and a difference there is the instrument rather than the method. The contrast the registered rule
+   * tests is C0 against C2, and what that contrast measures today is the **recall lane**: TAS's ordering reaches
+   * the model only once the model-view write-back exists (`docs/ARCHITECTURE.md` marks it 🔜, `packages/proxy` is
+   * not written), which is a separate project and not part of this change.
    */
   deliver: boolean;
   /*
@@ -199,9 +239,11 @@ export interface AssemblyPolicy {
    * (`orderPlans`, `normalizeProbs`, `AttemptController`), `packages/dsh-plugin/src/plan-gate-runtime.ts` and
    * the `plan_gate` telemetry record - because it is a documented part of the design with its own tests, and
    * because deleting it would delete the measurement of what the gate does when it is fed. Nothing calls it:
-   * the role it was supposed to play in C2 was never played by it, and nothing takes over - the honest reading
-   * of the run is that the ordering half of "full configuration" was TAS alone, exactly as in C1, and any future
-   * arm that wants a plan gate has to feed it a plan source the model actually writes to.
+   * the role it was supposed to play in C2 was never played by it, and nothing takes over. The honest reading of
+   * that round is that the ordering half of "full configuration" reached the model in neither C1 nor C2 - C1
+   * delivered nothing at all, and C2's one delivery channel inserts the `recalled` block and never the ordered
+   * layout (see `deliver` above) - so any future arm that wants a plan gate, or wants to attribute anything to
+   * the ordering, has to feed it a channel the model actually reads.
    */
   s1: {
     provider: S1ProviderName;
@@ -365,7 +407,8 @@ export interface PlanGateDecision {
 /**
  * Default policy = the full configuration (cell C2), which is also the base the other two cells are derived from
  * by toggles. `deliver` is the one switch the base leaves off — a policy that assembles a layout nobody receives
- * is the safe default — and each cell turns delivery on for itself.
+ * is the safe default — and `cellPolicy('C2')` is the only cell that turns it on, because C2 is the only cell whose
+ * recalled block can be non-empty (see `AssemblyPolicy.deliver`).
  */
 export function defaultPolicy(): AssemblyPolicy {
   return {
@@ -381,7 +424,7 @@ export function defaultPolicy(): AssemblyPolicy {
       anchorWaitMs: 10_000,
       depth: 2,
       fanout: 8,
-      tier1: 'embed',
+      tier1: 's1',
       embedModel: '',
       budgetRatio: 0.35,
       minRecalledShare: 0,
@@ -394,7 +437,10 @@ export function defaultPolicy(): AssemblyPolicy {
   };
 }
 
-/** Ablation cell presets (docs/AGENT_BRIEF.md §9.1): C0 baseline, C1 TAS alone, C2 the full configuration. */
+/**
+ * Ablation cell presets (docs/AGENT_BRIEF.md §9.1): C0 baseline, C1 second control arm (the TAS switches are
+ * recorded configuration and nothing is delivered), C2 the full configuration and the only delivering cell.
+ */
 export function cellPolicy(cell: Cell): AssemblyPolicy {
   const p = defaultPolicy();
   p.cell = cell;
@@ -403,24 +449,42 @@ export function cellPolicy(cell: Cell): AssemblyPolicy {
       p.tas.on = false;
       p.recall.tier1 = 'off';
       // The baseline is the one cell that does not take history management away from the harness: it delivers
-      // nothing, so what it measures is the harness doing what it would have done anyway. The other two cells
-      // deliver their assembled view, because "TAS alone" and the full configuration are statements about what
-      // the model is shown - a cell that assembles a layout nobody receives is not an ablation arm.
+      // nothing, so what it measures is the harness doing what it would have done anyway. C1 delivers nothing as
+      // well, for a structural reason rather than a chosen one (see `case 'C1'`), so `deliver` is not what
+      // separates the baseline from the other arms: C2 is the only cell that delivers, and the contrast the
+      // registered rule tests is C0 against C2.
       p.deliver = false;
       // The baseline is chronological, so x goes last. Leaving this at the default made the baseline carry the
       // position intervention the ablation is meant to isolate: the one knob that distinguishes it from the two
       // ordering cells was pinned to the same value in every cell and the layout axis could not be read at all.
       p.xFirst = false;
       break;
-    case 'C1': // TAS alone: the state proxy exists and x sits before recalled history, no System-1 selection
+    case 'C1': // second control arm: the TAS switches are recorded configuration, nothing is delivered
       p.tas.on = true;
       p.recall.tier1 = 'off';
-      p.deliver = true;
+      // This arm carried `deliver: true` until 2026-10-02 and it could never fire. Delivery inserts the `recalled`
+      // block and nothing else (`T` is deliberately never sent), and with `tier1: 'off'` that block is empty by
+      // construction, because the whole recall path sits behind one guard in `assemble()`. So the harness's own
+      // decision reached the model untouched, and `tas.on`/`xFirst` reached it in neither this arm nor C0: the
+      // model read the same list in both. Measured in round `20261002-2037` (76 assemblies, 0 with a non-empty
+      // recalled block) and in round `20261001-1300` (13 assemblies, 13 refusals, 0 `delivered: true`).
+      //
+      // Kept as a second control arm rather than deleted, because a placebo is worth running: C0 vs C1 must now
+      // show no difference, and a difference there is the instrument rather than the method. Its TAS switches stay
+      // as recorded configuration, because what is kept is the record of what this arm was configured to do; what
+      // they produce is recorded, not delivered.
+      p.deliver = false;
       p.xFirst = true;
       break;
     case 'C2':
       // the full configuration: TAS ordering plus S1 governance (recall selection), x-first layout. The second
       // half of that governance used to be a plan gate; it is gone, and the comment above `s1` says why.
+      //
+      // `tier1: 's1'` is stated here as well as in `defaultPolicy()` because it is the half that decides whether
+      // this cell has anything to deliver at all: `'s1'` is the tier-1 mode that exists (one batched `noul` call),
+      // and until 2026-10-02 the preset said `'embed'` - a mode with no implementation anywhere, read by exactly
+      // one test (`!== 'off'`). The cell that *is* the full configuration must name the mechanism it runs.
+      p.recall.tier1 = 's1';
       p.deliver = true;
       p.xFirst = true;
       break;

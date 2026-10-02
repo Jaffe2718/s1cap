@@ -31,6 +31,19 @@ export interface AssembleInput {
   lambdaMs: number;
   /** chronological history, used for the recency-window fallback */
   history?: Segment[];
+  /**
+   * Segment ids that must not be selected, on top of pinned/tail/anchor.
+   *
+   * It exists for one case, and the case is not cosmetic. A long user message is split into chunks that share a
+   * `chunkOf` parent (`segmenter.ts`), and the anchor is the *last chunk* of the current question - so the
+   * question's own other chunks are ordinary segments in the graph, and the walk is free to return them. Nothing
+   * downstream catches it: the sibling guard (`selectedParents` below) only stops two chunks of one parent being
+   * selected *together*, and the anchor's own parent is never in `selectedParents` because the anchor is not
+   * selected by the walk. The result is the current question quoted back to the model as "an earlier turn", which
+   * is both false and redundant. The caller is the only place that knows which segments make up x, so the
+   * exclusion travels in rather than being inferred here.
+   */
+  excludeIds?: readonly string[];
 }
 
 export function totalTokens(segments: readonly Segment[]): number {
@@ -97,7 +110,11 @@ export function assemble(input: AssembleInput): AssemblyResult {
   const remaining = Math.max(0, total - fixedUsed);
   const recalledBudget = Math.min(Math.floor(total * policy.recall.budgetRatio), remaining);
 
-  let excluded = new Set<string>([...pinned, ...tail, current].map((s) => s.id));
+  // `excludeIds` is unioned in at both build sites of this set - the initial one and the fallback's reset - so
+  // the exclusion survives a fallback. Pinned, tail and the anchor are structural exclusions (the model already
+  // has them, or they are not history); `excludeIds` is a caller-supplied one (the anchor's sibling chunks).
+  const structural = [...pinned, ...tail, current].map((s) => s.id);
+  let excluded = new Set<string>([...structural, ...(input.excludeIds ?? [])]);
   // A long event is split into overlapping chunks that share a `chunkOf` parent. Recall scores each chunk
   // independently, so two halves of one paragraph can both clear the threshold and both be selected - the model
   // would then pay twice for the same passage, with the overlap repeated verbatim. Tracking the parents keeps
@@ -180,8 +197,8 @@ export function assemble(input: AssembleInput): AssemblyResult {
       fallback = 'recency-window';
       recalled = [];
       used = 0;
-      // The fallback is a fresh recency window: only pinned/tail/anchor stay excluded.
-      excluded = new Set<string>([...pinned, ...tail, current].map((s) => s.id));
+      // The fallback is a fresh recency window: only pinned/tail/anchor and the caller's exclusions stay excluded.
+      excluded = new Set<string>([...structural, ...(input.excludeIds ?? [])]);
       const history = [...(input.history ?? [])].sort((a, b) => a.seq - b.seq);
       // The fallback discards the recalled block entirely, so the drops counted against that discarded attempt
       // are not drops in the result. Resetting here keeps the number an account of the layout that was actually

@@ -22,8 +22,10 @@ between those is `cache.reselectPolicy` — `perTask` freezes the selection insi
 default), `perTurn` does not.
 
 Which means the suspect is identifiable from the comparison rather than from the absolute number: three turns are
-three tasks, so three re-selections are *expected* and 86.7% may be unremarkable. The baseline is `C0` — the one
-cell that delivers nothing, so what it measures is the harness managing history by itself — and the finding is a
+three tasks, so three re-selections are *expected* and 86.7% may be unremarkable. The baseline is `C0` — the cell
+that leaves history to the harness, so what it measures is the harness managing history by itself. It is **not**
+the only cell that delivers nothing: `C1` is a second control arm that delivers nothing either (see "Cells"), so
+the registered contrast is `C0` against `C2`, and the finding is a
 difference between the measured token quantities of `C0`, `C1` and `C2` (see "Measurements, and where each comes
 from"). The hit rate rides along as a mechanism diagnostic rather than as the finding: it is a ratio, and a cell
 can win on it while moving more tokens on all three quantities, which is what the full configuration did in round
@@ -37,8 +39,35 @@ with `termination: model-owned` and `rgMaintenance.mode: async` fixed in every c
 | Cell | `tas.on` / `xFirst` | `recall.tier1` | System-1 lane | Role |
 | --- | --- | --- | --- | --- |
 | C0 | off / off | off | `provider: none`, no lane | baseline: the harness manages history natively, and nothing is delivered |
-| C1 | on / on | off | `provider: none`, no lane | the TAS half alone |
-| C2 | on / on | embed | live provider, `retryAttempts: 2`, `admissionLimit: 8` | the project's own configuration |
+| C1 | on / on | off | `provider: none`, no lane | **second control arm**: the TAS switches are recorded configuration and nothing is delivered, so the model reads what C0's model reads |
+| C2 | on / on | **s1** | live provider, `retryAttempts: 2`, `admissionLimit: 8` | the project's own configuration; the only cell that delivers |
+
+**`recall.tier1` names the tier-1 mode that runs, and only two of the three designed modes exist.** The values are
+`s1` — one batched `noul` call, which is what C2 runs and what every selecting cell has always run — and `off`,
+which disables recall *selection* while association-graph upkeep keeps running. The third mode of
+`docs/FORMULAS.md` §2, `embed` (a local embedding ANN over `recall.embedModel`), has **no implementation**: no
+embedder exists anywhere under `packages/`, `source: 'embed'` is never assigned to an edge, and the recorded graph
+of round `20261002-2037` holds `s1-noul` 1 824 edges, `lexical` 253 976 and embed **0**. C2's preset said `embed`
+until 2026-10-02 while the code ran `s1`, because the only read of the field in the implementation was
+`policy.recall.tier1 !== 'off'`. It says `s1` now; `validatePolicy` **rejects** a literal `embed` with its own
+message rather than treating it as on, and a non-empty `recall.embedModel` — a knob with no reader — is warned
+about. The tier-1 *axis* of the design is therefore **unmeasured**: implementing the embed mode is what would
+measure it, not a rename.
+
+**C1 is a second control arm, not a "TAS alone" arm.** It carried `deliver: true` until 2026-10-02 and could never
+fire: delivery has one channel and one block — `deliverContext` inserts the `recalled` block and nothing else, and
+the state proxy `T` is deliberately never sent (`packages/dsh-plugin/src/context-delivery.ts`) — while `tier1:
+'off'` makes that block empty by construction, because the BFS walk, the unjudged fail-open and the recency
+fallback all sit behind one guard (`packages/core/src/assembler.ts:117`…`:208`). Two rounds agree, from their own
+control planes: round `20261002-2037` recorded **76 assemblies and 0 with a non-empty recalled block** (the two
+steps that could receive context refused with "nothing to insert: relevance selected no turns"; the other 74 were
+"the decision carried no messages"), and round `20261001-1300` recorded 13 assemblies for that arm with
+`delivered: false` on all 13, 0 with a non-empty recalled block. So `tas.on` and `xFirst` are configuration this
+arm **records**; the model reads C0's list. It is kept rather than deleted because a placebo is worth running — C0
+vs C1 must now show no difference, and a difference there is the instrument rather than the method — and because
+the `planGate` removal is the precedent: a switch that is `on` in the wiring and cannot fire is worse than no
+switch. `packages/core/src/types.ts` carries the decision (`cellPolicy('C1')`, `AssemblyPolicy.deliver`,
+`AssemblyPolicy.recall.tier1`) and `bench/cells/C1.json`'s `_meta.secondControl` the evidence.
 
 **There is no `planGate.on` column any more, in the table or in the policy.** It was a column here until
 2026-10-02, `on` for C2 and `off` for the other two. Round `20261002-2037` is why it is gone: that round contains
@@ -50,8 +79,10 @@ between C1 and C2 that did not exist. The field is removed from `AssemblyPolicy`
 schema, the status route and the report; the mechanism stays in `packages/core/src/plan-gate.ts` and
 `packages/dsh-plugin/src/plan-gate-runtime.ts`, unit-tested, for whichever arm next has a plan source the model
 actually writes to. `packages/core/src/types.ts` carries the full decision and C2's `_meta.planGateRemoved` the
-evidence. **What separates C1 from C2 is now recall selection and nothing else**, and the document says so wherever
-it used to say "selection + plan gate".
+evidence. **What separates C1 from C2 is recall selection *and* delivery**, and since 2026-10-02 that is the whole
+of it: C2 is the only cell that selects and the only cell whose assembled view reaches the model, while C1's
+`deliver` is off because it could never have fired (see "C1 is a second control arm" above). The registered
+contrast is `C0` against `C2`.
 
 `admissionLimit` is new in the same round, and it is the cell's answer to a backend that refuses rather than queues:
 `retryAttempts` handles *one* refusal (the server's own `Retry-After`, then a second attempt), and `admissionLimit`
@@ -62,9 +93,11 @@ thirty-second bucket of the run. A window the gate does not send is deferred, no
 
 Two switches, not one: `tas.on` is whether the state proxy T exists at all, `xFirst` is whether the current task x
 sits before or after the recalled block, and `cellPolicy()` moves them together here (both off for C0, both on for
-C1/C2) — which is why one column carries both. `deliver` follows the role rather than getting a column of its own:
-the baseline delivers nothing — its assembled layout is recorded, not injected — while C1 and C2 deliver it,
-because "TAS alone" and "the full configuration" are statements about what the model is shown.
+C1/C2) — which is why one column carries both. They are *recorded* configuration in C1, and model-visible in no cell
+but `C2`, because delivery is the only channel that puts an assembled layout in front of the model and only C2 can
+use it: `deliverContext` inserts the `recalled` block and nothing else, and a cell with `recall.tier1: 'off'` has no
+such block to insert. So `deliver` is on in **C2 only**, and it is not a column of its own because the role decides
+it: the two controls deliver nothing — C0 by choice, C1 because its one channel is empty — and C2 delivers.
 
 **The two control arms carry no System-1 lane.** C0 and C1 pin `s1.provider: "none"` and carry no
 `retryAttempts`; C2 keeps its provider with `retryAttempts: 2`. The pin is not cosmetic: `recall.tier1: 'off'`
@@ -83,10 +116,10 @@ round is labelled with the round and with the name the cell ran under, and none 
 
 | round `20261001-1300` label | what that cell ran | today |
 | --- | --- | --- |
-| `C1` | baseline: nothing delivered, the harness manages history natively | **`C0`** |
-| `C2` | TAS alone: state proxy and x-first ordering, no System-1 selection | **`C1`** |
+| `C1` | baseline: nothing delivered (by policy), the harness manages history natively | **`C0`** |
+| `C2` | TAS configured — state proxy and x-first ordering — but **nothing delivered** (13 of 13 deliveries `delivered: false`), so the model read the harness's own history as in the baseline; no System-1 selection | **`C1`**, now registered as a second control arm |
 | `C3` | recall selection with `tas.on: false` | **dropped, no successor** |
-| `C4` | the full configuration: TAS ordering + System-1 selection (+ a plan gate that was configured and never fired) | **`C2`** |
+| `C4` | the full configuration: TAS ordering recorded + System-1 selection, with the selected turns delivered (+ a plan gate that was configured and never fired) | **`C2`** |
 
 **Old `C3` has no successor, so a reader looking for "the recall-only cell" will not find one.** It was recall
 selection with `tas.on: false`, and per step it was worse than the baseline on the quantities of round
@@ -99,23 +132,45 @@ the three-armed design needs. Its absolute totals are *lower* than the baseline'
 totals are not comparable across these cells, which is exactly why every quantity here is reported per step and
 per turn. `validatePolicy` now emits a warning when `recall.tier1 !== 'off'` is configured with `tas.on: false`,
 naming the hit-rate and per-step pairs above, so the pairing has to be chosen on purpose rather than by accident.
-The full 2×2 crossing — three arms run today, the dropped arm included — stays the goal once the `C1`-vs-`C2`
+The full 2×2 crossing — three arms run today, the dropped arm included — stays the goal once the `C0`-vs-`C2`
 contrast is established.
 
 ## Run set: three cells, and what a round of the current phase measures
 
 **A round runs three cells: C0, C1 and C2.** The names are the code's — `cellPolicy()`, the presets in
 `bench/cells/`, the settings panel, the `cell` field on every telemetry record and this document all bind to
-C0–C2 — and the old C3 is not run again (see above).
+C0–C2 — and the old C3 is not run again (see above). **Two of the three are controls** (C0 and C1) and one is the
+arm under test (C2); the set is three cells wide, not a 2×2, and the placebo is the third.
 
-**The design contrast — the comparison that decides whether the System-1 half earns its place — is TAS alone
-against the full configuration: `C1` against `C2`.** In
-round `20261001-1300` the TAS-alone arm (then `C2`) moved **14 441** tokens per step — 187 739 over 13 steps
-against the baseline's (then `C1`) 400 034 over 19, i.e. **21 054** per step — about 0.69×. It sits below the
-baseline on all three quantities (1 783 / 11 166 / 1 493 per step against 2 595 / 16 936 / 1 523, with the output
-margin the thinnest of the three), and its uncached input per step, 1 783 against 2 595, is also about 0.69×. So
-if `C2` cannot beat `C1` then the System-1 half has not earned its place in the configuration, and nothing about
-that argument needs a fourth arm.
+**The design contrast — the comparison that decides whether the System-1 half earns its place — is the baseline
+against the full configuration: `C0` against `C2`.** That is also the pair the registered rule tests
+(`docs/FORMULAS.md` §8: paired McNemar on completion, paired bootstrap on cost and time, `C2` vs `C0`), and it is
+the only contrast this run set can support: `C1` delivers nothing, so it is a second control rather than a "TAS
+alone" arm, and its model-visible input is C0's.
+
+**What that contrast measures today, stated plainly: the recall lane, not TAS.** C2's delivery channel inserts
+recalled turns and nothing else (`deliverContext` renders `recalled`; `T` is deliberately never sent), and C0 and C1
+deliver nothing at all — so what separates the arms on the model's side is recall selection and its insertion,
+while the TAS ordering half (`tas.on`, `xFirst`) is recorded in every arm and reaches the model in none. TAS's
+ordering becomes measurable when the assembled view is written back into the model view, which `docs/ARCHITECTURE.md`
+carries as a 🔜 row (`packages/proxy`, not written). **That write-back is a separate project, not part of this
+change**, and until it exists no arm can attribute anything to `tas.on` or `xFirst`. What a TAS arm would need, so
+that it is not re-invented as another rename: (i) a channel that delivers the *layout* — the order of the blocks the
+model reads — rather than one inserted `recalled` block; (ii) an arm that differs from C0 in that ordering alone;
+and (iii) a way to see from the artifacts that the model read that order.
+
+**The history that arm was chosen on does not survive as a contrast, and this is the plainest statement of it.**
+In round `20261001-1300` the TAS-configured arm (then `C2`, today's `C1`) moved **14 441** tokens per step — 187 739
+over 13 steps against the baseline's (then `C1`) 400 034 over 19, i.e. **21 054** per step — about 0.69×. It sat
+below the baseline on all three quantities (1 783 / 11 166 / 1 493 per step against 2 595 / 16 936 / 1 523, with
+the output margin the thinnest of the three), and its uncached input per step, 1 783 against 2 595, was also about
+0.69×. But that round's own control plane shows both arms delivering nothing: 13 `context_delivery` records for the
+TAS arm with `delivered: false` on all 13 and 0 of 13 assemblies carrying a non-empty recalled block, against 19 of
+19 refused by policy in the baseline arm (`policy.deliver is off`). **Two arms whose model-visible input differed
+by nothing cannot support a difference of 0.69× per step**, so those per-step figures are not evidence about TAS,
+and the same is true of the round this document's current phase runs on: **neither round's contrast measured TAS.**
+The figures stay in the tables below as history, attributed to the round and to the label the cell ran under, and
+they are the reason the arm exists rather than the reason it is the contrast.
 
 **What a round measures now: one long-horizon task, drawn at random.** Short-turn token accounting was retired as a
 measurement on 2026-10-01 — the three decisions, the evidence behind them and the loop that replaces the short-task
@@ -424,8 +479,8 @@ ranking would say nothing about S1CAP. A cell that wins on one component and los
 not a tie to be broken by weights; the table is read component by component. What a rate cannot do is stand in for
 the counts — round `20261001-1300` is the demonstration, because the cell with the best hit rate (the full
 configuration, round label `C4`, today's `C2`, 92.6%) carried the **largest** count on all three components, while
-the cell with a slightly *worse* hit rate than the baseline (TAS alone, round label `C2`, today's `C1`, 86.2%)
-carried the smallest. So report, per cell and **per turn and per step**:
+the cell with a slightly *worse* hit rate than the baseline (the arm that round read as TAS alone, round label
+`C2`, today's `C1`, 86.2%) carried the smallest. So report, per cell and **per turn and per step**:
 
 | quantity | source |
 | --- | --- |
@@ -452,10 +507,12 @@ That table, filled in from round `20261001-1300`, is what a report of this shape
 
 Read component by component, that table says what a single number would have hidden: the full configuration
 (round `C4`) is above the baseline (round `C1`) on all three counts (2.25× the uncached input, 4.35× the cached
-input, 2.64× the output) and TAS alone (round `C2`) is below it on all three (0.47× / 0.45× / 0.67×). Those are
-three separate results and not one weighted result: the ordering happens to agree here, and it need not in another
-round — a cell that wins on one component and loses on another is a normal outcome, not a tie to be broken by
-weights.
+input, 2.64× the output) and the arm that round read as TAS alone (round `C2`, today's `C1`) is below it on all
+three (0.47× / 0.45× / 0.67×). Those are three separate results and not one weighted result: the ordering happens to
+agree here, and it need not in another round — a cell that wins on one component and loses on another is a normal
+outcome, not a tie to be broken by weights. **Neither difference is attributable to TAS**, for the reason the
+"design contrast" passage gives: in that round both arms delivered nothing, so what these two rows compare is two
+recordings of a layout, not two model inputs.
 
 ### The report generator, and the metric specification it implements
 
@@ -542,7 +599,8 @@ is kept here on purpose, and the report prints it once, under "Mechanism diagnos
 components, which is exactly what the full configuration did in round `20261001-1300`.
 
 **Output length is not a free variable in the comparison.** The full-configuration arm emitted 76 501 output tokens
-(round label `C4`, today's `C2`) against TAS alone's 19 410 (round label `C2`, today's `C1`) — 4× the volume — and
+(round label `C4`, today's `C2`) against 19 410 in the arm that round read as TAS alone (round label `C2`, today's
+`C1`) — 4× the volume — and
 in every cell of round `20261001-1300` output was 55–80% of what a
 price-weighted total would have charged. That second figure is a statement about the quantities rather than about
 the prices: output dominates any weighting, so at that share a comparison measures how much the model chose to say
@@ -563,6 +621,9 @@ cell, which is why the panel gained an **Off** choice and why both control prese
 `laya.enabled: false` beside it; see "Cells" and "Setup"). So: measure the S1 columns for every cell from the data,
 never fill them with 0 by assumption, and read a lane-absent zero as a zero *by construction* rather than as a
 refusal. A reader who takes a `tier1: 'off'` arm for a no-S1 baseline will misread the entire table.
+**And `'off'` is one of exactly two implemented values** — the other is `'s1'`, the batched `noul` tier that every
+selecting cell runs; the designed `'embed'` mode has no implementation and is now rejected by `validatePolicy`
+rather than read as "not off" (see "Cells").
 
 Read JSONL with `node`, not PowerShell (which mangles UTF-8). Counts, timings and paths belong in a report;
 session content does not.

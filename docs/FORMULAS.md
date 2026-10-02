@@ -56,15 +56,26 @@ All S1 calls in this section are handled by the **S1 association compute backend
 
 **Tier-0 (metadata, free)**: same task label, same tool family, reply chain — fixed weight $w_0 = 0.6$.
 
-**Tier-1 (candidate generation)**: choose one of two (config option `recall.tier1`):
+**Tier-1 (candidate generation)**: the design has two modes and the implementation has one, so `recall.tier1` is
+`s1` or `off` and nothing else (2026-10-02):
 
 $$
-\text{embed mode:}\quad C_1(p) = \operatorname*{top\text{-}k}_{h \in S}\ \cos\big(\phi(p),\phi(h)\big),\quad k=32
+\text{embed mode (NOT IMPLEMENTED):}\quad C_1(p) = \operatorname*{top\text{-}k}_{h \in S}\ \cos\big(\phi(p),\phi(h)\big),\quad k=32
 $$
 
 $$
-\text{S1 mode:}\quad w_1(p,h) = P_{\mathrm{S1}}\big(\mathrm{rel}(p,h)\big),\quad \text{single } \texttt{/v1/systemone} \text{ parallel noul batch}
+\text{S1 mode (the one that runs):}\quad w_1(p,h) = P_{\mathrm{S1}}\big(\mathrm{rel}(p,h)\big),\quad \text{single } \texttt{/v1/systemone} \text{ parallel noul batch}
 $$
+
+**The embed mode has no implementation anywhere under `packages/`**: no embedder, no ANN index, `source: 'embed'` is
+never assigned to an edge, and `recall.embedModel` has no reader (a non-empty value is reported by
+`validatePolicy` as a warning). Every cell that selects at all selects through the `noul` batch: the recorded graph
+of round `20261002-2037` holds **`s1-noul` 1 824** and **`lexical` 253 976** edges and **0** embed edges. The
+failure this closes is not a naming preference: C2's recipe said `embed` while the only read of the field in the
+whole implementation was `policy.recall.tier1 !== 'off'`, so the cell was described by a mechanism it did not use
+and the field composed, printed and was never resolved. It says `s1` now, and a literal `embed` is **rejected**
+(`packages/core/src/config.ts`, `LEGACY_TIER1`) rather than treated as on. The embedding route stays in the design
+as the tier-1 axis that is **not measured**; implementing it is what would measure it.
 
 **Tier-2 (lazy verification, only for edges that may enter assembly)**:
 
@@ -82,7 +93,9 @@ $$
 w_{\mathrm{eff}}(p,h) = w(p,h)\cdot \exp\!\big(-\Delta t/\lambda\big), \qquad \Delta t = t_{\mathrm{now}} - t_h
 $$
 
-**Per-turn complexity**: tier-1 ANN $O(\log n)$; tier-2 one parallel query call (state ingested once, $|C_1|$ questions evaluated in parallel); in total tens of ms locally, about $0.0006/turn$ in the cloud.
+**Per-turn complexity**: tier-2 is one parallel query call (state ingested once, $|C_1|$ questions evaluated in
+parallel) — tens of ms locally, about $0.0006/turn$ in the cloud. The tier-1 ANN row $O(\log n)$ belongs to the
+embed mode above and is therefore **paid by no turn today**; what runs is the same single batched call.
 
 ## 3. Context assembly (ASSEMBLER)
 
@@ -205,7 +218,7 @@ Reference prices (per 1M tokens, verified 2026-09-28): `deepseek-flash` peak $p_
 
 > **Cell labels in this section.** The measured figures quoted here come from round `20261001-1300`, which ran
 > **four** cells under labels that no longer exist. The mapping is: round `C1` (baseline) is today's **`C0`**;
-> round `C2` (TAS alone) is today's **`C1`**; round `C3` (recall selection with `tas.on: false`) is **dropped, no
+> round `C2` (read as TAS alone then; a second control arm today — §6.1) is today's **`C1`**; round `C3` (recall selection with `tas.on: false`) is **dropped, no
 > successor**; round `C4` (the full configuration) is today's **`C2`**. Every figure below stays attributed to that
 > round and to the label it ran under, and none is silently re-labelled. `docs/CELLS-RUN.md` §"The names changed
 > after round `20261001-1300` ran" carries the same table, with the per-step reason the fourth arm was dropped
@@ -221,7 +234,7 @@ properties of a contract, not of the system under test, so a weighted total woul
 rather than by what ran. A cell that wins on one component and loses on another is a normal outcome, not a tie to be
 broken by weights — the table is read component by component. Round `20261001-1300` is the case in point: the arm
 with the best hit rate (round `C4`, the full configuration, today's `C2`, 92.6%) carried the **largest** count on
-all three components, and the arm slightly *below* the baseline's rate (round `C2`, TAS alone, today's `C1`, 86.2%)
+all three components, and the arm slightly *below* the baseline's rate (round `C2`, then read as TAS alone, today's `C1`, 86.2%)
 carried the smallest. So a report prints $n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}}$ per cell with
 their per-turn and per-step quotients, and treats $h$ as a **mechanism diagnostic** — it answers "did the prefix stay
 stable across steps", which is worth knowing and is not a cost — and never reports it instead of the triple.
@@ -273,7 +286,8 @@ different claim from a backend that judged none of what it was shown.
 
 Output length is part of the comparison or it is a confounder. $n_{\mathrm{out}}$ was 55–80% of what a price-weighted
 total would have charged in every cell of that round — a statement about the quantities, since output dominates any
-weighting — and the full configuration emitted 76 501 output tokens against TAS alone's 19 410. A stimulus that does
+weighting — and the full configuration emitted 76 501 output tokens against 19 410 in the arm that round read as
+TAS alone (round label `C2`, today's `C1`). A stimulus that does
 not constrain how long the answer may be has to report $n_{\mathrm{out}}$ as its own row instead of folding it into
 a total that is then compared across cells.
 
@@ -386,10 +400,18 @@ The left-hand ratio counts removed tokens per invalidated **hit** token, i.e. th
   cost a partial block.
 - Never let per-turn metadata (timestamps, turn ids, cache flags) into the prefix.
 - Measure $h$ per call (already in `llm_call` telemetry) and apply the test above with the measured $h$:
-  the `C1`-vs-`C2` comparison — TAS alone against the full configuration, which round `20261001-1300` recorded
-  under the labels `C2` vs `C4` — is the **design contrast** and isolates selection's cache effect, which is H3. It
-  is also the only contrast the selection claim has left, now that the recall-only arm is dropped and H1 is folded
-  into H3 (AGENT_BRIEF §9.3): the same comparison answers both, and the two cannot be separated afterwards.
+  the `C0`-vs-`C2` comparison — baseline against the full configuration, the same pair §8's registered test is
+  stated over, and the pair round `20261001-1300` recorded under the labels `C1` vs `C4` (see the mapping note in
+  §5.1) — is the **design contrast** and isolates selection's cache effect, which is H3. It is also the only
+  contrast the selection claim has left, now that the recall-only arm is dropped and H1 is folded into H3
+  (AGENT_BRIEF §9.3): the same comparison answers both, and the two cannot be separated afterwards.
+  **`C1` is not that contrast and cannot be**: since 2026-10-02 it is a second control arm that delivers nothing —
+  its `deliver` was `true` and structurally could never fire, because delivery inserts the `recalled` block and
+  nothing else while `tier1: 'off'` makes that block empty by construction (`docs/CELLS-RUN.md` carries the
+  measurement from both recorded rounds) — so its model-visible input is the baseline's and a `C1`-vs-`C2`
+  difference would not be an arm's effect. And what `C0`-vs-`C2` measures **today** is the recall lane: TAS's
+  ordering reaches the model only through the model-view write-back, which does not exist yet
+  (`docs/ARCHITECTURE.md`, `packages/proxy`) and is a separate project.
 
 ## 7. Time model
 
@@ -410,7 +432,9 @@ report; it is printed as its own column (see §5.1).
 
 The full configuration is now `C2` and the baseline `C0` (see the mapping note in §5.1: round `20261001-1300`
 called them `C4` and `C1`). The protocol below — the **registered rule** — is stated in today's names; the test and
-the margin are unchanged.
+the margin are unchanged. It needs no re-registration from the 2026-10-02 relabelling of `C1`: this protocol was
+already stated over `C2` vs `C0`, and `C1` — a control arm that delivers nothing — is not part of the test (§6.1
+says why it cannot be, and what the `C2`-vs-`C0` pair therefore measures while the ordering stays unrouted).
 
 **Primary metric (completion rate, non-inferiority)** — paired McNemar exact test, `C2` vs `C0` discordant pairs $(b,c)$:
 
@@ -549,7 +573,8 @@ artifacts; that gap is in the run set's court, not this tool's.
 
 | Stage | Complexity | Note |
 |---|---|---|
-| tier-1 recall (embed ANN) | $O(\log n)$ / new segment | HNSW-style index |
+| tier-1 candidate generation (`s1`, the implemented mode) | 1 batched `noul` call / window | the mode every selecting cell runs (§2) |
+| tier-1 recall (**embed ANN — not implemented**) | $O(\log n)$ / new segment | HNSW-style index; no turn pays this today |
 | tier-2 verification | 1 parallel query / turn | state ingested once |
 | BFS recall | $O(k^d)$ upper bound | budget truncation |
 | Assembly ordering | $O(\|R'\|\log\|R'\|)$ | per turn |

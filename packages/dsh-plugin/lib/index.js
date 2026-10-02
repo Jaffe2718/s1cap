@@ -18,7 +18,7 @@
  * Context-lifecycle hooks stay skeletons until M1.
  */
                                                                                                                          
-import { defaultPolicy, validatePolicy, TELEMETRY_SCHEMA_VERSION } from '@s1cap/core';
+import { defaultPolicy, validatePolicy, TELEMETRY_SCHEMA_VERSION, UNENFORCED_KNOBS } from '@s1cap/core';
                                                                       
 import {
   DEFAULT_WEIGHTS_CACHE_DIR,
@@ -549,6 +549,25 @@ export function preStepMiddleware(
         : optionsOrObserver;
   const observer                           =
     optionsOrObserver !== undefined && 'observe' in optionsOrObserver ? optionsOrObserver : options?.observer;
+  /**
+   * What this middleware has already delivered, per session, by payload digest.
+   *
+   * The duplicate guard, and the reason it is here rather than only in `deliverContext`: that module's check scans
+   * `decision.messages` for the text of the previous injection, on the premise that "the previous injection is
+   * part of the log and comes back through the decision". **It does not.** `decision.messages` is
+   * `inbox.claim(...)` plus one projected context message; `claim` removes what it returns, and a message appended
+   * to the session (the channel this middleware's insert takes) never enters the inbox at all - the round's tape
+   * shows it, with the payload's message count `{0: 276, 1: 1}` over 277 steps and the single non-empty one
+   * carrying the human prompt rather than the block. So the content check cannot fire in production, and the
+   * consequence would be structural: the same block re-appended to the log on every step, one copy per step, with
+   * `ledger.json` and `composition.json` inflating alongside it - the D4 failure mode, arrived at from the fix
+   * side. It is invisible today only because delivery fired twice in the whole round, with different payloads.
+   *
+   * Keyed on the digest S1CAP itself computed (`context-delivery.ts`, content-derived and already recorded on
+   * every delivery, so this needs no new hashing) and on the session, so cross-session safety falls out of the
+   * key rather than out of a comparison of message text. The content check stays as the cheap first test.
+   */
+  const deliveredPayloads = new Map                     ();
   return async (payload, next) => {
     if (primeOnce !== undefined) {
       // Prime lazily, on the first step: at activation time other plugins may not have provided the
@@ -601,13 +620,36 @@ export function preStepMiddleware(
     // The cheap check, and it has to be cheap because it is the whole point of it: whether this step can receive a
     // block at all, decided from the harness's own decision and *before* anything is assembled.
     //
-    // `decision.messages` is the step's increment - what the harness is about to append to the log - so an empty
-    // one means there is no request for a block to be part of, and `deliverContext` refuses on exactly this
-    // condition ("the decision carried no messages"). That refusal was always right; what was wrong was paying for
-    // it. A measured diagnostic round assembled 1,205,029 recalled tokens over 277 steps and delivered 1,597 of
-    // them (0.133%), because 275 of those steps reached the assembler - the walk, the anchor wait, T's rebuild -
-    // before anyone asked whether the assembled view had anywhere to go. The same condition is not a quirk of
-    // that cell: the control cell's refusals are 74 of 76 for the same reason.
+    // **An empty `decision.messages` does not mean the step sends no request, and the comment here used to say it
+    // did.** The packaged harness appends the decision and then builds and streams the request unconditionally,
+    // because the request is built from the session log and not from the decision -
+    // `dsh-agent-loop/lib/index.js`: the append at L1061 (`if (firstAttempt) for (const message of
+    // decision.messages) this.session.append("user/message", …)`), `buildRequest` at L1063, `stream` at L1072.
+    // Round `20261002-2037` measures the consequence rather than the claim: 277 `step/start` events against 277
+    // `assistant/message` events, one `turn/start`, and no `turn/end` at all, so every one of the 275
+    // empty-decision steps did call the model. The host's own instructions plugin inserts into exactly such a
+    // decision in this very profile (`dsh-agent-instructions`: `decision.messages.toSpliced(lastClaimedIndex + 1,
+    // 0, desired)`, where a claimed list of nothing gives index 0), and it did so at step 4 of that round.
+    //
+    // The refusal is kept anyway, for a reason that is about *termination* and not about capability: the empty
+    // decision is also how the loop decides the turn is over, so a plugin that returns a message there prevents
+    // the turn from ending and buys another model call - repeated, a livelock. The two places the loop skips on an
+    // empty decision are `if (turnEnds && decision.messages.length === 0) break` (L962) and the step-0 case at
+    // L963, both turn-boundary tests. S1CAP cannot see `turnEnds` - it is a local of `turn()`, and the payload
+    // carries `{messages, turn, step, signal}` - so the plugin cannot tell a terminal pre-step from an ordinary
+    // one, and `termination: 'model-owned'` (the harness stops when the model stops, and no S1CAP output may
+    // prolong or veto that exit) decides the matter in favour of declining. The refusal protects termination by
+    // construction instead of by accident, and that is now what it says.
+    //
+    // What was wrong was paying for it: a measured diagnostic round assembled 1,205,029 recalled tokens over 277
+    // steps and delivered 1,597 of them (0.133%), because 275 of those steps reached the assembler - the walk, the
+    // anchor wait, T's rebuild - before anyone asked whether the assembled view had anywhere to go. The same
+    // condition is not a quirk of that cell: the control cell's refusals are 74 of 76 for the same reason.
+    //
+    // And the blindness that fix would otherwise introduce is closed below: the refusal record carries
+    // `assembled: false, ingested: true`, so "the lane read this step and declined" is distinguishable in the
+    // control plane from "the observation never ran or threw" - which the `/s1`-only `ingestOnly`/`errors`
+    // counters could say only to a live reader.
     //
     // A rejected or aborted decision is the same cheap class and is reported in the same place, for the same
     // reason: three fields tell us the answer, and the assembly is downstream of all three.
@@ -629,6 +671,13 @@ export function preStepMiddleware(
     // the steps the harness claims nothing for, which in the measured round was 275 of 277 - the segments would
     // simply never exist.
     let observation                             ;
+    // Whether this step was *read*: the payload adapted, segmented and folded into the graph, with the assembly as
+    // the part that was skipped. It cannot be read off `observation`, which is `undefined` both for the ingest-only
+    // path and for the empty and failed ones - that ambiguity is the whole of the finding. It is read off the
+    // observer's own counter, which advances on exactly one of those paths and neither throws nor lies: comparing
+    // the counter across the call is what turns three identical records into three legible ones, and an undefined
+    // observer leaves it at zero, which is the correct answer for "nothing read this step".
+    const ingestOnlyBefore = observer?.stats().ingestOnly ?? 0;
     try {
       // Segment, recall and assemble for real, and record the result in the control plane. `observe()` never
       // throws, and neither does this catch: a failed observation costs the record, never the step.
@@ -636,17 +685,25 @@ export function preStepMiddleware(
     } catch (err) {
       ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
     }
+    const ingested = (observer?.stats().ingestOnly ?? 0) > ingestOnlyBefore;
     if (!deliverable) {
       // Reported in the delivery module's own words, because the record has to stay the same record: the report
       // scripts count refusals by `delivered: false` and read this reason, and a new sentence here would make the
       // same event look like a different one. What is new is only that the step no longer paid for it first. The
       // harness's sharper first-step reason is kept ahead of it, exactly as `deliverContext` orders the two.
-      report(
-        false,
-        step === 1
-          ? 'step 1 with no claimed messages: the harness treats this as no step at all'
-          : 'the decision carried no messages',
-      );
+      //
+      // The two flags are the whole of the added information, and they are read from the observation's own counters
+      // rather than assumed: `ingested` is true exactly when `observeStep` returned the ingest-only shape, i.e. the
+      // payload was adapted, segmented and folded into the graph and the assembly was the part that was skipped.
+      // `false` is therefore either "the observer was absent" or "`observe()` threw" - a step nobody read - which is
+      // the state that used to be indistinguishable from this one in a persisted record.
+      report(false, step === 1
+        ? 'step 1 with no claimed messages: the harness treats this as no step at all'
+        : 'the decision carried no messages', {
+        assembled: false,
+        ingested,
+        step,
+      });
       return decision;
     }
 
@@ -659,10 +716,37 @@ export function preStepMiddleware(
     try {
       const result = options.deliver(observation, decision                           , payload);
       if (!result.delivered || result.messages === null) {
-        report(false, result.reason, { blocks: result.blocks, order: observation.layout.order });
+        // `assembled: true`, because it did: reaching this line means the walk ran, and the reason says only why
+        // the *delivery* was declined. Three states produce `delivered: false` and this flag is what separates
+        // this one from the two above (read-and-declined, and never read).
+        report(false, result.reason, { assembled: true, blocks: result.blocks, order: observation.layout.order });
         return decision;
       }
+      // Already sent this exact payload to this session: refuse it, and say so in the record. Without this the
+      // block is re-appended on every step whose selection is stable, because the harness's increment never
+      // carries the previous injection back (see `deliveredPayloads` above). The check is on the digest and not on
+      // the text so a *different* layout with the same digest is still recognised, and the empty payloadId - which
+      // is what a refusal leaves behind, and a delivery never does - is not allowed to mark a session as seen.
+      const payloadId = result.payloadId;
+      if (payloadId !== '') {
+        const sessionKey = readPayloadSessionId(payload);
+        const seen = deliveredPayloads.get(sessionKey) ?? new Set        ();
+        if (seen.has(payloadId)) {
+          report(false, 'this exact context was already delivered in this session: not delivered twice', {
+            // `assembled: true`, like the delivery module's own refusals below: the walk ran, and this refusal is
+            // about the repeat rather than about the step being unreadable.
+            assembled: true,
+            blocks: result.blocks,
+            payloadId,
+            order: observation.layout.order,
+          });
+          return decision;
+        }
+        seen.add(payloadId);
+        deliveredPayloads.set(sessionKey, seen);
+      }
       report(true, result.reason, {
+        assembled: true,
         messagesAfter: result.messages.length,
         kept: result.kept,
         // `dropped` is reported as the harness's own number rather than a hard zero: if a future change ever
@@ -1197,8 +1281,18 @@ function applyInner(ctx               , raw                             )       
        *
        * `scoreNew` scores each segment that arrived since the last call against its whole window, and the upkeep
        * queue starts several of those per tick, so without a budget the first tick of a session that has already
-       * accumulated history offers `segments x w` pairs in one burst - which the backend refuses. The measured run
-       * walked 1 976 845 candidate-segment positions for 1 597 that reached the model.
+       * accumulated history offers `segments x w` pairs in one burst - which the backend refuses.
+       *
+       * The measured run, from its own artifacts rather than from memory (`evidence/C2/control.jsonl` and the
+       * 173 MB graph snapshot `home/C2/.s1cap/rg/rg-session-441e3bc3-…json`): **860 672 pairs offered for 4 152
+       * judgements (0.48 % coverage) over 277 steps**, with **3 859 refused calls** in between. The last assembly
+       * record carries `scoredPairs: 856 576` and the snapshot `860 672`; the difference is scoring that happened
+       * after the last step. The three figures are cumulative for the session (`AssemblyEvent.scoredPairs`), so
+       * they are not to be summed over records. This comment previously quoted "1 976 845 candidate-segment
+       * positions", which matches no quantity in that run - not the offered pairs, not the graded rows
+       * (883 200 `scores`), not the recalled tokens assembled (1 205 029), not the summed `budgetUsed`
+       * (1 917 527), and not the sum of any pair field over the records (84 874 308). It has been replaced with
+       * the numbers a reader can check.
        *
        * 2 048 is around a hundred requests at the configured 20 questions per call: enough that steady-state
        * upkeep (one new segment, a window of `w`) is never cut short, small enough that a cold start or a burst
@@ -1332,7 +1426,24 @@ function applyInner(ctx               , raw                             )       
         // No `planGate` key: the policy field is gone, and a wiring record that still announced one would be the
         // exact artifact this removal exists to stop producing - a run stating a component it does not have.
         xFirst: config.xFirst,
-        recall: { d: config.recall.depth, r: config.recall.threshold, w: config.recall.window, wait: config.recall.anchorWaitMs },
+        // `deliver`, because "which cells actually deliver" has to be answerable from a round's own artifacts and
+        // nothing else stated it. `verify-wiring.mjs` asserts `tas.on`/`xFirst` and stops there, so a run could not
+        // prove its own arms: C0 leaves delivery off by choice (it is the baseline - the harness manages history),
+        // and C1 leaves it off because its channel is structurally empty, while C2 is the only delivering cell. The
+        // three are indistinguishable from every other field in this record. Beside `configuredProvider` and
+        // `conflicts` for the reason those two are here: the record is the authority for a later reader who has the
+        // cell's recipe and not the process that ran it.
+        deliver: config.deliver,
+        // `tier1` is in here because leaving it out made the one knob that decides *how* candidates are generated
+        // unreadable from every persisted artifact: the startup log line was the only place it appeared, and a
+        // round's reader had the cell's recipe and not the value an instance resolved (F6).
+        recall: {
+          d: config.recall.depth,
+          r: config.recall.threshold,
+          w: config.recall.window,
+          wait: config.recall.anchorWaitMs,
+          tier1: config.recall.tier1,
+        },
         tas: config.tas,
         governance,
       }) + '\n',
@@ -1486,9 +1597,14 @@ function applyInner(ctx               , raw                             )       
   // The only lifecycle hook we register, in the verified middleware shape. `agent/request-error`
   // is deliberately NOT registered: its contract is unverified, and an unverified hook is exactly
   // what took a round down before.
-  // The delivery path, wired once. `config.deliver` is the cell's own switch: the baseline cell (C0) leaves it
-  // off, and `deliverContext` then answers "not delivered" with the reason, so a cell that assembles a layout
-  // nobody receives says so in the control plane instead of looking identical to one that delivers.
+  // The delivery path, wired once. `config.deliver` is the cell's own switch, and **both control arms leave it
+  // off**: C0 by choice - it is the baseline, and letting the harness manage history is what makes it one - and C1
+  // because its channel is structurally empty (with `recall.tier1: 'off'` nothing is ever selected, so there is
+  // nothing to insert even though the cell delivers in principle). C2 is the only delivering cell. The three are
+  // stated on the wiring record (`deliver: config.deliver`) precisely because this comment is not evidence: a round
+  // has to prove its own arms from its own artifacts. When delivery is off, `deliverContext` answers "not
+  // delivered" with the reason, so a cell that assembles a layout nobody receives says so in the control plane
+  // instead of looking identical to one that delivers.
   const emitControl = (event                )       => {
     try {
       controlLogRef?.emit(event);
@@ -1654,6 +1770,20 @@ function applyInner(ctx               , raw                             )       
           cell: config.cell,
           termination: config.termination,
           assemblyDeadlineMs: config.assemblyDeadlineMs,
+          /**
+           * The knobs this build accepts, composes, prints - and does not enforce, with what each one claims and
+           * what it would take to make the claim true.
+           *
+           * Reported on the live route because this is where a reader asks "is this thing running what it says":
+           * `assemblyDeadlineMs` (nothing enforces a deadline), `cache.reselectPolicy` / `cache.blockTokens` (no
+           * caller for `decideReselect` / `alignToCacheBlocks`), `rgMaintenance.maxLagTurns` (compared against a
+           * count of pending *events* and acted on by nothing) and `recall.tier1` (no embedder exists, so `'embed'`
+           * and `'s1'` select identically). The registry lives in `@s1cap/core` `config.ts` and a core test fails
+           * if it drifts from the declarations, so this block cannot silently go stale - which is the defect it
+           * exists to remove: the plan gate was carried by the full-configuration cell and read by nothing, and
+           * three of these five survived the pass that deleted it.
+           */
+          unenforcedKnobs: UNENFORCED_KNOBS,
           rgMaintenance: config.rgMaintenance,
           cache: config.cache,
           tas: config.tas,

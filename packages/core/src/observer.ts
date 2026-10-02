@@ -25,7 +25,15 @@ export interface ObserveStepInput {
   sessionId: string;
   /** harness step number (1-based); recorded for correlation only */
   step: number;
-  /** session-log sequence of the first message in `messages` */
+  /**
+   * The observer's own monotonic counter, advanced by the messages each call carried.
+   *
+   * It is **not** a session-log sequence: the harness's `agent/pre-step` payload does not expose one, so this
+   * number is only meaningful within a run's own records, and tools must not join it against the session store.
+   * The field was documented as "session-log sequence of the first message in `messages`", which it has never
+   * been - round `20261002-2037`'s own reader prints it under a column headed `step?` with the question mark,
+   * which is the honest reading of it.
+   */
   seq: number;
   /** harness message list as offered to this LLM call (DSH shape; see harness-adapter.ts) */
   messages: readonly unknown[];
@@ -78,6 +86,14 @@ export interface ObserveStepInput {
   graph: AssociationGraph;
   reasoningPartTypes?: readonly string[];
   /**
+   * Session events the upkeep queue dropped because it was full, cumulative for the session, as of this call.
+   *
+   * Passed in rather than read here because the queue belongs to the caller and `observeStep` owns no state; it
+   * travels to the record because a dropped event is content loss - the segment never entered the graph - and the
+   * only other record of it was `upkeep.dropped` on the live `/s1` route. See `AssemblyEvent.upkeepDropped`.
+   */
+  upkeepDropped?: number;
+  /**
    * Called when the payload's own anchor position and the graph window's disagree, with both and with the ids
    * they name.
    *
@@ -89,14 +105,29 @@ export interface ObserveStepInput {
    */
   onAnchorMismatch?: (detail: { payloadAnchor: number; windowAnchor: number; payloadId: string; windowId: string }) => void;
   /**
-   * Default true. Pass false for a step that cannot receive context.
+   * Default true. Pass false for a step the caller has decided cannot receive context.
    *
    * The expensive half of a step - the BFS walk in `assemble()`, the anchor wait, T's rebuild and the token
-   * accounting - buys nothing on a step whose harness decision carries no messages: there is no request to put a
-   * block in, and `context-delivery.ts` refuses to insert into a list that is not there. That refusal is correct
-   * and stays. What was wrong was *paying* for it: a measured diagnostic round assembled 1,205,029 recalled
-   * tokens across 277 steps and delivered 1,597 of them, because 275 of those decisions carried no messages and
-   * the assembly had already run by the time anyone looked.
+   * accounting - buys nothing on such a step, and a measured diagnostic round paid for it 275 times out of 277:
+   * 1,205,029 recalled tokens assembled against 1,597 delivered (0.133%), because the decision carried no
+   * messages on all but two of those steps and the assembly had already run by the time anyone looked.
+   *
+   * **The reason the decision is empty is not "there is no request", and this comment used to say it was.** The
+   * packaged harness appends `decision.messages` and then builds and streams the request *unconditionally*
+   * (`dsh-agent-loop/lib/index.js`: the append at L1061, `buildRequest` at L1063, `stream` at L1072) - the
+   * request is built from the session log, not from the decision. Round `20261002-2037` proves it in its own
+   * numbers: 277 `step/start` against 277 `assistant/message`, with one `turn/start` and no `turn/end` at all,
+   * so all 275 empty-decision steps did call the model. The two places the loop *does* skip on an empty decision
+   * are turn-boundary tests (L962 `if (turnEnds && decision.messages.length === 0) break`, and the step-0 case at
+   * L963) - i.e. the empty decision is the harness's **turn-termination signal**, which the plugin cannot
+   * observe: `turnEnds` is a local of the loop, and the payload carries `{messages, turn, step, signal}`.
+   *
+   * So the flag is not "this step sends no request". It is "this step's decision is empty, which is also how the
+   * harness says the turn is over, and returning a message here would defeat `termination: 'model-owned'`".
+   * That is a design decision and not a capability limit, and it is recorded as such rather than asserted as a
+   * fact about the harness. What is *not* left to that decision is the accounting: the caller reports
+   * `assembled: false, ingested: true` on the step's `context_delivery` record, so a reader can tell an
+   * observation that ran and was declined from one that never ran.
    *
    * The flag stops at assembly. The adapter, the segmenter and `graph.addSegments` still run, because a segment
    * exists as soon as the host's stream or this payload carries it and a step is one of the two ways it arrives;
@@ -271,8 +302,15 @@ export async function observeStep(
   // new user message, so the pool is that message, `history` is empty, and there is nothing for relevance to
   // select: a live C2 run delivered the state proxy on 4 steps, every one of them with `blocks.recalled = 0`,
   // while the five steps that did have history (836 to 5243 tokens of it) were the steps the harness claims
-  // nothing for — and an empty `decision.messages` means no request is made at all. Recall and delivery fired on
-  // disjoint steps.
+  // nothing for - so recall and delivery fired on disjoint steps.
+  //
+  // (Those "steps the harness claims nothing for" were previously described here as steps where "no request is
+  // made at all". That is false, and the packaged harness says so unconditionally: the request is built from the
+  // session log and streamed whatever `decision.messages` holds (`dsh-agent-loop` L1061/L1063/L1072), and the
+  // round's own 277 `step/start` against 277 `assistant/message` confirm it. The empty decision is the harness's
+  // turn-*termination* signal - L962/L963 - which is why the caller still declines to assemble on it; see
+  // `ObserveStepInput.assemble` for the whole rule. What the disjointness above measures is the *claimed list*,
+  // not the existence of a request.)
   //
   // The graph's ordered segments are the session's own append order, so they include everything the payload
   // carried and everything before it. That is the window a model call needs.
@@ -347,14 +385,35 @@ export async function observeStep(
   } catch {
     /* the wait failed: assemble from the graph as it stands, which is the fail-open path */
   }
-  // Everything in the window except the anchor and the pinned prefix, in append order.
+  // Everything in the window except the anchor, the anchor's own sibling chunks, and the pinned prefix, in
+  // append order.
   //
   // This used to be "the segments before the anchor", which looked equivalent and was not: the anchor is the
   // last user segment, and the model's output for the current task - its messages, tool calls and tool results -
   // arrives *after* it in the append-only log. Slicing before the anchor therefore discarded exactly the newest
   // turns, and `tail` came out empty in every live record (blocks.tail = 0 across a whole run) while the k most
   // relevant verbatim turns were quietly not in the prompt at all.
-  const pool = window.filter((s) => s.id !== current.id && s.kind !== 'systemPinned');
+  //
+  // The sibling exclusion is the seed fix's other half. The anchor is the *last chunk* of its event, not the
+  // event: a long user message is split into chunks sharing a `chunkOf` parent (`segmenter.ts`), so the question
+  // the model is answering currently sits in the graph as several segments and exactly one of them is the anchor.
+  // Without this line the rest are ordinary history - in `tail` when they are the last k, in `history` and
+  // therefore in the fallback otherwise - and a recall hit on one is delivered as "an earlier user turn, quoted
+  // verbatim" naming the question's own id. Measured in round `20261002-2037`: both of the run's deliveries quote
+  // the task prompt, and the delivered body is its middle chunk; `recall-C2.txt` shows the prompt's three chunks
+  // offered as candidates 190 / 189 / 188 times. Re-quoting the current question is both false and redundant, so
+  // the exclusion is on the identity of the parent (`chunkOf ?? id`) rather than on the chunk.
+  const anchorParent = current.chunkOf ?? current.id;
+  const pool = window.filter(
+    (s) => s.id !== current.id && (s.chunkOf ?? s.id) !== anchorParent && s.kind !== 'systemPinned',
+  );
+  // The same exclusion has to reach the assembler, and this is not redundancy: the walk draws its candidates
+  // from the *graph*, not from this list, so a sibling chunk is still selectable there even with `pool` clean.
+  // `excludeIds` is that half (see `AssembleInput`), and it is also what keeps a sibling out of the recency
+  // fallback, whose candidate list is `history` minus `excluded`.
+  const siblingIds = window
+    .filter((s) => (s.chunkOf ?? s.id) === anchorParent && s.id !== current.id)
+    .map((s) => s.id);
   // `tail` is the k most recent turns, verbatim. Which side of x they end up on is the layout's business and not
   // the selector's: with x last they sit immediately before it, with x first immediately after it.
   const tailCount = Math.max(0, Math.min(input.policy.tail.k, pool.length));
@@ -405,6 +464,8 @@ export async function observeStep(
     now: input.now,
     lambdaMs: input.lambdaMs,
     history,
+    // The anchor's sibling chunks, so a *graph* hit on one of them is dropped too: the walk does not read `pool`.
+    excludeIds: siblingIds,
   });
 
   // Measured against the window the view was actually taken from, not the payload: with an empty payload the
@@ -452,6 +513,15 @@ export async function observeStep(
     // not the absence of one.
     recallTree: result.recallTree,
     ...(result.fallback !== undefined ? { fallback: result.fallback } : {}),
+    // The fail-open admission count, copied verbatim from the assembler and omitted when it is zero for the same
+    // reason `fallback` is: no admission is the ordinary case, and `{}` vs absent is the convention this record
+    // already uses for `recallTree`. It was computed and dropped on the floor for a whole round - see
+    // `AssemblyEvent.unknownAdmitted`, which is where the consequence is written down.
+    ...(result.unknownAdmitted !== undefined ? { unknownAdmitted: result.unknownAdmitted } : {}),
+    // Unconditional, unlike the two above: a dropped session event is content loss, so "0 dropped" has to be a
+    // reading a later round can make rather than an absent field it has to interpret. Undefined means the caller
+    // did not supply the counter at all (a local or test caller), which is a third state and stays absent.
+    ...(input.upkeepDropped !== undefined ? { upkeepDropped: input.upkeepDropped } : {}),
   };
 
   return {

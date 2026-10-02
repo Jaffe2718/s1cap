@@ -145,17 +145,32 @@ export interface AssemblyEvent {
   sessionId?: string;
   /** recall.window = w in force for this assembly (the S1 scoring window) */
   windowN?: number;
-  /** pair comparisons spent scoring the segments that arrived since the previous step: the S1 cost w bounds */
+  /**
+   * Pair comparisons spent scoring the session's segments, **cumulative for the session, as of this assembly** -
+   * not a per-step figure, and not to be summed over a run's records.
+   *
+   * The comment here used to read "spent scoring the segments that arrived since the previous step", which is
+   * what a per-call number would be and is not what is written: upkeep scores each new session segment as it
+   * arrives, so a per-call figure would report only this step's own segment and hide every pair the window
+   * actually cost. The graph is the only place that knows the running total, and `observer.ts` copies it
+   * verbatim. Measured on round `20261002-2037`: the last assembly carries `856 576` and the snapshot `860 672`
+   * (the difference is scoring after the last step), while the sum over the 277 records is `84 874 308` - a
+   * number a reader gets by adding up a cumulative field, which is what the old comment invited.
+   */
   scoredPairs?: number;
   /**
-   * Of those pairs, the ones the System-1 backend actually answered. The difference is what the window paid for
-   * and did not receive - a timed-out batch, a backend that was down, a batch the question cap dropped. Recorded
-   * because `scoredPairs` alone was read as coverage and reported 18528 while 1796 pairs had been judged.
+   * Of those pairs, the ones the System-1 backend actually answered. **Cumulative for the session, as of this
+   * assembly**, like `scoredPairs` above and for the same reason.
+   *
+   * The difference is what the window paid for and did not receive - a timed-out batch, a backend that was down,
+   * a batch the question cap dropped. Recorded because `scoredPairs` alone was read as coverage and reported
+   * 18528 while 1796 pairs had been judged.
    */
   judgedPairs?: number;
   /**
    * Pairs the run declined to offer at all, because the System-1 backend was saturated and the scorer held the
-   * window back for a later tick (`S1_DEFERRED`).
+   * window back for a later tick (`S1_DEFERRED`). **Cumulative for the session, as of this assembly**, like
+   * `scoredPairs` above.
    *
    * A third number rather than part of `scoredPairs`, and the distinction is the point: `scoredPairs` is what was
    * put to a scorer, so folding deferred pairs into it would report coverage over work that never happened, while
@@ -164,6 +179,19 @@ export interface AssemblyEvent {
    * the session's arrival order would have offered.
    */
   deferredPairs?: number;
+  /**
+   * Session events dropped at ingestion because the upkeep queue was full (`upkeep-queue.ts` `capacity`).
+   *
+   * **Cumulative for the session, as of this assembly**, like the three pair counters above.
+   *
+   * A dropped event is content loss and not a backpressure statistic: the segment it carried never enters the
+   * graph, so every recall measurement that follows is over a session with a hole in it - and the only record of
+   * that was a counter on `/s1` (`upkeep.dropped`), which a round does not persist. The queue's own header
+   * promised the drop would be "counted"; counted is not the same as *readable after the round*, and this field
+   * is the difference. Written on every assembly (0 included) so "nothing was dropped" is a reading rather than
+   * an absent field, and so that a reader comparing two steps can see the moment the hole appeared.
+   */
+  upkeepDropped?: number;
   seq: number;
   candidates: number;
   selected: number;
@@ -188,7 +216,40 @@ export interface AssemblyEvent {
   cutAfterBlock?: string;
   /** tokens behind that cut, i.e. the cost of one re-prefill */
   tokensAfterCut?: number;
+  /**
+   * `'recency-window'` when the count/share floors discarded the walk's own selection and the block was refilled
+   * from chronological history.
+   *
+   * **Absent means "the recency fallback did not fire", and the two are not the same reading.** Presence and
+   * absence are the only two states: the field is omitted (`observer.ts`, beside `recallTree`) rather than
+   * written as `null`, so a tool that collapses absence into `null` reports "277 of 277 recorded `null`", which
+   * is what round `20261002-2037`'s `recall.mjs:56` did (`r.a.fallback ?? null`) and what its report then read as
+   * a configured-but-silent knob. The fallback could not fire in that run for a second reason worth recording
+   * beside it: `selected` was >= 1 on all 277 steps (`recall-C2.json`: min 1, max 24), so the count floor
+   * `minRecalledSegments: 1` was satisfied on every one of them - by a walk that was rooted on the wrong segment
+   * 273 times. A floor expressed as "did selection return anything" cannot catch a *mis-rooted* selector.
+   */
   fallback?: string;
+  /**
+   * Segments admitted because their pair with the anchor was inside `w` and the backend had not judged it (the
+   * fail-open rule in `assemble()`).
+   *
+   * Recorded because the docs require a run to carry it (`docs/CELLS-RUN.md`: "a run that lowers `w` must carry
+   * `fallback`, `unknownAdmitted` and `recallTree` beside it"; `docs/FORMULAS.md` the same) and because it was
+   * *computed and thrown away*: `assemble()` has returned it since the fail-open branch was written, the
+   * assembler test asserts it, and of the 277 `assembly` records of round `20261002-2037` **zero** carried the
+   * key. Its consequence was invisible exactly where it was load-bearing: assembly #1 of that round has
+   * `candidates: 0`, `selected: 1`, no `fallback`, and its one delivered block is 372 tokens - with no candidates
+   * and no fallback, the fail-open branch is the only mechanism that can fill `recalled`, so the run's first
+   * delivery was unjudged pairs admitted by the fail-open rule and no artifact said so.
+   *
+   * **Cumulative and per-assembly are different questions here, and this number is per-assembly**: it counts the
+   * segments *this* assembly admitted, not a session total (contrast `scoredPairs`/`judgedPairs`/`deferredPairs`
+   * above, which are cumulative for the session). Absent means the step admitted none, which is the ordinary
+   * case; a present `0` never occurs, and the field is omitted rather than zeroed for the same reason
+   * `fallback` is.
+   */
+  unknownAdmitted?: number;
   /**
    * The graph structure this step's recall produced, copied from the assembler's result.
    *
@@ -261,6 +322,24 @@ export interface ContextDeliveryEvent {
   payloadId: string;
   /** the block order the layout used for this step */
   order: string[];
+  /**
+   * Whether the assembler ran for this step, and whether the step was read into the graph anyway.
+   *
+   * Both exist because a refusal on its own is ambiguous, and the ambiguity is the one this pair removes:
+   * `delivered: false, reason: "the decision carried no messages"` is produced identically by three different
+   * states - the step was read and the assembly was deliberately not paid for (`assembled: false,
+   * ingested: true`, the documented `ingestOnly` path), the observer was missing or `observe()` threw
+   * (`assembled: false, ingested: false`), and the assembly ran and the delivery module declined for a reason of
+   * its own (`assembled: true`, with the block list). The counters that separate them (`ingestOnly`, `errors`)
+   * live only on the `/s1` route, which a round does not persist - so without these two fields the control plane
+   * cannot tell "the lane declined this on purpose" from "the lane was never there", and a defect in the
+   * observation path reads exactly like the lane working as designed.
+   *
+   * They are written on the refusal paths in `index.ts`, on the strength of the observation's own kind rather
+   * than of the decision, and they are optional only so records written before them stay readable.
+   */
+  assembled?: boolean;
+  ingested?: boolean;
 }
 
 /** Cost of one LLM call in USD. */

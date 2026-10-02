@@ -531,6 +531,58 @@ test('the wiring record makes a demoted lane distinguishable from a cell with no
   assert.ok(!tape.includes('SECRET'), 'the wiring record never carries a credential');
 });
 
+test('the wiring record says which cells deliver, and which recall tier they resolved', () => {
+  // Two fields, one reason: a round has to be able to prove its own arms from its own artifacts.
+  //
+  // `deliver` is the switch that decides whether the model ever sees an assembled layout, and it is the difference
+  // between the ablation's arms: C0 leaves it off by choice (the baseline lets the harness manage history), C1
+  // leaves it off because its channel is structurally empty (`recall.tier1: 'off'` selects nothing, so there is
+  // nothing to insert), and C2 is the only delivering cell. `verify-wiring.mjs` asserted `tas.on`/`xFirst` and
+  // stopped there, so nothing in a round's evidence stated which cells actually delivered.
+  //
+  // `tier1` is the knob that decides *how* candidates are generated, and it appeared in no persisted record at all:
+  // the startup log line was the only place, and a later reader has the cell's recipe rather than the process. The
+  // values are now a closed union (`off` | `s1`) with the unimplemented `embed` rejected in `config.ts`; recording
+  // the resolved value is what lets a run state which of the two it ran.
+  const record = (raw: Record<string, unknown>): Record<string, unknown> => {
+    const h = harness();
+    const tape = withEmptyHome(() => {
+      apply(h.ctx, { enabled: true, observation: 'tape', ...raw });
+      return readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tape.jsonl'), 'utf8');
+    });
+    const found = tape
+      .split('\n')
+      .filter((l) => l.trim() !== '')
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .find((r) => r['kind'] === 'wiring');
+    assert.ok(found, 'the tape must hold a wiring record');
+    return found;
+  };
+
+  const c0 = record({ cell: 'C0', s1: { provider: 'none' }, laya: layaIdle });
+  assert.equal(c0['deliver'], false, 'C0 is the baseline: the harness manages history');
+  assert.equal((c0['recall'] as Record<string, unknown>)['tier1'], 'off', 'and it selects nothing');
+
+  const c1 = record({ cell: 'C1', s1: { provider: 'none' }, laya: layaIdle });
+  assert.equal(c1['deliver'], false, 'C1 does not deliver either: with tier1 off its block is always empty');
+  assert.equal((c1['recall'] as Record<string, unknown>)['tier1'], 'off');
+
+  const c2 = record({ cell: 'C2', s1: { provider: 'none' }, laya: layaIdle });
+  assert.equal(c2['deliver'], true, 'C2 is the only delivering cell');
+  assert.equal((c2['recall'] as Record<string, unknown>)['tier1'], 's1', 'and the tier it runs is the System-1 one');
+
+  // The three readings together are what `verify-wiring.mjs` can now assert: `false, false, true`.
+  assert.deepEqual(
+    [c0['deliver'], c1['deliver'], c2['deliver']],
+    [false, false, true],
+    'the delivery arm of the ablation, stated by the run rather than by the recipe',
+  );
+  assert.ok(
+    'deliver' in c2 && 'xFirst' in c2,
+    'and it sits beside the layout field, so the two axes of the ablation are read from one place',
+  );
+});
+
 test('apply() reports the resolved backend without leaking the key, and ping is honest', async () => {  const h = harness();
   apply(h.ctx, { enabled: true, s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: { enabled: false } });
 

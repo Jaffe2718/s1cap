@@ -14,7 +14,7 @@
 2. **A new decision model category is born**: TypeSafe AI's Jev (2026-09-15, $0.042/M input, free output, parallel query evaluation) and the open-source Laya (2026-09-18, Apache-2.0, 322M/421M, 15.6ms/decision locally) — the cost of a "System-1 call" drops from "one LLM call" to "noise level";
 3. **Cache economics becomes a hard constraint**: DeepSeek `deepseek-flash` cache hit price $0.006/M vs. miss $0.30/M (**50x**) — how context is assembled, what may be reordered and what may not, directly determines cost.
 
-**Core hypotheses**: H2, plan pre-ranking can eliminate wasted execution attempts; H3 (selection, stabiliser and cache — one contrast, two-sided risk), Trace-as-State reordering will change the cache hit rate and the net effect must be measured rather than assumed, and association-graph selection plus the plan gate reduce context tokens at a non-inferior solve rate; H4, the gains transfer across harnesses. **H1 is retired, folded into H3**: with the recall-only arm dropped, `C2` is the only arm that runs System-1 governance, so the selection claim can only be observed as `C1` vs `C2` — the contrast the cache effect is already measured on — and two hypotheses riding one contrast cannot be separated afterwards (`docs/AGENT_BRIEF.md` §9.3, which keeps the round's numbers).
+**Core hypotheses**: H2, plan pre-ranking can eliminate wasted execution attempts; H3 (selection, stabiliser and cache — one contrast, two-sided risk), Trace-as-State reordering will change the cache hit rate and the net effect must be measured rather than assumed, and association-graph selection plus the plan gate reduce context tokens at a non-inferior solve rate; H4, the gains transfer across harnesses. **H1 is retired, folded into H3**: with the recall-only arm dropped, `C2` is the only arm that runs System-1 governance, so the selection claim can only be observed as `C0` vs `C2` — the registered contrast (`C1` is a second control arm that delivers nothing, so a `C1`-vs-`C2` difference would be the instrument rather than the method, and what `C0`-vs-`C2` measures today is the recall lane, not TAS) — and two hypotheses riding one contrast cannot be separated afterwards (`docs/AGENT_BRIEF.md` §9.3, which keeps the round's numbers; `docs/CELLS-RUN.md` carries the registration).
 
 **Success rule (revised, see §5.3)**: the solve rate is **non-inferior** to the baseline (paired McNemar, one-sided α=0.05, tolerance −2pp) **and** cost or time improves by ≥10% (paired bootstrap 95% CI excluding 0). The earlier "any one of the three counts as success" rule is no longer used.
 
@@ -68,17 +68,25 @@ release, and they have **not** been re-confirmed on the release the machine runs
 plugin's *activation* on that newer release — bundle load, commands, composed config, the surfaces the plugin
 itself serves — has since been re-checked on **0.2.0-rc.2** and is recorded per fact in §1.8.
 
-DSH's session model separates a **persistent append-only event log (the human record, never rewritten) from the surface (the model's view)**, and `surfaceOp {op:'replace'}` allows changing only the context the model sees — **natively satisfying "present strictly in chronological order to the user, reorganize internally for the model"**. Interception points: `agent/pre-step` (assembly before the LLM call), `agent/request-error` (waterfall + prepend), `ctx.tokenMeter` (shadow-price accounting), `@deepseek-ai/dsh-compaction` (tool pairing integrity). The existing plugin `dsh-command-context-trim` (model-free oldest-first trimming) is precisely the spiritual prototype of the C0 baseline and the engineering template for the plugin mechanism.
+DSH's session model separates a **persistent append-only event log (the human record, never rewritten) from the surface (the model's view)**, and `surfaceOp {op:'replace'}` allows changing only the context the model sees — **the harness capability behind "present strictly in chronological order to the user, reorganize internally for the model"**; this project does not write through it yet: the model-view write-back is the 🔜 row of `docs/ARCHITECTURE.md` §3 and `packages/proxy` is not written, so a DSH *capability* is not a delivered assembly. Interception points: `agent/pre-step` (assembly before the LLM call), `agent/request-error` (waterfall + prepend), `ctx.tokenMeter` (shadow-price accounting), `@deepseek-ai/dsh-compaction` (tool pairing integrity). The existing plugin `dsh-command-context-trim` (model-free oldest-first trimming) is precisely the spiritual prototype of the C0 baseline and the engineering template for the plugin mechanism.
 
 ## 4. Experimental Design
 
 ### 4.1 2×2 Factorial, three arms run (within-task pairing)
 
-| Cell | A: TAS ordering | B: S1 governance (recall selection + plan gate) |
-|---|---|---|
-| C0 baseline | off (chronological appending) | off (harness-native compaction only) |
-| C1 | **on** | off |
-| C2 full | **on** | **on** |
+| Cell | A: TAS ordering | B: S1 governance (recall selection) | Model-visible input |
+|---|---|---|---|
+| C0 baseline | off (chronological appending) | off (harness-native compaction only) | the harness's own history |
+| C1 | **on** — recorded configuration | off | `C0`'s: nothing is delivered |
+| C2 full | **on** — recorded configuration | **on** | `C0`'s history plus the delivered `recalled` block |
+
+**Factor A reaches the model through no cell.** `tas.on`/`xFirst` are recorded configuration in every arm — the
+delivery channel inserts one `recalled` block and never the assembled order — so the ordering becomes measurable
+only with the model-view write-back, which does not exist (`docs/ARCHITECTURE.md` §5 carries it as a 🔜 row;
+`packages/proxy` is not written). What separates the arms on the model's side today is recall selection and its
+insertion, and the registered contrast is **`C0` vs `C2`**: `C1` is a second control arm whose model-visible input
+is `C0`'s. Factor B is recall selection alone — the plan gate is designed, implemented and unit-tested but wired
+into no cell, and has been removed from the policy and the presets (`docs/FORMULAS.md` §4).
 
 Same tasks, same model, same harness version, same tool allowlist, randomized order. The runs pin
 `reasoningEffort` on `deepseek-v4.1-flash` and claim no sampling parameter, because DSH exposes none
@@ -88,7 +96,9 @@ The fourth quadrant of the 2×2 — recall selection with TAS off — is **dropp
 successor**: per step it moved more uncached input and more output than the baseline at a lower cache hit rate, and
 its System-1 coverage was below the 0.5 floor that makes a cell a measurement of System-1 at all (`docs/CELLS-RUN.md`
 carries the numbers and the mapping table). Round `20261001-1300` ran under an earlier labelling: `C1` (baseline) is
-today's **`C0`**, `C2` (TAS alone) is today's **`C1`**, `C3` (recall selection with `tas.on: false`) is **dropped,
+today's **`C0`**, `C2` (read as TAS alone then — its state proxy and x-first ordering were recorded configuration
+and **nothing was delivered**, so it is a second control arm today, not a "TAS alone" arm) is today's **`C1`**, `C3`
+(recall selection with `tas.on: false`) is **dropped,
 no successor**, and `C4` (the full configuration) is today's **`C2`**.
 
 ### 4.2 Benchmark Suite (all automatically scored, no GUI, no LLM judging)
@@ -111,7 +121,7 @@ no successor**, and `C4` (the full configuration) is today's **`C2`**.
 
 ### 4.4 Telemetry (versioned JSONL, fields in AGENT_BRIEF §8)
 
-Each LLM call records prompt/cacheHit/cacheMiss/output tokens, net latency, and S1 auxiliary statistics; each S1 call records type/cost/latency; each assembly records the number of candidates, the number selected, BFS depth, budget usage, layout blocks, and the length of the cache-stable prefix; the plan gate records each plan's probability/confidence/execution/verification/estimated tokens saved.
+Each LLM call records prompt/cacheHit/cacheMiss/output tokens, net latency, and S1 auxiliary statistics; each S1 call records type/cost/latency; each assembly records the number of candidates, the number selected, BFS depth, budget usage, layout blocks, and the length of the cache-stable prefix; a plan-gate record would carry each plan's probability/confidence/execution/verification/estimated tokens saved — **the gate is wired into no cell, so no run writes that record** (`docs/FORMULAS.md` §4).
 
 ### 4.5 Generalization (defusing the "result engineering for DSH" concern)
 
@@ -151,7 +161,7 @@ Suggested division of labor: one person leads core + the DSH plugin, one leads b
 
 - **Type**: Technique paper (Novel Method) — porting the Trace-as-State principle and decision models into agent harness infrastructure, with measurements.
 - **Fatal-flaw audit**: no CRITICAL. F1 novelty was verified on the ground (three parallel verification passes + repository-level search): **nobody combines (a) association graph + (b) within-budget turn-by-turn assembly + (c) same-model plan pre-ranking + (d) cache/latency telemetry**; the nearest neighbors are hermes-jev-skills (integration with no evaluation), GAAMA (graph but embeddings + PPR, conversational memory), AgentFold (model self-folding, no external decision model), and Don't Break the Cache (measurement without a method). The risk is MAJOR (window movement), not fatal.
-- **Five-dimension scores** (5 is the default, mechanism arguments may raise it, all labeled "mechanism-based, not yet confirmed by data", validation experiment = the C2 vs C0 paired grid): Higher **6** (paper T's 26/27 win rate suggests the ordering gain transfers, but agent task shapes differ, so the claim is non-inferiority); Faster **8** (S1 at millisecond scale vs. LLM at second scale; parallel noul batching is 12.2× cheaper; the plan gate avoids wasted attempts); Stronger **6** (degradation paths + cross-harness checks, but the main grid uses a single provider); Cheaper **8** (the 50× price gap on hit rate is the biggest lever; TB dominates cost, calibrated by the pilot); Broader **7** (one proxy covers four harnesses; the protocol standard `/v1/systemone`; the decision model is swappable).
+- **Five-dimension scores** (5 is the default, mechanism arguments may raise it, all labeled "mechanism-based, not yet confirmed by data", validation experiment = the C2 vs C0 paired grid): Higher **6** (paper T's 26/27 win rate suggests the ordering gain transfers, but agent task shapes differ, so the claim is non-inferiority); Faster **8** (S1 at millisecond scale vs. LLM at second scale; parallel noul batching is 12.2× cheaper; the plan gate would avoid wasted attempts, but it is designed and wired into no cell, so no arm records that saving); Stronger **6** (degradation paths + cross-harness checks, but the main grid uses a single provider); Cheaper **8** (the 50× price gap on hit rate is the biggest lever; TB dominates cost, calibrated by the pilot); Broader **7** (one proxy covers four harnesses; the protocol standard `/v1/systemone`; the decision model is swappable).
 - **Paradigm probes**: First principles ✓ (challenges "context must be appended chronologically"; paper T has both theory and empirics); Elephant in the room ✓ (everyone complains about agent cost and context rot); Technology cycle ✓ (the decision model category only appeared in 2026-09, suddenly making S1 governance nearly free); Hamming ✓ (if it holds, agent economics change). 4/4.
 - **Feasibility**: compute low (API + CPU); data low (all benchmarks open source); engineering medium (plugin + proxy + runner, all with templates); time medium (10 weeks is tight but staged, with the TB pilot up front to control risk).
 - **Verdict**: **Accept with Revisions** (worth pursuing, pending the validation experiment). The revision items have been absorbed: (1) the success rule changed to non-inferiority + superiority; (2) two-level recall replaces naive Laya scoring; (3) the H3 cache penalty is made explicit; (4) terminology corrections (§2); (5) the 2×2 factors are formalized.

@@ -7,6 +7,9 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { createPlanGate, extractPlans, extractTodoEvent, extractTodos } from '../src/plan-gate-runtime.ts';
 import type { PlanGateOptions, PlanGateStats } from '../src/plan-gate-runtime.ts';
@@ -184,4 +187,44 @@ test('a gate that is switched off never scores, even with a backend present', as
   );
   assert.equal(await gate.consider('1. alpha\n2. beta', 'S', 1), undefined);
   assert.equal(calls, 0, 'C0 runs with the gate off and must make no System-1 calls');
+});
+
+/**
+ * F12: the retained gate is dead, and nothing in the tree enforced that.
+ *
+ * `plan-gate-runtime.ts` is imported by nothing under any `packages/star/src`: its only importer is this file. It is
+ * kept deliberately (the mechanism was written, measured as never firing, and removed from the policy - see its
+ * header), and the danger of keeping it is specific: `PlanGateOptions.policy.planGate` no longer exists on
+ * `AssemblyPolicy`, so a future wiring would not fail a build - the build is type erasure (`typescript` is not
+ * installed) - it would throw `Cannot read properties of undefined (reading 'on')` at the first plan of the first
+ * round that tried it. This test is the tripwire: if someone wires the module in without first re-declaring the
+ * policy field, it fails here, at build time, with the reason.
+ */
+test('no src/ file imports the unwired plan gate: rewiring it has to pass through this test first', () => {
+  const src = fileURLToPath(new URL('../src', import.meta.url));
+  const importers: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.ts') && !entry.name.endsWith('.js')) continue;
+      const code = readFileSync(full, 'utf8');
+      if (/from\s+['"][^'"]*plan-gate-runtime(\.ts)?['"]/.test(code)) importers.push(relative(src, full));
+    }
+  };
+  walk(src);
+
+  assert.deepEqual(
+    importers,
+    [],
+    'plan-gate-runtime is unwired: its `policy.planGate` field is not on AssemblyPolicy any more, so a wiring would ' +
+      'throw at the first plan rather than at build time. Re-declare the policy field (types.ts, KNOWN_PATHS, the ' +
+      'presets, the wiring record) before importing it, and delete this assertion in the same commit',
+  );
+  // And the reason it is worth a tripwire rather than a note: the mechanism is otherwise intact. If this stops
+  // being true, the module has rotted and the decision to keep it should be revisited.
+  assert.equal(typeof createPlanGate, 'function', 'the retained module still builds a gate');
 });

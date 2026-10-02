@@ -119,10 +119,27 @@ export const BACKPRESSURE_DEFAULTS = {
                    
                                                
                
-                                     
+                                                                                                     
              
                                                                               
                   
+     
+                                                                                                           
+                                                                                           
+    
+                                                                                                                  
+                                                                                                                  
+                                                                                                                  
+                                                                                                                
+                                                                                                            
+                                                                                                                  
+                                                                                                               
+    
+                                                                                                                 
+                                                                                                            
+                                                                                                      
+     
+                            
                                           
                           
                             
@@ -159,6 +176,19 @@ export const BACKPRESSURE_DEFAULTS = {
                                                                                    
                         
      
+                                                                                                                  
+                      
+    
+                                                                                                              
+                                                                                                               
+                                                                                                         
+                                                                                                               
+                                                                                                              
+                                                                                                 
+                                                                                                              
+     
+                                 
+     
                                                                          
     
                                                                                                          
@@ -190,6 +220,7 @@ export function createBackpressure(opts                      = {})              
     sent: 0,
     ok: 0,
     refused: 0,
+    transportFailures: 0,
     deferredByLimit: 0,
     deferredByBreaker: 0,
     opened: 0,
@@ -306,6 +337,12 @@ export function createBackpressure(opts                      = {})              
       if (state === 'closed' && inWindow >= openAfterRefusals) {
         open(at, `${inWindow} refusal(s) within ${windowMs}ms`);
       }
+    },
+
+    recordTransportFailure()       {
+      inFlight = Math.max(0, inFlight - 1);
+      stats.inFlight = inFlight;
+      stats.transportFailures += 1;
     },
 
     recordLeak()       {

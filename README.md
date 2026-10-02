@@ -16,9 +16,9 @@ round), association-graph upkeep is fed by real `session/event` traffic, and a r
 control-plane records byte for byte. The settings panel that will hold the Jev key is next. Details, evidence
 and per-item acceptance tests: [`docs/STATUS.md`](docs/STATUS.md).
 
-S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The S1CAP control layer intervenes at exactly **two points**:
+S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking the [`/v1/systemone`](https://docs.typesafe.ai/api) protocol) in charge of an LLM agent harness's **context lifecycle** — instead of the expensive System-2 LLM. The S1CAP control layer intervenes at exactly **two points**. One bound on both, stated here because it decides how every measurement below is read: no cell delivers an assembled *layout* yet — the model-view write-back is a 🔜 row in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (`packages/proxy`, not written) — so the ordering is **recorded** and what reaches the model today is recall selection plus one inserted block:
 
-1. **Context Awareness** *(what the model sees, per LLM call)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide which segments make it in, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`.
+1. **Context Awareness** *(what the model sees, per LLM call)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide which segments make it in, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`. Which half of that reaches the model today is stated in **Evaluation design** below: the *selection* does, the *assembled order* does not yet.
 2. **Plan Ordering** *(the context-aware part of planning)* — the LLM's candidate plans go directly to a second System-1 backend that scores them as a **choice question**; **PLAN GATE** normalizes those scores, orders the plans and caps attempts, and execution follows that order under a verification oracle, with unexecuted alternatives discarded on first success. *Designed and implemented, but not wired into any ablation cell as of 2026-10-02:* round `20261002-2037` recorded no `plan_gate` event at all, because the model wrote no numbered plan and emitted no `todo/write`, so the knob was removed from the policy, the presets and the report rather than left `on` and inert (`packages/core/src/types.ts`).
 
 Everything is **measured, not assumed**: solve rate, token cost split by prompt-cache **hit/miss** (the dominant cost lever — cache-hit tokens are ~50× cheaper than misses on DeepSeek), and wall time excluding approval waits.
@@ -37,21 +37,26 @@ Everything is **measured, not assumed**: solve rate, token cost split by prompt-
 
 For exact control flow and asynchronous boundaries, see the [detailed technical route](docs/figures/s1cap-technical-route.light.svg) ([dark version](docs/figures/s1cap-technical-route.dark.svg)).
 
-The user-facing transcript stays **strictly chronological**; only the model view is reassembled (native in DSH's session/surface split, replicated by the portable proxy elsewhere).
+The user-facing transcript stays **strictly chronological**; only the model view is reassembled — and that write-back is a 🔜 row in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (`packages/proxy`, not written), so what the *ordering* half records is not yet what the model reads. The one live delivery channel inserts the `recalled` turns and nothing else, which is why the registered contrast measures the recall lane rather than TAS (`docs/CELLS-RUN.md`).
 
-## Evaluation design (pre-registered)
+## Evaluation design (three cells)
 
-2×2 within-task paired factorial — factor A: Trace-as-State ordering; factor B: S1 governance (selection + plan gate).
-Three cells are run; the fourth combination (governance without ordering) measured worse than the baseline per step
-and has been dropped (`bench/README.md` records the quantities):
+Three cells are run: two controls and one arm under test (the 2×2 crossing's fourth combination — governance without
+ordering — measured worse than the baseline per step and has been dropped; `bench/README.md` records the quantities).
+Factor B is recall selection alone: the plan gate is designed and unit-tested but **wired into no cell**, so it is no
+part of any factor here:
 
-| Cell | A | B |
-|---|---|---|
-| C0 baseline | off | off (native compaction only) |
-| C1 | **on** | off |
-| C2 full | **on** | **on** |
+| Cell | A: TAS ordering | B: S1 governance | Model-visible input |
+|---|---|---|---|
+| C0 baseline | off (native compaction only) | off | the harness's own history |
+| C1 | **on** — recorded configuration | off | `C0`'s: nothing is delivered |
+| C2 full | **on** — recorded configuration | **on** | `C0`'s history plus the delivered `recalled` block |
 
-Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified** (100/cell) · **Terminal-Bench 4.0** (66/cell) · **τ²-bench** (full base split). Model: `deepseek-flash` (DeepSeek-V4.1-Flash), temperature 0.
+`tas.on`/`xFirst` are *recorded* in every arm and reach the model in none — delivery inserts one `recalled` block and
+never the assembled order — so what separates the arms on the model's side today is recall selection and its
+insertion, and the registered contrast is **`C0` vs `C2`** ([`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5).
+
+Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified** (100/cell) · **Terminal-Bench 4.0** (66/cell) · **τ²-bench** (full base split). Model: `deepseek-flash` (DeepSeek-V4.1-Flash) with `reasoningEffort` pinned; **no sampling parameter is claimed** — not a temperature and not a seed — because DSH exposes none.
 
 **Success rule:** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp) **AND** ≥10% improvement in cost/task or time/task (paired bootstrap 95% CI excluding 0, Holm-corrected). Winning cost while losing >2 pp solve rate is not a win.
 

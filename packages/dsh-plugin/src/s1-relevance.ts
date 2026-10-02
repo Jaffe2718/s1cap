@@ -319,10 +319,11 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
      * The release of the admission slot, the "the whole window falls back" decision and the lexical hand-off can
      * all only be taken once the loop is over: the first because a slot has to be back in the gate before the
      * retry backoff, the others because they are properties of the *window* and not of one batch. Collecting the
-     * chunks also lets the weights be read in candidate order at the end, which is what keeps a partial batch from
-     * being misread as a full one.
+     * chunks also lets the weights be written in candidate order at the end, which is what keeps a partial batch
+     * from being misread as a full one. The weights are *validated* inside the attempt that produced them (see
+     * `readWeight` at the answer site) - what is stored here is the reading, not the raw reply.
      */
-    const batches: { batch: number[]; answers: Awaited<ReturnType<S1RelevanceOptions['decide']>>['answers'] }[] = [];
+    const batches: { batch: number[]; weights: (number | undefined)[] }[] = [];
     while (cursor < candidates.length) {
       // What this chunk would ask for with no back-pressure. It is the yardstick that keeps `reducedBatches`
       // meaning "smaller because the backend pushed back" rather than "smaller because the window ran out", which
@@ -360,10 +361,16 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
         // rendering below leaked the slot for the life of the process, with nothing counting leaks. Every exit
         // from here now either sends and is accounted for, or is handed back and counted.
         let admitted = false;
-        // What the attempt did, in the two facts the gate needs: was a request sent, and was it refused. The
-        // release itself is in the `finally` below, so no exit path can skip it.
+        // What the attempt did, in the three facts the gate needs: was a request sent, was it refused, and did it
+        // come back with a reply. `answered` is what closes the breaker, and its limit is worth stating: it means
+        // *a reply arrived for this request*, not that the window became a judgement - the weights are read after
+        // the loop, and a reply with no usable weight counts here as a transport failure. That is the honest
+        // reading of a per-request counter, and the scorer's own `failures` counter is what says which reply was
+        // unusable.
+        // The release itself is in the `finally` below, so no exit path can skip it.
         let sent = false;
         let refused = false;
+        let answered = false;
         let retryDelay: number | undefined;
         try {
           if (opts.backpressure !== undefined) {
@@ -443,7 +450,26 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
               return undefined;
             }
             // The backend answered this request, which is what closes the breaker: not a timer, and not a guess.
+            // `answered` is the flag the gate reads; it means a reply arrived, and the weights are checked after
+            // the loop - see the note beside the declaration.
             answers = result.answers;
+            // A reply is only an *answer* once it carries a weight the graph can consume, and the check is here -
+            // inside the attempt, before `break retryLoop` - because this is the last moment at which the gate can
+            // still be told the truth about it. An empty body, a truncated one, a `noul` head that emitted prose:
+            // the request left the cell and came back without a judgement, which is a transport failure and not a
+            // success. Reading the weights here rather than after the loop also removes the second traversal that
+            // used to do it; the early return runs the `finally` below like any other exit, so the slot is released
+            // and the gate records `recordTransportFailure` for it (`answered` stays false).
+            for (let slot = 0; slot < batch.length; slot += 1) {
+              if (readWeight(answers?.[`h${slot}`] as Partial<NoulAnswer> | undefined) === undefined) {
+                stats.failures += 1;
+                opts.onWarn?.(
+                  `[s1cap] relevance: no usable weight for candidate h${batch[slot]}; the whole window falls back`,
+                );
+                return undefined;
+              }
+            }
+            answered = true;
             stats.calls += 1;
             stats.inputTokens += result.usage?.input_tokens ?? 0;
             stats.outputTokens += result.usage?.output_tokens ?? 0;
@@ -494,14 +520,30 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
           }
         } finally {
           // The single release point for the slot taken above, on every exit that reaches the request: answered,
-          // refused, abandoned, thrown. `recordSuccess` on this path is not a claim that the backend answered -
-          // `recordLeak` covers the one case where no request left the cell - it is the counter that says a
-          // request in flight came back. A release that lived in the catch blocks could be skipped by a throw
-          // between the acquire and the try, and nothing would have said so (F16.3).
+          // refused, abandoned, thrown. Released here so no exit path can skip it, and *classified* here, because
+          // the three exits are three different facts about the backend and the gate used to be told only one of
+          // them:
+          //
+          //   - `refused` (a retryable status - Laya's 503, the 429/5xx family): the backend said "not now". This
+          //     is the saturation the breaker exists for, and a run of them opens it.
+          //   - `answered` (a reply arrived - `sent`, not `refused`, and `result.answers` was read): the only thing
+          //     that closes the breaker. A reply with no usable weight still counts here, because this release runs
+          //     at the end of the *attempt* and the weights are checked after the loop; see the note beside the
+          //     declaration.
+          //   - everything else that left the cell: a transport timeout, `TypeError: fetch failed`, a cancellation,
+          //     a reply with no usable weight. **This is the case that used to call `recordSuccess()`.** A dead
+          //     backend then incremented `ok` once per call, cleared the refusal streak and closed the breaker, so
+          //     the two failure kinds that dominated round `20261002-2037` after the 503s - 67
+          //     `TypeError: fetch failed` - read as healthy on `/s1`, and the mechanism that exists to stop a cell
+          //     hammering a backend was blind to them. `recordTransportFailure()` releases the slot and counts them
+          //     without claiming the backend answered. Note the ordering limit: this release runs at the end of the
+          //     *attempt*, so an unreadable reply is counted from here and not from the weight check after the loop.
+          //   - nothing sent (`recordLeak`): the one case where no request left the cell at all.
           if (admitted) {
             if (sent) {
               if (refused) opts.backpressure?.recordRefusal();
-              else opts.backpressure?.recordSuccess();
+              else if (answered) opts.backpressure?.recordSuccess();
+              else opts.backpressure?.recordTransportFailure();
             } else {
               opts.backpressure?.recordLeak();
             }
@@ -523,7 +565,14 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
       // still evidence that the backend is busy now.
       if (deferredChunk) return S1_DEFERRED;
 
-      batches.push({ batch, answers });
+      // The batch's weights, in slot order. Every one of them was checked in the attempt above, so no entry here
+      // can be `undefined`; the type keeps the possibility because it is read from the same map the check reads.
+      batches.push({
+        batch,
+        weights: batch.map((_candidateIndex, slot) =>
+          readWeight(answers?.[`h${slot}`] as Partial<NoulAnswer> | undefined),
+        ),
+      });
 
       // All or nothing for the segment. A batch that answered while its neighbour timed out would leave some
       // pairs judged by the backend and others by the lexical scorer, and the graph would then hold two kinds of
@@ -538,14 +587,11 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
     }
 
     for (const chunk of batches) {
+      // Every weight in every chunk was validated inside the attempt that produced it, so this traversal writes
+      // the values out and cannot fail: `out` is aligned by candidate index, so a partial batch is impossible to
+      // misread as a full one.
       for (let slot = 0; slot < chunk.batch.length; slot += 1) {
-        const weight = readWeight(chunk.answers?.[`h${slot}`] as Partial<NoulAnswer> | undefined);
-        if (weight === undefined) {
-          stats.failures += 1;
-          opts.onWarn?.(`[s1cap] relevance: no usable weight for candidate h${chunk.batch[slot]}; the whole batch falls back`);
-          return undefined;
-        }
-        out[chunk.batch[slot] as number] = weight;
+        out[chunk.batch[slot] as number] = chunk.weights[slot] as number;
       }
     }
 

@@ -194,6 +194,161 @@ test('a decision with no messages costs no assembly, and the step is still read 
   assert.equal(delivery?.messagesBefore, 0, 'and the field the analysis reads says the same thing it said before');
 });
 
+/**
+ * F1: the refusal has to say *which* refusal it was.
+ *
+ * `delivered: false, reason: "the decision carried no messages"` is produced identically by three different states:
+ * the step was read and the assembly was deliberately not paid for (this path), the observer was missing or
+ * `observe()` threw, and the assembly ran and the delivery module declined for a reason of its own. The counters
+ * that separate them (`ingestOnly`, `errors`) live only on the `/s1` route, which a round does not persist - so
+ * before this pair of fields, a defect in the observation path was written down identically to the lane working as
+ * designed. The audit's finding is that the D1 fix converts a *measured* waste into an *unmeasured* absence; these
+ * two fields are what makes it measured again, without changing what the model receives.
+ */
+test('the refusal records that the step was ingested and not assembled', async () => {
+  const records: unknown[] = [];
+  const observer = observerWith(records);
+  const { middleware, emitted } = preStep(observer);
+
+  await middleware({ messages: MESSAGES, step: 7 }, async () => ({ kind: 'accept', messages: [] }));
+
+  const delivery = emitted.find((e) => e.type === 'context_delivery');
+  assert.ok(delivery !== undefined);
+  assert.equal(
+    (delivery as { assembled?: boolean }).assembled,
+    false,
+    'the walk did not run, and the record says so rather than leaving it to be inferred from the reason',
+  );
+  assert.equal(
+    (delivery as { ingested?: boolean }).ingested,
+    true,
+    'and the step *was* read: its segments are in the graph, which is the other half of the state',
+  );
+  assert.equal((delivery as { step?: number }).step, 7, 'the step number the refusal was about');
+});
+
+test('a refusal with no observer behind it reports `ingested: false`, not the same record', async () => {
+  // The other state, and the reason the flag is read from the observation rather than assumed from the decision:
+  // with no observer there is nothing to read the payload, so `assembled` and `ingested` are both false and the
+  // record is distinguishable from the one above. This is the "the lane was never there" case.
+  const emitted: Record<string, unknown>[] = [];
+  const middleware = preStepMiddleware(harness().ctx, {
+    cell: 'C2',
+    emit: (event) => emitted.push(event as never),
+    deliver: () => SKIPPED,
+  });
+
+  const decision = { kind: 'accept', messages: [] as unknown[] };
+  const returned = await middleware({ messages: MESSAGES, step: 5 }, async () => decision);
+
+  assert.equal(returned, decision, 'the harness still sees its own object');
+  const delivery = emitted.find((e) => e['type'] === 'context_delivery') as Record<string, unknown> | undefined;
+  assert.ok(delivery !== undefined, 'and the refusal is still reported');
+  assert.equal(delivery['assembled'], false);
+  assert.equal(delivery['ingested'], false, 'nothing read this step: the two states are legible apart');
+  assert.equal(delivery['step'], 5);
+});
+
+test('a delivered step records `assembled: true`, so the three states are all distinct', async () => {
+  const records: unknown[] = [];
+  const observer = observerWith(records);
+  const delivered: string[] = [];
+  const middleware = preStepMiddleware(harness().ctx, {
+    observer,
+    cell: 'C2',
+    emit: (event) => {
+      const e = event as { type?: string; assembled?: boolean; delivered?: boolean; payloadId?: string };
+      if (e.type === 'context_delivery') delivered.push(JSON.stringify(e));
+    },
+    deliver: (_observation, decision) => {
+      const messages = (decision as { messages: unknown[] }).messages;
+      const injected = { id: 's1cap-test', role: 'user', content: [{ type: 'text', text: '## earlier user turn' }] };
+      return {
+        delivered: true,
+        reason: 'inserted one message',
+        messages: [...messages, injected],
+        blocks: ['recalled'],
+        kept: messages.length,
+        dropped: 0,
+        inserted: 1,
+        payloadId: 's1cap-test',
+      };
+    },
+  });
+
+  await middleware({ messages: MESSAGES, step: 2 }, async () => ({ kind: 'enter', messages: [{ id: 'u7' }] }));
+
+  const record = JSON.parse(delivered[0] ?? '{}') as Record<string, unknown>;
+  assert.equal(record['delivered'], true);
+  assert.equal(record['assembled'], true, 'a delivered step is the one case where both flags are on one side');
+  assert.equal(record['ingested'], undefined, '`ingested` marks the read-and-declined path, and this is not it');
+});
+
+/**
+ * The other half of the per-session duplicate guard: a *different* payload is still delivered.
+ *
+ * The guard keys on the digest S1CAP computed, so the risk it carries is refusing too much - a run that delivered
+ * once and then declined everything. This pins the boundary: the second step gets a different payload id and is
+ * delivered, which is what makes the guard a de-duplication rather than a one-shot.
+ */
+test('the dedup guard is per session, and it keys on the digest rather than on the text', async () => {
+  const records: unknown[] = [];
+  const observer = observerWith(records);
+  const emitted: Record<string, unknown>[] = [];
+  const middleware = preStepMiddleware(harness().ctx, {
+    observer,
+    cell: 'C2',
+    emit: (event) => emitted.push(event as never),
+    // A `deliver` whose digest is *content-derived*, like the real one (`context-delivery.ts`: FNV-1a over the
+    // rendered text). A counter-based fixture would make every step a new payload and the guard would never be
+    // exercised - which is the shape of test that lets a dead guard look alive.
+    deliver: (observation, decision) => {
+      const messages = (decision as { messages: unknown[] }).messages;
+      const payloadId = `s1cap-${observation.layout.anchor.id}`;
+      return {
+        delivered: true,
+        reason: `inserted ${payloadId}`,
+        messages: [...messages, { id: payloadId, role: 'user', content: [{ type: 'text', text: payloadId }] }],
+        blocks: ['recalled'],
+        kept: messages.length,
+        dropped: 0,
+        inserted: 1,
+        payloadId,
+      };
+    },
+  });
+
+  // The anchor comes from the graph, so two steps over the same transcript select the same payload - which is the
+  // situation the guard exists for (the harness's increment never carries the previous injection back). The second
+  // step is therefore refused, and that is a *measurement*: it shows the guard firing in the one case a live run
+  // produces, rather than a fixture that had to be arranged to reach it.
+  const session = { session: { id: 'session-a' } };
+  const claimed = { id: 'u7', role: 'user', content: [{ type: 'text', text: 'and now the fix' }] };
+  await middleware({ messages: MESSAGES, step: 2, agent: session }, async () => ({ kind: 'enter', messages: [claimed] }));
+  await middleware({ messages: MESSAGES, step: 3, agent: session }, async () => ({ kind: 'enter', messages: [claimed] }));
+
+  const deliveries = emitted.filter((e) => e['type'] === 'context_delivery');
+  assert.equal(deliveries.length, 2, 'one report per step, as always');
+  assert.equal(deliveries[0]?.['delivered'], true, 'the first payload is delivered');
+  assert.equal(deliveries[1]?.['delivered'], false, 'the identical one after it is refused');
+  assert.match(String(deliveries[1]?.['reason']), /already delivered in this session/);
+  assert.equal(deliveries[1]?.['assembled'], true, 'the refusal is about the repeat: that step was assembled too');
+  assert.equal(
+    deliveries[1]?.['payloadId'],
+    deliveries[0]?.['payloadId'],
+    'and the record names the payload that was already sent',
+  );
+
+  // A different session is a different guard: the key carries the session, so nothing leaks across conversations.
+  await middleware({ messages: MESSAGES, step: 4, agent: { session: { id: 'session-b' } } }, async () => ({
+    kind: 'enter',
+    messages: [claimed],
+  }));
+  const third = emitted.filter((e) => e['type'] === 'context_delivery')[2] as Record<string, unknown>;
+  assert.equal(third['delivered'], true, 'the same payload in another session is not a repeat');
+  assert.equal(third['sessionId'], 'session-b', 'and the record says which session it was delivered to');
+});
+
 test('a step that can receive context is assembled in full', async () => {
   const records: { type?: unknown }[] = [];
   const observer = observerWith(records);
@@ -392,6 +547,10 @@ test('enabled + observation log writes the record to the configured sink, isolat
   // wrong reason.
   const claimed = { id: 'u7', role: 'user', content: [{ type: 'text', text: 'and now the fix' }] };
   await handler?.({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'accept', messages: [claimed] }));
+  // The same decision again. This step is here on purpose and it is the second half of the delivery contract: the
+  // block it would insert is byte-identical to the one the step above delivered, so `preStepMiddleware` refuses it.
+  // That guard exists because the harness's increment never carries the previous injection back (see
+  // `deliveredPayloads`), and without it a stable selection would be re-appended to the log on every step.
   await handler?.({ messages: MESSAGES, step: 2 }, async () => ({ kind: 'accept', messages: [claimed] }));
 
   const lines = readFileSync(control, 'utf8').trim().split('\n');
@@ -402,13 +561,26 @@ test('enabled + observation log writes the record to the configured sink, isolat
   assert.equal(records.filter((r) => r['type'] === 'assembly').length, 2, 'one assembly per observed step');
   const deliveries = records.filter((r) => r['type'] === 'context_delivery');
   assert.equal(deliveries.length, 2, 'one delivery report per step');
-  // The fixture claims a message so that this is a *delivered* step rather than a refused one, and the report says
-  // so: with `delivered: false` here the whole test would still pass while exercising only the refusal path, which
-  // is the shape of fixture that let "assembled" and "shown" look alike in the first place.
-  assert.ok(
-    deliveries.every((d) => d['delivered'] === true),
-    `each of these steps was assembled *and* delivered, which is what the sink is being asked to record: ${JSON.stringify(deliveries.map((d) => d['reason']))}`,
+  // The fixture claims a message so that the first step is a *delivered* one rather than a refused one, and the
+  // report says so: with `delivered: false` on both, the whole test would still pass while exercising only the
+  // refusal paths, which is the shape of fixture that let "assembled" and "shown" look alike in the first place.
+  assert.equal(
+    deliveries[0]?.['delivered'],
+    true,
+    `the first step was assembled *and* delivered, which is what the sink is being asked to record: ${JSON.stringify(deliveries[0]?.['reason'])}`,
   );
+  assert.deepEqual(
+    deliveries.map((d) => d['delivered']),
+    [true, false],
+    `and the identical one after it is refused rather than repeated: ${JSON.stringify(deliveries.map((d) => d['reason']))}`,
+  );
+  assert.match(
+    String(deliveries[1]?.['reason']),
+    /already delivered in this session/,
+    'the refusal names the guard that refused it, rather than blaming the harness',
+  );
+  assert.equal(deliveries[1]?.['messagesBefore'], 1, 'the step was still read and still reported');
+  assert.equal(deliveries[1]?.['assembled'], true, 'and it was assembled: the refusal is about the repeat, not the walk');
   const record = records.find((r) => r['type'] === 'assembly') as Record<string, unknown>;
   assert.equal(record['schema'], 1);
   assert.equal(record['seq'], 0, 'the first observed step starts the observation sequence');
@@ -442,6 +614,61 @@ test('an unknown observation value falls back to the default and is reported', a
   assert.ok(h.warns.some((w) => w.includes('observation must be')), 'the typo is reported');
   const status = commandPayload(h.commands.get('s1')?.({})) as { observation: { mode: string } };
   assert.equal(status.observation.mode, 'log', 'the default is kept, fail-safe');
+});
+
+/**
+ * F10: the tape line carried the *previous* step's session id.
+ *
+ * `stats.sessionId = sessionId` sat with the other `stats` writes, after `opts.emit(...)` and therefore after the
+ * tape callback, so the first line of a session was written with the initial `'unassigned'` and every later line
+ * with the id of the step before it. Round `20261002-2037`'s own tape shows it: line 1 `"sessionId":"unassigned"`,
+ * the other 276 the real id. It matters beyond cosmetics because `noteSessionEvent` uses `stats.sessionId` as the
+ * fallback when a session-event envelope carries none (envelopes are `{type, seq, time, data, surfaceOp}`) and
+ * `graphFor` keys the per-session graph on it - so a content event arriving before the first assembled step would
+ * be folded into a shared `'unassigned'` graph, which is the cross-session leak `rg-session-isolation.test.ts`
+ * exists to prevent.
+ *
+ * The fixture is the *ingest-only* path on purpose, because that is where the ordering is load-bearing: a step
+ * whose decision is empty still writes its tape line, still reads the payload, and never reaches the assembled
+ * branch where the assignment used to live.
+ */
+test('the tape line for a step carries that step\'s session, including on an ingest-only step', async () => {
+  const records: unknown[] = [];
+  const observer = observerWith(records);
+  const tape: { sessionId: string; step: number; messages: number }[] = [];
+  const emitting = createStepObserver({
+    policy: defaultPolicy(),
+    emit: (event) => records.push(event),
+    now: () => 1_790_000_000_000,
+    contextWindow: 128_000,
+    reserveOutputTokens: 8_000,
+    fixedOverheadTokens: 1_200,
+    lambdaMs: 36 * 60 * 60 * 1000,
+    onTape: (step, messages, _prompt, sessionId) => tape.push({ sessionId, step, messages: messages.length }),
+  });
+  const { middleware } = preStep(
+    emitting,
+  );
+
+  // Step 1: an ingest-only step (the decision carries no messages), on a page that names its session.
+  const payload = { messages: MESSAGES, step: 1, agent: { session: { id: 'session-441e3bc3' } } };
+  await middleware(payload, async () => ({ kind: 'accept', messages: [] as unknown[] }));
+
+  assert.equal(tape.length, 1, 'the tape line is written on the ingest-only path too - that is the design');
+  assert.deepEqual(
+    tape[0],
+    { sessionId: 'session-441e3bc3', step: 1, messages: MESSAGES.length },
+    'and it names the session the step belongs to, not the previous one and not `unassigned`',
+  );
+  // The two readings agree, which is the property the off-by-one statement broke: the tape is written with the id
+  // the counters already hold, so a later reader cannot get a different answer from `/s1` than from the tape.
+  assert.equal(emitting.stats().sessionId, 'session-441e3bc3');
+
+  // A second step from a different session, to prove the id is read per step rather than latched at activation.
+  const other = { messages: MESSAGES, step: 1, agent: { session: { id: 'session-9f2c' } } };
+  await middleware(other, async () => ({ kind: 'accept', messages: [] as unknown[] }));
+  assert.equal(tape[1]?.sessionId, 'session-9f2c', 'the next session is named on its own first line');
+  assert.equal(emitting.stats().sessionId, 'session-9f2c');
 });
 
 // --- N1 / N2 (2026-09-28): the pinned block gets the real system prompt, upkeep leaves the critical path ---

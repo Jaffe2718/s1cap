@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { defaultPolicy } from '../src/types.ts';
-import { KNOWN_PATHS, NUMBER_RULES, validatePolicy } from '../src/config.ts';
+import { ENUM_RULES, KNOWN_PATHS, NUMBER_RULES, UNENFORCED_KNOBS, validatePolicy } from '../src/config.ts';
 
 test('no config means the defaults, and every documented path exists on the policy', () => {
   const result = validatePolicy(undefined);
@@ -150,6 +150,72 @@ test('enums, booleans and strings are checked', () => {
   assert.equal(validatePolicy({ s1: { baseUrl: '', model: '' } }).ok, true, 'empty string means "not set"');
 });
 
+/**
+ * Tier-1 `embed` named a mode the build does not have, and it was accepted as if it did.
+ *
+ * C2's preset carried it, `defaultPolicy()` carried it, and the only read of the field anywhere in the
+ * implementation was `!== 'off'` (`packages/core/src/assembler.ts`) - so the value composed, appeared in every
+ * dump, and selected through the System-1 backend while the recipe named an embedder. The fix is not "name the
+ * value differently somewhere else": it is that the *config* must not be able to state a mode that does not run.
+ * The rejection therefore has to be an error, and it has to say why - which is what keeps it from being reverted
+ * to a warning the day someone adds the value back to the enum by reflex.
+ */
+test('tier-1 "embed" is rejected with its own reason, not read as "not off"', () => {
+  const legacy = validatePolicy({ recall: { tier1: 'embed' } });
+  assert.equal(legacy.ok, false, 'a mode with no implementation is not a legal value');
+  const error = legacy.errors.find((i) => i.path === 'recall.tier1');
+  assert.notEqual(error, undefined, `the path must be named: ${JSON.stringify(legacy.issues)}`);
+  assert.match(error?.message ?? '', /not implemented/, 'the message says the mode is missing');
+  assert.match(error?.message ?? '', /no embedder or ANN index exists/, 'and what is missing, concretely');
+  assert.match(error?.message ?? '', /!== "off"/, 'and the read that made it look alive');
+  assert.match(error?.message ?? '', /"s1"/, 'and names the value that runs instead');
+  // Fail-safe, as everywhere in this file: reported, and the cell's own value is kept - for C2 that is now `s1`,
+  // so a legacy profile runs the tier its cell names rather than the one it asked for.
+  assert.equal(legacy.policy.recall.tier1, 's1', 'C2 is the base policy and C2 selects with s1');
+  assert.equal(validatePolicy({ cell: 'C1', recall: { tier1: 'embed' } }).policy.recall.tier1, 'off', 'a control arm falls back to its own value');
+  // The generic enum path still exists for genuinely unknown strings, and the legacy sentence is not printed for
+  // them: "not a value I know" and "a mode I do not implement" are different facts.
+  const unknown = validatePolicy({ recall: { tier1: 'ann' } });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.errors[0]?.message ?? '', /must be one of s1 \| off/);
+  assert.equal(/not implemented/.test(unknown.errors[0]?.message ?? ''), false);
+  // And the values that do exist are accepted, applied, and silent.
+  for (const value of ['s1', 'off'] as const) {
+    const accepted = validatePolicy({ recall: { tier1: value } });
+    assert.equal(accepted.ok, true, `${value} is implemented and must be accepted`);
+    assert.equal(accepted.policy.recall.tier1, value, `${value} is applied`);
+    assert.deepEqual(accepted.warnings, [], `${value} is not a warning: it is the mode that runs`);
+  }
+});
+
+/**
+ * `recall.embedModel` is the embed mode's model name, and nothing loads a model for it.
+ *
+ * It is the residue of the mode F2 removed: the field composes, is dumped with the policy, and has no reader. It
+ * is warned about rather than deleted, because deleting a config path is its own decision and because a warning
+ * is what makes an inert knob visible from a run instead of from a grep - the treatment `planGate`'s leftover key
+ * got. The empty string stays silent: `cordis.patch.yml` ships `""`, and every `STRING_PATHS` entry documents
+ * that as "not set".
+ */
+test('a non-empty recall.embedModel is reported as having no reader, and "" stays silent', () => {
+  const named = validatePolicy({ recall: { embedModel: 'bge-small-en' } });
+  assert.equal(named.ok, true, 'a knob with no reader is not a session-breaking error');
+  const warning = named.warnings.find((i) => i.path === 'recall.embedModel');
+  assert.notEqual(warning, undefined, `the inert key must be named: ${JSON.stringify(named.issues)}`);
+  assert.match(warning?.message ?? '', /no reader/);
+  assert.match(warning?.message ?? '', /not implemented/, 'and why it has none');
+  assert.match(warning?.message ?? '', /"bge-small-en"/, 'and which value is being ignored');
+  assert.equal(named.policy.recall.embedModel, 'bge-small-en', 'the value is kept: the warning is advice, not a correction');
+
+  for (const empty of ['', undefined]) {
+    const quiet = validatePolicy(empty === undefined ? {} : { recall: { embedModel: empty } });
+    assert.equal(quiet.ok, true);
+    assert.deepEqual(quiet.warnings, [], `${JSON.stringify(empty)} means "not set" and says nothing`);
+  }
+  // It is still a declared path, so a profile can round-trip it without being told it is a typo.
+  assert.equal(KNOWN_PATHS.includes('recall.embedModel'), true, 'the inert field stays a known path, not an unknown key');
+});
+
 test('unknown keys warn instead of failing, and plugin keys can be declared', () => {
   const warned = validatePolicy({ recoll: { threshold: 0.5 } });
   assert.equal(warned.ok, true);
@@ -170,13 +236,15 @@ test('non-object config is an error, and the rule tables stay coherent', () => {
 });
 
 test('recall selection without the state proxy warns: that pairing measured worse than the baseline, per step', () => {
-  // The pairing is `tas.on: false` with `recall.tier1: 'embed'`, and no cell selects it - the arm that did was
-  // dropped - so reaching it now takes two explicit knobs. That is exactly why it needs a warning rather than a
-  // paragraph in a run report: a combination no preset chooses is one a profile must not choose by accident.
+  // The pairing is `tas.on: false` with recall selection on (`recall.tier1: 's1'` - the only selecting value since
+  // 2026-10-02; it used to be spelled `'embed'`, which named a mode nothing implements), and no cell selects it -
+  // the arm that did was dropped - so reaching it now takes two explicit knobs. That is exactly why it needs a
+  // warning rather than a paragraph in a run report: a combination no preset chooses is one a profile must not
+  // choose by accident.
   // Measured in round `20261001-1300`, per step: 3 625 uncached input tokens against the baseline's 2 595,
   // 2 574 output tokens against 1 523, and a 79.2% cache hit rate against 86.7%; TAS on with recall off (cell C1)
   // measured 1 783 uncached input tokens and 1 493 output tokens per step.
-  const pairing = validatePolicy({ tas: { on: false }, recall: { tier1: 'embed' } });
+  const pairing = validatePolicy({ tas: { on: false }, recall: { tier1: 's1' } });
   assert.equal(pairing.ok, true, 'a warning and never an error: a session must not fail over a combination');
   const warning = pairing.warnings.find((issue) => issue.path === 'recall.tier1');
   assert.notEqual(warning, undefined, `the pairing must be reported: ${JSON.stringify(pairing.issues)}`);
@@ -198,7 +266,7 @@ test('recall selection without the state proxy warns: that pairing measured wors
   // statement about a price list, and the three token types carry three prices that differ by model and provider.
   assert.equal(/\$|USD|bill|cost|price/i.test(warning.message), false, `no currency or price scalar: ${warning.message}`);
   assert.equal(pairing.policy.tas.on, false, 'and nothing is changed: the warning is advice, not a correction');
-  assert.equal(pairing.policy.recall.tier1, 'embed', 'the configured tier is kept as written');
+  assert.equal(pairing.policy.recall.tier1, 's1', 'the configured tier is kept as written');
 
   // Absent in all three cells, and it is the *pairing* that decides - not "S1CAP is on" and not the cell
   // name. A rule written against the cell would be a rule about a preset rather than about the mechanism.
@@ -208,7 +276,7 @@ test('recall selection without the state proxy warns: that pairing measured wors
 
   // And it follows the effective policy, so an override creates or removes it wherever the value came from.
   assert.deepEqual(
-    validatePolicy({ tas: { on: true }, recall: { tier1: 'embed' } }).warnings,
+    validatePolicy({ tas: { on: true }, recall: { tier1: 's1' } }).warnings,
     [],
     'turning the stabiliser on fixes the pairing',
   );
@@ -227,4 +295,76 @@ test('recall selection without the state proxy warns: that pairing measured wors
     [],
     'while the same recall tier inside a cell that keeps tas.on is the pairing this warning is not about',
   );
+});
+
+/**
+ * F6: the unenforced knobs are a registry, and the registry is checked against the declarations.
+ *
+ * The finding is "a knob that composes and does nothing": `assemblyDeadlineMs` (nothing enforces a deadline),
+ * `cache.reselectPolicy` / `cache.blockTokens` (no caller for `decideReselect` / `alignToCacheBlocks`),
+ * `rgMaintenance.maxLagTurns` (compared against a count of pending *events* and acted on by nothing) and
+ * `recall.embedModel` (the model name of an unimplemented tier, read by nothing). Three of them survived the pass
+ * that deleted the plan gate, because that removal was swept for in the presets, the schema and the report and
+ * nothing swept for the rest - so the sweep is mechanical now: this test fails when the two sets drift apart, in
+ * either direction.
+ */
+test('every declared knob is either enforced or in the unenforced registry', () => {
+  const declared = new Set<string>([
+    ...NUMBER_RULES.map((r) => r.path),
+    ...ENUM_RULES.map((r) => r.path),
+    ...KNOWN_PATHS,
+  ]);
+  const registered = Object.keys(UNENFORCED_KNOBS);
+
+  for (const path of registered) {
+    assert.ok(declared.has(path), `UNENFORCED_KNOBS names "${path}", which is not a declared policy path`);
+    // Every entry has to resolve on the policy, or it is documenting a field that does not exist.
+    let cursor: unknown = defaultPolicy();
+    for (const part of path.split('.')) {
+      assert.equal(typeof cursor, 'object', `unenforced path ${path} breaks at ${part}`);
+      cursor = (cursor as Record<string, unknown>)[part];
+    }
+    assert.notEqual(cursor, undefined, `unenforced path ${path} is registered but missing from the policy`);
+  }
+
+  // The closed set, stated rather than inferred: a sixth entry is a change to what this build claims, and it has
+  // to be made here on purpose. Removing an entry means the knob is enforced now, which is a stronger claim and
+  // needs its own test - `recall.tier1` is the worked example: it was `embed | s1 | off` with `embed` inert, and
+  // the fix was to remove the value rather than to document it (`LEGACY_TIER1` rejects it, and the union is now
+  // `off | s1`), so it left this registry.
+  assert.deepEqual(
+    registered.sort(),
+    [
+      'assemblyDeadlineMs',
+      'cache.blockTokens',
+      'cache.reselectPolicy',
+      'recall.embedModel',
+      'rgMaintenance.maxLagTurns',
+    ],
+    'the knobs this build accepts and does not enforce - adding one, or enforcing one, is a deliberate edit here',
+  );
+
+  // Each entry has to say what it claims and what would make the claim true: a registry of bare names would repeat
+  // the defect it exists to remove, which is an unenforced knob nobody can name.
+  for (const [path, entry] of Object.entries(UNENFORCED_KNOBS)) {
+    assert.equal(entry.enforced, false, `${path}: this registry holds unenforced knobs only`);
+    assert.ok(entry.claims.length > 20, `${path}: the entry names what the knob claims`);
+    assert.ok(entry.wouldNeed.length > 20, `${path}: and what it would take to enforce it`);
+  }
+});
+
+test('a profile that names a knob this build does not enforce is still accepted, and the value survives', () => {
+  // The registry marks the knobs; it does not reject them. A cell recipe that carries one has to keep running - the
+  // alternative is a session that fails over a legal setting - and the resolved value is what `/s1` and the wiring
+  // record print, so the reader can see which values were in force.
+  const result = validatePolicy({
+    assemblyDeadlineMs: 400,
+    cache: { reselectPolicy: 'threshold', blockTokens: 128 },
+    rgMaintenance: { mode: 'async', maxLagTurns: 5 },
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.policy.assemblyDeadlineMs, 400, 'the value is applied even though nothing enforces it');
+  assert.equal(result.policy.cache.reselectPolicy, 'threshold');
+  assert.equal(result.policy.cache.blockTokens, 128);
+  assert.equal(result.policy.rgMaintenance.maxLagTurns, 5);
 });

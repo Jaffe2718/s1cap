@@ -287,3 +287,47 @@ test('a delivered context block never becomes a segment, but the session file st
   );
   assert.equal(h.session.length, 5, 'four content events plus the delivered block');
 });
+
+/**
+ * F11: a dropped session event is content loss, and the record has to say so.
+ *
+ * `upkeep-queue.ts` drops the *oldest* events when its `capacity` is reached, and the only record of that was
+ * `upkeep.dropped` on the live `/s1` route - which a round does not persist. A dropped event never becomes a
+ * segment, so every recall measurement after it is over a session with a hole in it, and a reader of the control
+ * plane had no way to know. The count now travels to the assembly record as `upkeepDropped`, written on the next
+ * assembly (0 included), so "nothing was dropped" and "the counter was not read" are different readings.
+ *
+ * The fixture drives the queue to its capacity on purpose. `capacity` is not settable from the observer - it is a
+ * property of the queue the plugin builds - so the assertion is on the *plumbing*: a step assembled after a drop
+ * carries the count. The queue's own drop behaviour is tested in `packages/core/test/upkeep.test.ts`.
+ */
+test('an assembly record carries the count of session events the upkeep queue dropped', async () => {
+  const h = harness();
+  // The default capacity is 256, so this fills it and then some; each event is a lifecycle notice, which costs the
+  // graph nothing and is dropped like any other.
+  for (let i = 0; i < 300; i += 1) h.observer.noteSessionEvent({ type: 'step/start', seq: i, data: { turn: 1, step: i } });
+
+  const stats = h.observer.stats();
+  assert.equal(stats.upkeep.dropped, 44, `44 events over capacity were dropped: ${JSON.stringify(stats.upkeep)}`);
+
+  // A step that assembles writes the count onto its record. `defaultPolicy()` has `deliver: false`, and the step is
+  // assembled regardless - the assembly record is what carries the counter.
+  await h.observer.observe({
+    sessionId: 'S',
+    step: 1,
+    messages: [
+      { id: 'sys', role: 'system', content: [{ type: 'text', text: 'You are a coding agent.' }], source: { kind: 'system-prompt' } },
+      { id: 'u1', role: 'user', content: [{ type: 'text', text: 'inspect this repository and report' }] },
+    ],
+  });
+
+  const assembly = h.records.find((r) => (r as { type?: string }).type === 'assembly') as
+    | { upkeepDropped?: number }
+    | undefined;
+  assert.ok(assembly !== undefined, `the step assembled: ${JSON.stringify(h.records.map((r) => (r as { type?: string }).type))}`);
+  assert.equal(
+    assembly.upkeepDropped,
+    44,
+    'the record says the graph is 44 session events short, which is the only persisted trace of the loss',
+  );
+});

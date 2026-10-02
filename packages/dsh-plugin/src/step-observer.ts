@@ -240,6 +240,57 @@ export interface StepObserver {
  */
 const ANCHOR_MISMATCH_LINES = 4;
 
+/** The four readings the bounded anchor wait can end on. See `anchorWaitLine` for what each one means. */
+export type AnchorWaitOutcome = 'completed' | 'gave-up' | 'not-started';
+
+/**
+ * The one diagnostic line a bounded anchor wait writes, and the sentence that goes with it.
+ *
+ * Split out of `createStepObserver` and exported so the *success* branch can be tested at all. It is the branch
+ * that was missing - the first version wrote a line only when the fail-open rule was about to admit unjudged pairs,
+ * so every wait that won was silent and the mechanism's effectiveness could not be measured from a round's
+ * artifacts, only its failures. Driving that branch through a real observer needs a scoring call that returns
+ * while the wait is inside a `drain()`, which a unit fixture cannot produce (the drain is synchronous and the row
+ * is read in the same tick); the record it writes is a pure function of five values, so it is tested as one, and
+ * the integration tests around it cover the three branches that *are* reachable from the loop.
+ *
+ * `step` is the number the wait was for, which the line never carried: a tape of `anchor-wait` lines with no step
+ * cannot be joined to the assembly records the waits explain.
+ */
+export function anchorWaitLine(
+  outcome: AnchorWaitOutcome,
+  step: number,
+  waitMs: number,
+  polls: number,
+  unknown: number,
+): { line: Record<string, unknown>; message: string } {
+  const waited = outcome !== 'not-started';
+  return {
+    line: {
+      schema: 0,
+      kind: 'anchor-wait',
+      step,
+      ms: waitMs,
+      polls,
+      unknown,
+      waited,
+      gaveUp: !waited || outcome === 'gave-up',
+      outcome,
+    },
+    message:
+      unknown === 0
+        ? // The wait did its job. Worth a line and not worth a warning: nothing is wrong, and the number that
+          // matters is `polls` - how many drains it took to get the anchor's row judged.
+          `[s1cap] anchor wait completed after ${waitMs}ms (${polls} drain(s)): the anchor's row is judged, ` +
+          'so the fail-open rule admits nothing on this step'
+        : waited
+          ? `[s1cap] anchor wait gave up after ${waitMs}ms (${polls} drain(s)): ` +
+            `${unknown} pair(s) inside the window still unjudged; the fail-open rule admits them`
+          : `[s1cap] anchor wait not started (${waitMs}ms available): nothing queued and no scoring call in flight, ` +
+            `so the anchor's own row cannot be completed by waiting; the fail-open rule admits its ${unknown} pair(s)`,
+  };
+}
+
 function readMessages(payload: unknown): readonly unknown[] | undefined {  if (typeof payload !== 'object' || payload === null) return undefined;
   const messages = (payload as { messages?: unknown }).messages;
   return Array.isArray(messages) ? messages : undefined;
@@ -369,41 +420,58 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
   // `anchorWaitMs` against a fixture that can never finish scoring.
   const sleep = opts.sleep ?? ((): Promise<void> => Promise.resolve());
 
-  // The bounded anchor wait (`recall.anchorWaitMs`): at most one diagnostic line per step, and only when the wait
-  // gave up with pairs still unjudged. The poll count is what makes a stuck wait legible - a line per poll would be
-  // hundreds of lines for one slow backend, and no line at all would leave `unknownAdmitted` in the record with
-  // nothing explaining it.
-  // The bounded anchor wait (`recall.anchorWaitMs`): at most one diagnostic line per step, and only when pairs are
-  // about to be admitted unjudged. The poll count is what makes a stuck wait legible - a line per poll would be
-  // hundreds of lines for one slow backend, and no line at all would leave `unknownAdmitted` in the record with
-  // nothing explaining it.
+  // The bounded anchor wait (`recall.anchorWaitMs`): at most one diagnostic line per step, and **one line per
+  // outcome, successes included**.
   //
-  // Two outcomes reach this function and the record distinguishes them, because they are not the same event and
-  // used to be written identically. `waited` is the wait that ran and lost: polling happened and the deadline or
-  // the poll ceiling arrived with the row still incomplete. `not-started` is the wait that was never worth taking:
-  // nothing was queued and no scoring call was in flight, so no amount of time could have completed the row. The
-  // tape from a real round carries `{ms:10000, polls:0, unknown:2}` - a line that reads as a completed wait with
-  // no polls, which is the one thing it cannot be - and the step proceeded down the fail-open path with nothing
-  // saying that the fail-open path is what happened. `gaveUp` states the outcome for a reader with no code in
-  // front of them, and it is true in both cases: the pairs were admitted unjudged either way.
+  // The first version wrote a line only when the fail-open rule was about to admit unjudged pairs - the stand-down
+  // and the give-up - so every wait that *succeeded* was silent, and the mechanism's effectiveness could not be
+  // measured from a tape at all: only its failures were on record. The measured round shows what that costs. Its
+  // tape holds exactly one `anchor-wait` line, `{ms:10000, polls:0, unknown:2}`, written before the first step
+  // tape line: the stand-down branch, on step 1, out of 277 steps. `recall.anchorWaitMs: 10000` therefore never
+  // polled once in the whole round, and nothing on the tape could say whether it ever would have - "the wait ran
+  // and cleared the row after N drains" is the number that decides whether the knob is worth its place, and it was
+  // unobtainable.
+  //
+  // The poll count is what makes a stuck wait legible - a line per poll would be hundreds of lines for one slow
+  // backend - and no line at all would leave `unknownAdmitted` in the record with nothing explaining it.
+  //
+  // Three outcomes reach the *loop* and the record distinguishes all three, because they are not the same event
+  // and used to be written identically. `waited` is the wait that ran and lost: polling happened and the deadline
+  // or the poll ceiling arrived with the row still incomplete. `not-started` is the wait that was never worth
+  // taking: nothing was queued and no scoring call was in flight, so no amount of time could have completed the
+  // row. `completed` is the wait that ran and won - the row is judged by the backend and the fail-open rule has
+  // nothing to admit. The tape from a real round carries `{ms:10000, polls:0, unknown:2}` - a line that reads as a
+  // completed wait with no polls, which is the one thing it cannot be - and the step proceeded down the fail-open
+  // path with nothing saying that the fail-open path is what happened. `gaveUp` states the outcome for a reader
+  // with no code in front of them, and `step` says which step it was about, which the probe line never carried.
+  //
+  // The fourth outcome - the anchor's row was already judged when the wait was called, i.e. `unknownBefore === 0`
+  // - stays silent, and that is deliberate rather than an omission: it is the ordinary case (one `indexOf` plus a
+  // map lookup, and it returns before any poll), and a line per step for it would bury the outcomes that are worth
+  // reading. A round whose wait never had anything to do therefore shows *no* `anchor-wait` lines at all, which is
+  // itself the reading: the knob was never exercised.
+  //
+  // The line and its sentence are built by `anchorWaitLine` above, so the success text is covered by a test rather
+  // than by a fixture that cannot reach it.
   const reportAnchorWait = (
     probe: (line: Record<string, unknown>) => void,
+    step: number,
+    outcome: AnchorWaitOutcome,
     waitMs: number,
     polls: number,
     unknown: number,
-    waited: boolean,
   ): void => {
-    probe({ schema: 0, kind: 'anchor-wait', ms: waitMs, polls, unknown, waited, gaveUp: true });
-    opts.onWarn?.(
-      waited
-        ? `[s1cap] anchor wait gave up after ${waitMs}ms (${polls} drain(s)): ` +
-          `${unknown} pair(s) inside the window still unjudged; the fail-open rule admits them`
-        : `[s1cap] anchor wait not started (${waitMs}ms available): nothing queued and no scoring call in flight, ` +
-          `so the anchor's own row cannot be completed by waiting; the fail-open rule admits its ${unknown} pair(s)`,
-    );
+    const { line, message } = anchorWaitLine(outcome, step, waitMs, polls, unknown);
+    probe(line);
+    opts.onWarn?.(message);
   };
 
-  const waitForAnchorRow = async (probe: (line: Record<string, unknown>) => void, sessionId: string, anchorId: string): Promise<void> => {
+  const waitForAnchorRow = async (
+    probe: (line: Record<string, unknown>) => void,
+    step: number,
+    sessionId: string,
+    anchorId: string,
+  ): Promise<void> => {
     const waitMs = opts.policy.recall.anchorWaitMs;
     // `0`, or anything below it, disables the wait: the panel sets this, and a researcher turning it off must get
     // the step's own timing back rather than a small wait. Nothing is admitted on this path either - the fail-open
@@ -426,7 +494,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     // line is still written - the fail-open rule is about to admit these pairs, and the record has to say so - with
     // `waited: false`, which is what makes it distinguishable from a wait that ran out of time.
     if (queue.stats().pending === 0 && scoringInFlight === 0) {
-      reportAnchorWait(probe, waitMs, 0, unknownBefore, false);
+      reportAnchorWait(probe, step, 'not-started', waitMs, 0, unknownBefore);
       return;
     }
     const deadline = opts.now() + waitMs;
@@ -444,7 +512,12 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       polls += 1;
       // Re-read after the drain, because the row may have completed inside it.
       unknown = graph.unjudgedWithin(anchorId, opts.policy.recall.window).length;
-      if (unknown === 0) return;
+      // The success is an outcome and belongs on the tape: without this line the only waits anyone can count are
+      // the ones that failed, so "the wait works" was unfalsifiable from a round's own artifacts.
+      if (unknown === 0) {
+        reportAnchorWait(probe, step, 'completed', waitMs, polls, 0);
+        return;
+      }
       // The deadline is tested *before* the sleep, not after it, so that the row is re-read between the last sleep
       // and giving up. The first version tested it after the sleep and broke straight out of the loop, which made the
       // sleep the final act: work completed during it was thrown away and the diagnostic below reported a remainder
@@ -455,7 +528,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
     }
     // Giving up is not a failure: assembly carries on, and the pairs it could not wait for are counted as
     // `unknownAdmitted`. The wait makes the fail-open rule rarer; it does not replace it.
-    reportAnchorWait(probe, waitMs, polls, unknown, true);
+    reportAnchorWait(probe, step, 'gave-up', waitMs, polls, unknown);
   };
 
   // How many upkeep scoring calls are in flight right now.
@@ -618,6 +691,20 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
       const started = opts.now();
       try {
         const sessionId = readSessionId(payload, opts.sessionId ?? 'unassigned');
+        // Assigned *here*, before anything that reads it, and that placement is the whole of this fix (F10). It
+        // used to sit with the other `stats` writes after `opts.emit(...)`, i.e. after the tape line below - so
+        // the tape carried the *previous* step's session id and the first line of a session carried
+        // `'unassigned'`. The round's own tape shows it: line 1 `"sessionId":"unassigned"`, the other 276 the real
+        // id. It matters beyond cosmetics because `noteSessionEvent` uses `stats.sessionId` as the fallback when
+        // an event envelope carries none (envelopes are `{type, seq, time, data, surfaceOp}`) and `graphFor` keys
+        // the per-session graph on it - so a content event arriving before the first assembled step would be
+        // folded into a shared `'unassigned'` graph, which is the cross-session leak `rg-session-isolation.test.ts`
+        // exists to prevent. `stats.sessionId` is also what `/s1` reports.
+        stats.sessionId = sessionId;
+        // The step number, read once and in scope for the whole call. The anchor wait's probe line needs it and
+        // the wait runs inside `observeStep`, so it travels through the callback below rather than being re-read
+        // from a payload the callback does not have.
+        const step = readStep(payload);
         // The step path reads the graph and adds to it, but it does not score: scoring is upkeep's job, and the
         // graph scores each segment only once. A step that scored here would do it with the local lexical scorer
         // and leave upkeep nothing to ask the System-1 backend about, which is how a session ended up with a
@@ -625,7 +712,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         const observation = await observeStep({
           sessionId,
           scoreOnStepPath: false,
-          step: readStep(payload),
+          step,
           seq,
           messages,
           systemPrompt,
@@ -636,6 +723,11 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           fixedOverheadTokens: opts.fixedOverheadTokens,
           lambdaMs: opts.lambdaMs,
           graph: graphFor(sessionId),
+          // A dropped session event is content the graph will never hold, so the count travels to the record
+          // instead of living only on `/s1`: `upkeep.dropped` is a number a round does not persist, and a recall
+          // measurement over a session with an unnoticed hole in it is the kind of wrong number this pass exists
+          // to remove.
+          upkeepDropped: queue.stats().dropped,
           // The decision carried no messages, so the caller asked for the read and not for the view. This reaches
           // `observeStep`, which stops after the graph write, and it is the whole fix for a lane that measured
           // 1,205,029 recalled tokens assembled against 1,597 delivered.
@@ -656,7 +748,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
           // The anchor id is computed inside `observeStep` and the queue that drains scoring lives here, so the wait
           // has to travel back out as a callback. It is called after the anchor is chosen and before `assemble()`,
           // and it never throws: a wait that gave up is reported and the fail-open rule covers the rest.
-          beforeAssemble: (anchorId: string) => waitForAnchorRow(writeProbe, sessionId, anchorId),
+          beforeAssemble: (anchorId: string) => waitForAnchorRow(writeProbe, step, sessionId, anchorId),
           // One slot for the whole observer, so T survives between steps. It is created here rather than inside
           // observeStep because that function is pure: a per-call cache would rebuild T every step, and T's
           // stability across steps is the property the whole block placement rests on.
@@ -673,7 +765,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         // The tape is written first, on purpose: it records what the harness actually sent, and that is worth
         // most exactly when the adapter could make no sense of it. Skipping it for empty steps would delete the
         // only evidence of the shape we do not understand yet.
-        opts.onTape?.(readStep(payload), messages, systemPrompt, sessionId);
+        opts.onTape?.(step, messages, systemPrompt, sessionId);
         // Read, and deliberately not assembled: the caller said this step cannot receive context. Reported once
         // per step through `ingestOnly` and never as an error - a skip is the lane working as designed, and the
         // only thing that would make it a defect is the caller getting the condition wrong.
@@ -698,13 +790,15 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         // log exactly one record (the primer's) while looking perfectly healthy.
         if (observation.kind === 'empty') {
           stats.empty += 1;
-          opts.onWarn?.(`[s1cap] step ${readStep(payload)} observed nothing: ${observation.reason}`);
+          opts.onWarn?.(`[s1cap] step ${step} observed nothing: ${observation.reason}`);
           return undefined;
         }
         opts.emit(observation.event);
 
         stats.observed += 1;
-        stats.sessionId = sessionId;
+        // `stats.sessionId` is no longer assigned here: it is set at the top of this call, before the tape line,
+        // which is the fix for the round whose first tape line read `"sessionId":"unassigned"` (F10). Assigning it
+        // twice would also be a second thing to keep in step, so the one assignment stands.
         stats.lastWouldSaveTokens = observation.wouldSaveTokens;
         stats.lastSelected = observation.event.selected;
         stats.lastCandidates = observation.event.candidates;
@@ -718,7 +812,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         }
 
         opts.onObserved?.(
-          `step ${readStep(payload)}: ${observation.segments.length} segments, ` +
+          `step ${step}: ${observation.segments.length} segments, ` +
             `${observation.event.selected} recalled of ${observation.event.candidates} candidates, ` +
             `${observation.wouldSaveTokens} tokens below the full history, ${elapsed}ms`,
         );

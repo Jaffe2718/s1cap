@@ -13,8 +13,6 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
 
 import { AssociationGraph, S1_DEFERRED } from '@s1cap/core';
 import type { Segment } from '@s1cap/core';
@@ -29,9 +27,20 @@ import { createS1Relevance } from '../src/s1-relevance.ts';
  * `main`), while a relative `../s1-client/src/index.ts` would be a second copy of the class. `instanceof` across two
  * copies is false, so a refusal built from the wrong one is classified as "not retryable" and the scorer degrades
  * to the lexical fallback - which is a wrong answer about the code, produced by the test's own import.
+ *
+ * The path is built the same way the source's import resolves, and *not* through `createRequire`'s own package
+ * lookup, because the two can disagree by design: `typescript` is not installed here, so a run may load the
+ * packages through a resolve hook (a sandbox that refuses the build's write into `lib/`, for instance), and a
+ * `require` that ignores the hook would then hand this fixture the *other* copy - the exact failure the paragraph
+ * above describes, arriving from the test harness instead of from the code under test.
  */
-const require = createRequire(new URL('../src/s1-relevance.ts', import.meta.url));
-const client = (await import(pathToFileURL(require.resolve('@s1cap/s1-client')).href)) as {
+const SCRATCH_LIB = process.env['S1CAP_SCRATCH_LIB'];
+const clientEntry =
+  SCRATCH_LIB === undefined || SCRATCH_LIB === ''
+    ? // No override: the ordinary case. Resolve `lib/` beside `src/`, which is what the scorer's own import does.
+      new URL('../../s1-client/lib/index.js', import.meta.url).href
+    : `file:///${`${SCRATCH_LIB}/s1-client/index.js`.replace(/\\/g, '/')}`;
+const client = (await import(clientEntry)) as {
   S1HttpError: new (status: number, message: string, retryAfterMs?: number) => Error;
 };
 const { S1HttpError } = client;
@@ -378,4 +387,116 @@ test('a request that is never sent hands its slot back through recordLeak, not t
   assert.equal(stats.slotsLeaked, 1, 'the slot came back and said why');
   assert.equal(stats.inFlight, 0, 'so the cap is intact');
   assert.equal(bp.tryAcquire().ok, true, 'and the next window can be admitted');
+});
+
+/**
+ * F8: a request that came back with no answer is not a success.
+ *
+ * `recordSuccess()` used to be called for every failure that was not a retryable HTTP status - a transport
+ * timeout, a `TypeError: fetch failed`, a cancellation, an unreadable reply. It is the counter that *closes* the
+ * breaker and clears the refusal streak (`recordSuccess` above), so a dead or timing-out backend read as healthy
+ * on `/s1` and the mechanism that exists to stop a cell hammering a saturated backend was blind to it. Round
+ * `20261002-2037` is the measurement: 67 `TypeError: fetch failed` beside 3 792 `503`s, and `isRetryable` does not
+ * retry the transport error - so with `retryAttempts: 2` a timing-out backend called `recordSuccess()` up to
+ * twice per window and the streak never survived.
+ *
+ * The assertion is in both directions, because a fix that counted everything as a transport failure would be
+ * wrong the other way: a 503 still has to open the breaker, and a real answer still has to close it.
+ */
+test('a transport failure is neither an answer nor a refusal: it releases the slot and leaves the breaker alone', async () => {
+  const bp = createBackpressure({ maxInFlight: 4, openAfterRefusals: 10 });
+  const relevance = createS1Relevance({
+    decide: async () => {
+      // What a dead backend actually raises: not an `S1HttpError`, so nothing about it is a retryable status and
+      // nothing about it is retryable at all (`isRetryable` returns false for an unclassified error).
+      throw new TypeError('fetch failed');
+    },
+    questionsPerCall: 2,
+    backpressure: bp,
+  });
+
+  const weights = await relevance(segment('c', 3), [segment('a', 1), segment('b', 2)]);
+  assert.equal(weights, undefined, 'an unreachable backend scores the window lexically');
+
+  const stats = bp.stats();
+  assert.equal(stats.ok, 0, 'a dead backend answered nothing, so it is not `ok`');
+  assert.equal(stats.refused, 0, 'and it refused nothing either: it said nothing at all');
+  assert.equal(stats.transportFailures, 1, 'it is counted, which is the whole point: the number did not exist');
+  assert.equal(stats.inFlight, 0, 'the slot came back');
+  assert.equal(stats.refusalStreak, 0, 'and no refusal was invented from a transport error');
+  assert.equal(stats.state, 'closed', 'the breaker is not opened by a failure that says nothing about load');
+  // The gate is not poisoned: the next window is admitted normally.
+  assert.deepEqual(bp.tryAcquire(), { ok: true }, 'the cap is intact, so the failure did not leak the slot');
+  bp.recordSuccess();
+});
+
+test('a reply the scorer cannot read is counted as a transport failure, not as an answer', async () => {
+  // The third way a request can come back without having answered, and the one the `S1CallEvent` schema already
+  // names (`ok: false`, "the scoring fell back to the lexical path"): the request is delivered, the backend
+  // replies, and there is no usable weight in the reply - a truncated body, a different answer shape, a `noul`
+  // head that emitted prose. The gate is charged for one request that produced no judgement, so it lands in
+  // `transportFailures` and not in `ok`, which is the field that closes the breaker. The limit is stated rather
+  // than hidden: this counter is per request, so it says "no usable answer came back", and the scorer's own
+  // `failures` counter is what says *which* reply was unusable.
+  const bp = createBackpressure({ maxInFlight: 4, openAfterRefusals: 10 });
+  const relevance = createS1Relevance({
+    decide: async () => ({ answers: {}, usage: { input_tokens: 5, output_tokens: 0 }, ms: 3 }),
+    questionsPerCall: 2,
+    backpressure: bp,
+  });
+
+  const weights = await relevance(segment('c', 3), [segment('a', 1), segment('b', 2)]);
+  assert.equal(weights, undefined, 'no usable weight means the whole window goes to the lexical scorer');
+  const stats = bp.stats();
+  assert.equal(stats.ok, 0, 'the backend did not answer this window, however healthy the socket was');
+  assert.equal(stats.transportFailures, 1, 'and the failure has a counter of its own');
+  assert.equal(stats.refused, 0, 'it is not a refusal: nothing said "not now"');
+  assert.equal(stats.inFlight, 0, 'the slot came back');
+});
+
+test('a backend that never answers never closes the breaker, and a real answer still does', async () => {
+  // The consequence in the terms the artifact uses. `openAfterRefusals: 2` and a window that first refuses twice
+  // (opening the breaker) then, after the cooldown, has its probe answered: the recovery has to be an *answer*.
+  // With the old accounting the transport failures in between would have closed it early, which is the reading
+  // this pins - `state` and `ok` are what `/s1` shows.
+  let now = 0;
+  const bp = createBackpressure({ maxInFlight: 2, openAfterRefusals: 2, windowMs: 60_000, cooldownMs: 1_000, now: () => now });
+
+  assert.deepEqual(bp.tryAcquire(), { ok: true });
+  bp.recordRefusal();
+  assert.deepEqual(bp.tryAcquire(), { ok: true });
+  bp.recordRefusal();
+  assert.equal(bp.stats().state, 'open', 'two refusals inside the window open the breaker');
+
+  // The cooldown elapses and the probe is admitted - then the transport dies on it. A dead probe is not a
+  // recovery: leaving the breaker in `probing` is what stops it degrading into a poll, because `tryAcquire()`
+  // admits nobody while a probe is outstanding, whatever the clock says.
+  now = 2_000;
+  assert.deepEqual(bp.tryAcquire(), { ok: true }, 'the cooldown admits exactly one probe');
+  bp.recordTransportFailure();
+  const afterProbe = bp.stats();
+  assert.equal(afterProbe.ok, 0, 'the probe was not an answer');
+  assert.equal(afterProbe.transportFailures, 1);
+  assert.notEqual(afterProbe.state, 'closed', 'so a dead probe must not close the breaker');
+  assert.deepEqual(
+    bp.tryAcquire(),
+    { ok: false, reason: 'breaker-open' },
+    'and the probe is not re-admitted while it is still outstanding',
+  );
+
+  // The other direction, and the one that has to keep working: the breaker is recovered by an *answer*, not by
+  // the clock. A gate that has opened is probed once per cooldown, and the probe that comes back with a reply
+  // closes it.
+  const gate = createBackpressure({ maxInFlight: 1, openAfterRefusals: 1, cooldownMs: 1_000, now: () => now });
+  now = 0;
+  assert.deepEqual(gate.tryAcquire(), { ok: true });
+  gate.recordRefusal();
+  assert.equal(gate.stats().state, 'open', 'one refusal is enough at `openAfterRefusals: 1`');
+  now = 2_000;
+  const admitted = gate.tryAcquire();
+  assert.deepEqual(admitted, { ok: true }, 'the cooldown admits the probe');
+  gate.recordSuccess();
+  assert.equal(gate.stats().state, 'closed', 'an answer closes it');
+  assert.equal(gate.stats().ok, 1, 'and `ok` counts exactly the answered request');
+  assert.equal(gate.stats().recovered, 1, 'and the recovery is reported as one');
 });

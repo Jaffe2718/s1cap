@@ -16,18 +16,21 @@ Authors: **Yuanming Chen** · **LI Changzhe** (citation form: `Chen, Yuanming an
 
 ## 1. GitHub About description — primary (257 chars)
 
-The ablation this names is the 2×2 crossing run as **three arms** (`C0`, `C1`, `C2`); the character count below is
-exact, so the design's name stays inside the paste text and the arm count is stated here.
+The ablation this names is the 2×2 crossing's run set of **three arms** (`C0`, `C1`, `C2`); the character count
+below is exact, so the paste text names the set that runs — three arms, not the four-arm crossing — and the arm
+count is stated here as well. The count is unchanged at **257**: the phrase that replaced the cross's name has the
+same length, so the paste text can be swapped in without re-measuring the field.
 
 ```
-Research artifact for S1CAP — System-1 decision models governing LLM agent context lifecycle: associative recall, Trace-as-State assembly, probability-ranked plan execution, prompt-cache-aware cost telemetry, 2x2 ablation suite. DSH plugin + portable proxy.
+Research artifact for S1CAP — System-1 decision models governing LLM agent context lifecycle: associative recall, Trace-as-State assembly, probability-ranked plan execution, prompt-cache-aware cost telemetry, three-arm ablation. DSH plugin + portable proxy.
 ```
 
 Paste path: repo home → **About** (gear icon) → *Description*.
 
 Why this one: leads with the honest framing (*Research artifact*), names the system, states the mechanism
 (associative recall · Trace-as-State assembly · plan ranking), and carries the evidence story
-(prompt-cache-aware telemetry · 2×2 ablation suite) plus the deliverable (DSH plugin + portable proxy).
+(prompt-cache-aware telemetry · the three-cell ablation suite — `C0` baseline, `C1` a second control arm, `C2` the
+arm under test, registered as `C0` vs `C2`) plus the deliverable (DSH plugin + portable proxy).
 
 ## 2. Alternates
 

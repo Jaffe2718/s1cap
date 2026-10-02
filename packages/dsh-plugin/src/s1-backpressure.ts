@@ -119,10 +119,27 @@ export interface BackpressureStats {
   attempts: number;
   /** requests actually handed to the client */
   sent: number;
-  /** requests the client answered */
+  /** requests the client **answered** - a real answer, and the only thing that closes the breaker */
   ok: number;
   /** requests the client refused (a retryable status) or could not deliver */
   refused: number;
+  /**
+   * Requests that failed without an answer: a transport timeout, an unreachable backend (`TypeError: fetch
+   * failed`), a cancellation, or a request that was sent and settled with no usable reply.
+   *
+   * Its own counter because all three of the alternatives lie about it. Counting them as `ok` - which is what the
+   * scorer did until this field existed - reports a dead backend as healthy, clears the refusal streak and closes
+   * the breaker, so the gate that exists to stop a cell hammering a saturated backend never opens for the failure
+   * kind that dominated the measured round (67 `TypeError: fetch failed` beside 3 792 `503`s). Counting them as
+   * `refused` would open the breaker on a *slow* backend and on the caller's own cancellation, which is the
+   * opposite error. Counting them as `slotsLeaked` would be wrong too: the slot was handed back by a request that
+   * really did leave the cell. So: a third number, and the slot is released without a claim about the backend.
+   *
+   * It is per *request*, not per window: a window that needed three attempts and failed on all three adds three.
+   * What it therefore cannot say on its own is whether the backend was unreachable or merely unusable - the
+   * scorer's own `timedOut` / `cancelled` / `failures` counters are the per-window reading beside it.
+   */
+  transportFailures: number;
   /** requests not sent at all, and why */
   deferredByLimit: number;
   deferredByBreaker: number;
@@ -159,6 +176,19 @@ export interface Backpressure {
   /** The request was refused (or could not be delivered). May open the breaker. */
   recordRefusal(): void;
   /**
+   * The request left the cell and came back with no answer: a timeout, an unreachable backend, a cancellation, an
+   * unreadable reply.
+   *
+   * It releases the slot and counts itself, and **it deliberately does not touch the breaker or the streak**.
+   * `recordSuccess()` is the wrong call for it - it is not an answer, and reporting it as one is how a backend
+   * that never answered anything read as healthy on `/s1`. `recordRefusal()` would be wrong in the other
+   * direction: a 30 s timeout is a backend that was *working* on the request, and a caller's cancellation says
+   * nothing about the backend at all, so pausing on either would add a pause to a server that is merely slow.
+   * Whether a slow backend should also be paused is a policy decision this method does not make;
+   * `s1-relevance.ts` is where it would be made, and `transportFailures` is the number it would be made from.
+   */
+  recordTransportFailure(): void;
+  /**
    * Give a slot back when no request was ever sent for it, and count it.
    *
    * The path this exists for: a caller acquires, then throws or answers "there is no backend" before the
@@ -190,6 +220,7 @@ export function createBackpressure(opts: BackpressureOptions = {}): Backpressure
     sent: 0,
     ok: 0,
     refused: 0,
+    transportFailures: 0,
     deferredByLimit: 0,
     deferredByBreaker: 0,
     opened: 0,
@@ -306,6 +337,12 @@ export function createBackpressure(opts: BackpressureOptions = {}): Backpressure
       if (state === 'closed' && inWindow >= openAfterRefusals) {
         open(at, `${inWindow} refusal(s) within ${windowMs}ms`);
       }
+    },
+
+    recordTransportFailure(): void {
+      inFlight = Math.max(0, inFlight - 1);
+      stats.inFlight = inFlight;
+      stats.transportFailures += 1;
     },
 
     recordLeak(): void {

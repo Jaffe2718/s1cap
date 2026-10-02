@@ -51,10 +51,10 @@ below and in [`figures/s1cap-technical-route.html`](./figures/s1cap-technical-ro
 | Module | Responsibility | Inputs | Outputs | Key parameters | Degradation | Status · code |
 |---|---|---|---|---|---|---|
 | **Event intake** | Harness adapter: turn session events into `RawEvent`; write the assembled context back to the **model view only** (user transcript stays chronological) | harness event stream (append-only log) | `RawEvent` → Segment / Recall; surface rewrite ops | — | plugin load failure → native harness behaviour | 🟡 adapter + observation live (M1) · `packages/dsh-plugin/src/harness-adapter.ts`, `observer.ts`, `control-log.ts` · 🔜 model-view write-back, `packages/proxy` |
-| **Segment / Recall** | Split each event into **message-level** segments (never token-level); generate relevance candidates | `RawEvent` | `Segment[]`, candidate edge list | `chunkTokens=512`, `overlapTokens=64`; tier-1 = `embed` (ANN top-k=32) or `s1`; `questionsPerCall ≤ 20` | tier-1 unavailable → tier-0 metadata only | ✅ segmenter · `packages/core/src/segmenter.ts`; 🔜 tier-1 orchestration |
+| **Segment / Recall** | Split each event into **message-level** segments (never token-level); generate relevance candidates | `RawEvent` | `Segment[]`, candidate edge list | `chunkTokens=512`, `overlapTokens=64`; tier-1 = `s1` (one batched `noul` call — the implemented mode) or `off`; `questionsPerCall ≤ 20` | tier-1 unavailable → tier-0 metadata only | ✅ segmenter · `packages/core/src/segmenter.ts`; 🔜 tier-1 orchestration · 🔜 **embed mode — designed and NOT implemented** (no embedder, `source: 'embed'` never written; the literal is rejected by `validatePolicy`, `packages/core/src/config.ts`) |
 | **S1 association backend** | Score relevance of new segment × history segments; produce the weights that expand the RG | segment pair batches | relevance probabilities | `noul` questions, batched; `timeoutMs=2500` | timeout → skip tier-2 for that turn; hard down → tier-0 + recency window | ✅ client · `packages/s1-client`; 🔜 orchestration |
 | **Association graph (RG)** | Store segment nodes and weighted edges; answer bounded recalls | verified edges | nodes, edges, recall hits | `recall.threshold=0.55`, `depth=2`, `fanout=8`, decay `λ=30 min` | thin recall → recency-window fallback | ✅ M0 · `packages/core/src/assoc-graph.ts` + asynchronous upkeep queue (`upkeep-queue.ts`, fed by real `session/event` traffic; in-memory, SQLite 🔜 M1) |
-| **ASSEMBLER** | Decide what the model sees and in what order, under a token budget | RG recall hits, pinned prefix, tail, `x`, state proxy `T` | `AssemblyResult` (layout + budget accounting) | `B = contextWindow − reserveOutput − fixedOverhead`; `ρ=0.35`; `μ_seg=1` (segment-count floor — `μ=0` = off by default); `tail K=3`; `tMaxChars=8000`; `updatePolicy=perTask` | fewer than `μ_seg` segments recalled, or recalled mass < `μ·budget` when `μ>0` → `fallback: recency-window` | ✅ M0 · `packages/core/src/assembler.ts` |
+| **ASSEMBLER** | Decide what the model sees and in what order, under a token budget | RG recall hits, pinned prefix, tail, `x`, state proxy `T` | `AssemblyResult` (layout + budget accounting) | `B = contextWindow − reserveOutput − fixedOverhead`; `ρ=0.35`; `μ_seg=1` (segment-count floor — `μ=0` = off by default); `tail K=3`; `tMaxChars=8000`; `updatePolicy=perTask` | fewer than `μ_seg` segments recalled, or recalled mass < `μ·budget` when `μ>0` → `fallback: recency-window` | ✅ M0 · `packages/core/src/assembler.ts` · 🔜 **the assembled *order* reaching the model** — delivery inserts the `recalled` block only, so what the model sees today is decided by selection; the ordering is recorded until the model-view write-back exists (§5) |
 | **System-2 LLM** | Governed host model: consumes the assembled context, emits reasoning and candidate plans, issues tool calls | assembled prompt | plans, tool calls | `deepseek-flash`, `reasoningEffort` pinned; no sampling parameter is set (DSH exposes none); swap check with GLM-5.3 | provider error → harness retry/compaction path | ◻ external |
 | **S1 decision backend** | Score candidate plans once as a `choice` question; return probabilities + confidence | plan summaries (≤ 8 options) | `{choice, probabilities, confidence}` | one call per plan set; abstain confidence `0.5` | low confidence → gate abstains and keeps the model order | ✅ client + normalization · `packages/s1-client`; 🔜 wiring M2 |
 | **PLAN GATE** *(kept, not wired)* | Consume scores; normalize, abstain, cap attempts, order execution | probabilities + confidence | `{order, probs, abstained}` — **produced by no cell, and by no run so far** | normalize `p̂ = p / Σp`; cap `M=2`; plans `m ≤ 3` | no scores or conf < 0.5 → keep model order | **not wired into any cell (2026-10-02)**, in the same style as §5's row: its only two triggers are a numbered plan in an assistant message and a `todo/write` session event, and round `20261002-2037` produced neither, so the gate wrote zero `plan_gate` records while C2 carried it `on`. The policy field, the presets and the report no longer offer it, and the plugin's wiring record no longer announces one; the mechanism is kept and unit-tested for whichever arm next has a real plan source. See `packages/core/src/types.ts` for the decision and `packages/dsh-plugin/test/plan-gate.test.ts` for the coverage |
@@ -67,7 +67,7 @@ below and in [`figures/s1cap-technical-route.html`](./figures/s1cap-technical-ro
 The acronym reads **S**ystem-**1** **C**ontext-**A**ware **P**lanning: a System-1 decision model makes the
 agent's planning context-aware. It does that at exactly two points.
 
-1. **Context Awareness** *(what the model sees)* — the association graph plus budgeted recall decides which segments make it in; Trace-as-State ordering decides **in what order** (`[pinned | T | recalled | tail | x]`, `x` always last). The user-facing transcript is never rewritten.
+1. **Context Awareness** *(what the model sees)* — the association graph plus budgeted recall decides which segments make it in; Trace-as-State ordering decides **in what order** (`[pinned | T | recalled | tail | x]`; `xFirst` puts `x` first, `[pinned | T | x | recalled | tail]`). The user-facing transcript is never rewritten. **Which of those two the model actually receives today is a separate fact, and §5 states it**: the one live delivery channel inserts the selected turns and nothing else, so the *selection* is model-visible and the *ordering* is recorded-only until the model-view write-back exists.
 2. **Plan Ordering** *(which order the model's own plans run in)* — the decision backend scores the candidate plans the model proposed; the gate orders them and caps attempts. Unexecuted alternatives are discarded on first verified success.
 
 ## 5. Ablation mapping (cells ↔ modules)
@@ -76,15 +76,46 @@ agent's planning context-aware. It does that at exactly two points.
 |---|---|---|---|
 | Event intake / Segment | on | on | on |
 | S1 association + RG + recall | off | off | **on** |
-| ASSEMBLER layout (`tas.on` + `xFirst`) | off / off (chronological) | **on / on** | **on / on** |
+| ASSEMBLER layout (`tas.on` + `xFirst`) | off / off (chronological) | **on / on, recorded** | **on / on, recorded** |
+| Delivery (`deliver`: does the assembled view reach the model?) | off | off (its one channel is empty — see below) | **on** (the only delivering cell) |
 | S1 decision + PLAN GATE | off | off | **not wired**: the plan gate is designed (§3) and unit-tested, but no cell runs it — round `20261002-2037` recorded no `plan_gate` event, so it was removed from the policy and the presets rather than left `on` and inert |
 | System-1 lane (`s1.provider`) | `"none"` (no lane) | `"none"` (no lane) | live provider, `retryAttempts: 2`, `admissionLimit: 8` |
 | Telemetry | on | on | on |
 
-Round `20261001-1300` ran four cells under an earlier labelling: `C1` (baseline) is today's **`C0`**, `C2` (TAS
-alone) is today's **`C1`**, `C3` (recall selection with `tas.on: false`) was **dropped, no successor**, and `C4` (the
-full configuration) is today's **`C2`**. `docs/CELLS-RUN.md` carries the mapping table with the measured reason the
-fourth arm was dropped.
+**Delivery is one inserted block, and the ordering is not in it.** `deliverContext`
+(`packages/dsh-plugin/src/context-delivery.ts`) adds one message carrying the `recalled` turns; the state proxy `T`
+is deliberately never sent, and nothing in the assembled layout is reordered for the model. So `tas.on`/`xFirst`
+decide what S1CAP *records* and what it would write into the model view — they do not, today, decide what the model
+reads. `C1`'s row above is the sharpest case: its switches are on in the wiring and its `deliver` is off because
+the only block delivery can insert is empty by construction when `recall.tier1: 'off'` (the whole recall path sits
+behind one guard, `packages/core/src/assembler.ts`), so its model-visible input is `C0`'s. The registered contrast
+is therefore `C0` vs `C2` (`docs/CELLS-RUN.md` carries the round evidence and the per-round wording; `FORMULAS.md`
+§6.1 says what it does and does not isolate).
+
+### The model-view write-back — a separate project, and the prerequisite of any TAS measurement
+
+The 🔜 in §3's Event-intake row (`model-view write-back, packages/proxy`) is not a detail of this ablation: it is
+what makes the ordering half measurable at all. `packages/proxy` **does not exist** in this repository. Until it
+does, every arm's model input is the harness's own message list plus, in `C2` only, one inserted `recalled` block.
+
+A TAS arm becomes measurable when three things exist, and they are one project rather than three fixes:
+
+1. **A channel that delivers a layout, not a block.** The write-back has to put the assembled order in front of the
+   model — pinned / `T` / `x` / recalled / tail in the order the policy chose — which is also the point at which the
+   open question "may an authored state proxy `T` be delivered at all" has to be answered (`docs/STATUS.md` §N6
+   settled the narrower version: the delivered block is quoted session content and `T` stays internal).
+2. **An arm that differs from `C0` in that ordering alone** — otherwise the contrast carries selection and delivery
+   with it, which is exactly the conflation the re-registration of `C1` removed.
+3. **A way to see from the artifacts that the model read that order** — the payload identity and the per-step
+   delivery record already exist (`context_delivery` with `payloadId`/`blocks`); a layout write-back needs the same
+   kind of recorded proof, or the arm is a claim about code rather than about a run.
+
+None of that is part of the `C1`/`C2` registration change of 2026-10-02, and none of it should be inferred from it.
+
+Round `20261001-1300` ran four cells under an earlier labelling: `C1` (baseline) is today's **`C0`**, `C2` (read as
+TAS alone then; a second control arm today, see §5) is today's **`C1`**, `C3` (recall selection with `tas.on: false`)
+was **dropped, no successor**, and `C4` (the full configuration) is today's **`C2`**. `docs/CELLS-RUN.md` carries the
+mapping table with the measured reason the fourth arm was dropped.
 
 ## 6. Loop, authority and asynchrony
 

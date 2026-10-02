@@ -8,8 +8,13 @@ rules this file assumes. Every claim below is either backed by a test in `packag
 round, or by the packaged DSH source read with `scripts/scan-dsh-asar.cjs`. Where something is *not*
 verified, it says so instead of guessing.
 
-> **Cell names.** The ablation is now three cells: `C0` (baseline), `C1` (TAS alone) and `C2` (the full
-> configuration). The entries below were written while it was a four-cell scheme, so they name cells with the old
+> **Cell names.** The ablation is now three cells: `C0` (baseline), `C1` (**a second control arm** — its TAS
+> switches are recorded configuration and nothing is delivered, so its model-visible input is `C0`'s; it is not a
+> "TAS alone" arm, because delivery has one channel and `tier1: off` leaves it empty by construction) and `C2` (the
+> full configuration, the arm under test and the only cell that delivers). The registered contrast is **`C0` vs
+> `C2`**, and what it measures today is the recall lane rather than TAS: the ordering reaches the model only through
+> the model-view write-back, which does not exist yet (`docs/ARCHITECTURE.md` carries it as 🔜). The entries below
+> were written while it was a four-cell scheme, so they name cells with the old
 > labels: old `C1` = today's `C0`, old `C2` = today's `C1`, old `C3` (recall selection with `tas.on: false`) =
 > dropped, no successor, old `C4` = today's `C2`. They are the record of what was run and verified at the time, so
 > they are left as written — read their cell names through that mapping. `docs/CELLS-RUN.md` carries the mapping
@@ -1415,9 +1420,58 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
   - **Nothing installs on plugin load.** Installing packages is not something a plugin does behind a user's back;
     this is a command a person runs once, and the plugin only ever reads the resulting path.
 - **Traps:** `termination` stays `'model-owned'`; the pinned prefix must stay first and byte-stable; never
-  remove or rewrite a message S1CAP did not add; a step with nothing claimed must insert at the **end**, since
-  index 0 would put a note about the task ahead of the system instructions (this was a real bug, caught by a
-  test written before the fix).
+  remove or rewrite a message S1CAP did not add; a step whose decision is **empty** receives nothing, because the
+  empty decision is also the harness's turn-ending signal (see the correction below), and an insertion is only
+  ever *after the last claimed message*, or **at the end** when a non-empty decision claims nothing (index 0
+  would put a note about the task ahead of the system instructions — a real bug, caught by a test written before
+  the fix).
+  - **Correction (2026-10-02, `s1cap-audit-core.md` F1/F2/F13).** This trap used to read "a step with nothing
+    claimed must insert at the **end**", full stop, and that is not what the code does: `deliverContext` returns
+    a refusal for `step === 1 && messages.length === 0` and for any empty `decision.messages`, so the
+    end-insertion branch is reachable only for a decision that is non-empty *and* claims nothing. The distinction
+    matters because it was also stated the other way round here: an empty `decision.messages` was described as
+    "no request", and the packaged harness refutes that unconditionally — `dsh-agent-loop` appends the decision
+    (L1061) and then builds and streams the request from the session log regardless (L1063/L1072), and round
+    `20261002-2037` recorded 277 `step/start` against 277 `assistant/message`. What the empty decision *is* is the
+    loop's turn-termination test (`if (turnEnds && decision.messages.length === 0) break`, L962), which a plugin
+    cannot observe, so the lane declines rather than risk owning termination. The refusal is therefore a design
+    decision and not a capability limit, and it is now recorded as one: the refusal's `context_delivery` record
+    carries `{ assembled: false, ingested: true, step }`, so a reader can tell "read and declined" from "never
+    read".
+
+---
+
+## 3b. The knobs this build accepts and does not enforce (2026-10-02)
+
+Five policy fields compose, validate, print and are read by **no code path that changes behaviour**. They are a
+registry now — `UNENFORCED_KNOBS` in `packages/core/src/config.ts` — rather than five comments, because a comment is
+not a thing a test can check and the failure this closes is exactly a knob that looks configured:
+
+| knob | what it claims | what it would take |
+| --- | --- | --- |
+| `assemblyDeadlineMs` | a hard deadline for the sync per-call hook, on expiry of which the call passes through | racing the assembly against a timer. Read today only to print on `/s1`; the bound that actually runs is `recall.anchorWaitMs` (10 000 ms by default — forty times this number, in the same policy object) |
+| `cache.reselectPolicy` | whether a selection is re-selected per task, per turn, or on the break-even test | a caller for `cache-policy.ts#decideReselect`; the assembler records `cacheStability` and never re-selects |
+| `cache.blockTokens` | the prefix-cache block size a selection is aligned to | a caller for `cache-policy.ts#alignToCacheBlocks` |
+| `rgMaintenance.maxLagTurns` | how far the graph may lag the session, **in turns** | a lag measured in turns: `upkeep-queue.ts` compares it against a count of *pending events* and nothing acts on the result. The real bound on scoring concurrency is `s1.admissionLimit` |
+| `recall.embedModel` | the embedding model of the `embed` tier | an embedder. The tier itself is gone (`recall.tier1` is `off \| s1`, `embed` is rejected as legacy), so nothing loads a model here; a non-empty value is warned about |
+
+Three consequences worth knowing, because each one is a place a reader could be misled:
+
+- **The registry is checked.** `packages/core/test/config.test.ts` fails if the registry and the declarations drift
+  apart in either direction, and it pins the closed set of five: adding a knob and enforcing one are both deliberate
+  edits there. `/s1` publishes the registry with each entry's `claims` and `wouldNeed`, so a live reader asks the
+  question where it is answerable.
+- **`recall.tier1` left the registry by being *fixed*, not by being documented.** It was `embed | s1 | off` with
+  `embed` inert, and the honest version of the value was to remove it: the union is `off | s1` now, `embed` is
+  rejected with its own sentence (`LEGACY_TIER1`), and the wiring record prints the resolved value. This is the
+  worked example for the other five — documenting an unenforced knob is the fallback, not the goal.
+- **The plan gate is the precedent, and it is why this is a registry.** It was carried by the full-configuration
+  cell, read by nothing, and its removal was swept for in the presets, the schema and the report — and nothing swept
+  for the rest, which is how three of these five survived the pass that deleted it.
+
+The historical milestone sections below (**N1–N6**) state some of these knobs as live guarantees. They are records
+of what was designed at the time and are deliberately not rewritten; this section and the registry are the current
+answer.
 
 ---
 

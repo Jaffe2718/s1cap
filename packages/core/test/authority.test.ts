@@ -39,10 +39,10 @@ test('the layout axis actually varies across the ablation, in the direction the 
   for (const cell of ordered) {
     assert.equal(cellPolicy(cell).xFirst, true, `${cell} is an ordering cell: x-first is the intervention`);
   }
-  // And the factors stay orthogonal: the two ordered cells share the TAS half, so what separates them is S1
-  // governance, and the baseline has neither half on.
+  // And the factors stay orthogonal in the wiring: the two ordered cells share the TAS half, so what separates
+  // them is S1 governance - and, since 2026-10-02, delivery, which only C2 can use (asserted below).
   assert.equal(cellPolicy('C1').tas.on !== cellPolicy('C2').tas.on, false, 'C1 and C2 both order by TAS');
-  assert.equal(cellPolicy('C1').recall.tier1 !== cellPolicy('C2').recall.tier1, true, 'and so does recall selection');
+  assert.equal(cellPolicy('C1').recall.tier1 !== cellPolicy('C2').recall.tier1, true, 'and only C2 selects');
   assert.equal(cellPolicy('C0').tas.on, false, 'while the baseline orders nothing');
   // The plan gate used to be asserted here as the second half of what separates C1 from C2. It is gone, and the
   // assertion that replaces it is the one that keeps it gone: no cell carries a gate, because a gate that cannot
@@ -76,23 +76,47 @@ test('a cell preset is what the runtime actually starts from, and an override st
   assert.equal(c0.policy.tas.on, false, 'C0 must not order by TAS');
   assert.equal(c0.policy.recall.tier1, 'off', 'C0 must not select');
   assert.equal(c0.policy.xFirst, false, 'C0 is chronological');
-  assert.equal(c0.policy.deliver, false, 'C0 is the only cell that leaves history to the harness');
+  assert.equal(c0.policy.deliver, false, 'C0 leaves history to the harness');
 
-  // C1 is TAS alone: it orders and delivers, and the one half of S1 governance it runs is recall selection.
+  // C1 is the second control arm: its TAS switches stay as recorded configuration, and nothing is delivered.
+  // It carried `deliver: true` until 2026-10-02 and it could never fire - delivery inserts the `recalled` block and
+  // nothing else, and `tier1: 'off'` makes that block empty by construction (`assembler.ts`). Measured: 76
+  // assemblies and 0 with a non-empty recalled block in round `20261002-2037`; 13 assemblies, 13 refusals and 0
+  // `delivered: true` in round `20261001-1300`.
   const c1 = validatePolicy({ cell: 'C1' });
   assert.equal(c1.ok, true, JSON.stringify(c1.errors));
-  assert.equal(c1.policy.tas.on, true, 'C1 orders by TAS');
+  assert.equal(c1.policy.tas.on, true, 'C1 still records the TAS half');
   assert.equal(c1.policy.recall.tier1, 'off', 'C1 must not select');
+  assert.equal(c1.policy.deliver, false, 'and it cannot deliver, so it must not claim to');
 
-  // C1/C2: ordered, and delivering. C2 additionally runs recall selection, and it is the contrast C1 has to beat.
-  for (const cell of ['C1', 'C2'] as Cell[]) {
-    const p = validatePolicy({ cell }).policy;
-    assert.equal(p.tas.on, true, `${cell} orders by TAS`);
-    assert.equal(p.xFirst, true, `${cell} is x-first`);
-    assert.equal(p.deliver, true, `${cell} delivers`);
-  }
+  // C2 is the full configuration: ordered, selecting, and the only cell that delivers.
   const c2 = validatePolicy({ cell: 'C2' }).policy;
-  assert.equal(c2.recall.tier1, 'embed', 'C2 selects');
+  assert.equal(c2.tas.on, true, 'C2 orders by TAS');
+  assert.equal(c2.xFirst, true, 'C2 is x-first');
+  assert.equal(c2.deliver, true, 'C2 delivers');
+  assert.equal(c2.recall.tier1, 's1', 'C2 selects, through the tier-1 mode that exists');
+
+  // The invariant F1 was: a cell that delivers must be able to fill the one block delivery can insert. Stated
+  // against the policy rather than against today's three presets, so a fourth cell cannot reintroduce the
+  // combination `deliver: true` + `tier1: 'off'` - a switch that reports on and can never fire.
+  for (const cell of CELLS) {
+    const p = cellPolicy(cell);
+    if (p.deliver) {
+      assert.notEqual(
+        p.recall.tier1,
+        'off',
+        `${cell}: with tier1 "off" the recalled block is empty by construction, so delivery could only refuse`,
+      );
+    }
+  }
+  // And exactly one cell delivers, which is what makes the registered contrast C0-vs-C2 rather than C1-vs-C2: C1's
+  // model-visible input is the baseline's, so a C1-vs-C2 difference would not be an ablation arm's effect.
+  assert.deepEqual(
+    CELLS.filter((cell) => cellPolicy(cell).deliver),
+    ['C2'],
+    'C2 is the only delivering arm; C0 and C1 are controls',
+  );
+
   // What C2's "full configuration" is made of, stated so a future addition has to be argued for here: the state
   // proxy, recall selection, the x-first layout, delivery, and the System-1 lane's own settings. Nothing else -
   // there is no plan gate in the preset, the policy, the schema or the report.
@@ -112,6 +136,30 @@ test('a cell preset is what the runtime actually starts from, and an override st
   const bogus = validatePolicy({ cell: 'C9' });
   assert.equal(bogus.ok, false);
   assert.equal(bogus.policy.cell, 'C2', 'an unusable cell name costs the C2 defaults, not a partial cell');
+});
+
+/**
+ * `recall.tier1` names the tier-1 mode that runs, and only two of the three designed modes exist.
+ *
+ * C2's preset carried `embed` until 2026-10-02 while nothing implemented it and the only read of the field in the
+ * whole implementation was `!== 'off'` - so the cell was described by a mechanism it did not use, and the value
+ * composed, appeared in every dump and was never resolved. `config.test.ts` pins the rejection of the legacy
+ * literal; this pins the surface: the default, the cell, and the fact that no cell declares a mode that is missing.
+ */
+test('tier-1 names what runs: s1 and off are the implemented values, and C2 states the one it uses', () => {
+  assert.equal(defaultPolicy().recall.tier1, 's1', 'the policy default is the mode that exists');
+  assert.equal(cellPolicy('C2').recall.tier1, 's1', 'and the full configuration states it explicitly');
+  for (const cell of CELLS) {
+    const tier: string = cellPolicy(cell).recall.tier1;
+    assert.ok(
+      tier === 'off' || tier === 's1',
+      `${cell}: tier-1 must be one of the implemented values (got ${JSON.stringify(tier)})`,
+    );
+  }
+  // `embedModel` is the embed mode's model name, nothing reads it, and it stays declared rather than deleted:
+  // removing a config path is its own decision, and the declared field is what the warning is about
+  // (`packages/core/src/config.ts`), so a profile that sets it is told rather than ignored.
+  assert.equal('embedModel' in defaultPolicy().recall, true, 'the inert field stays declared and warned about');
 });
 
 test('the gate never invents a plan: an empty model plan list stays empty', () => {  const decision = orderPlans([], [], 0.5);

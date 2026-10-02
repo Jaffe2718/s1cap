@@ -38,8 +38,18 @@ interface NumberRule {
 
 /** Numeric bounds: thresholds, budgets, caps and timings. */
 export const NUMBER_RULES: readonly NumberRule[] = [
+  // NOT ENFORCED. The type calls this "hard deadline for the synchronous per-call assembly hook; on expiry the
+  // call passes through unmodified", and nothing enforces a deadline: the value is read once, to print on `/s1`
+  // and in the status route's `effective` block. The documented entry comment beside it says 250 ms, and the
+  // bounded wait that actually runs is `recall.anchorWaitMs` - 10 000 ms by default, forty times larger - so the
+  // two numbers in one policy object contradict each other. See `UNENFORCED_KNOBS` below, which is the one place
+  // this is stated in a form a test can check.
   { path: 'assemblyDeadlineMs', min: 1, max: 10_000, integer: true },
+  // NOT ENFORCED as a lag in turns. Read as "how far the graph may lag the session, in turns", and the queue
+  // compares it against a count of *pending events*, which nothing acts on. See `UNENFORCED_KNOBS`.
   { path: 'rgMaintenance.maxLagTurns', min: 0, max: 100, integer: true },
+  // NOT ENFORCED. `alignToCacheBlocks(tokens, blockTokens)` exists and is called by nothing; the assembler
+  // records cache-stability numbers and never aligns to a block boundary. See `UNENFORCED_KNOBS`.
   { path: 'cache.blockTokens', min: 1, max: 4096, integer: true },
   { path: 'tas.tMaxChars', min: 0, max: 200_000, integer: true },
   { path: 'recall.threshold', min: 0, max: 1 },
@@ -72,10 +82,111 @@ export const NUMBER_RULES: readonly NumberRule[] = [
 export const ENUM_RULES: readonly { path: string; values: readonly string[] }[] = [
   { path: 'cell', values: CELLS },
   { path: 'tas.updatePolicy', values: ['perTask', 'perTurn'] },
-  { path: 'recall.tier1', values: ['embed', 's1', 'off'] },
+  // The implemented tier-1 values, and only those. `embed` is the designed third mode and this build does not have
+  // it: no embedder exists, `source: 'embed'` is never assigned to an edge, `recall.embedModel` is read by nothing,
+  // and the only behavioural read of the field anywhere is `assembler.ts`'s `!== 'off'` - so a cell that declared
+  // `embed` ran the `noul` batch and was described by a mechanism it did not use. The failure mode closed here is
+  // not "unknown string" but **silently treated as on**, so `embed` is rejected with its own message
+  // (`LEGACY_TIER1`, applied in the enum loop below) rather than accepted as an alias for `s1`: an alias is still
+  // a recipe naming something the build lacks. As of 2026-10-02 the policy default, the type union and C2's preset
+  // all say `s1` - the mode that runs - and `'off'` keeps its meaning (no recall *selection*; association-graph
+  // upkeep is not gated on it).
+  { path: 'recall.tier1', values: ['s1', 'off'] },
+  // NOT ENFORCED. `decideReselect()` exists for this value and is called by nothing in `packages/*/src` or
+  // `scripts/`; the assembler records `cacheStability` numbers and never re-selects on a policy. See
+  // `UNENFORCED_KNOBS`.
   { path: 'cache.reselectPolicy', values: ['perTask', 'perTurn', 'threshold'] },
   { path: 's1.provider', values: ['jev', 'laya-serve', 'edgejev', 'kev', 'none'] },
 ];
+
+/**
+ * Values a config may still carry that named something this build does not have (2026-10-02).
+ *
+ * The case this table exists for is `recall.tier1: 'embed'`. It was an accepted value and C2's own preset carried
+ * it, and the only behavioural read of the field in the whole implementation was
+ * `policy.recall.tier1 !== 'off'` (`packages/core/src/assembler.ts`) - so the cell ran the `noul` batch and was
+ * described by a mode nothing implements. It is an **error** now, with its own sentence rather than the generic
+ * enum message: the defect was never "unknown string", it was being treated as on, and an explicit retirement
+ * survives someone adding `embed` back to `ENUM_RULES` by reflex.
+ */
+export const LEGACY_TIER1: readonly { path: string; value: string; message: string }[] = [
+  {
+    path: 'recall.tier1',
+    value: 'embed',
+    message:
+      'tier-1 "embed" is not implemented: no embedder or ANN index exists, `source: "embed"` is never written to ' +
+      'an edge, and this field was read only as `!== "off"`. The implemented values are "s1" (one batched `noul` ' +
+      'call - what every selecting cell has run) and "off" (no recall selection at all). The cell\'s own value is ' +
+      'kept; see packages/core/src/types.ts (`recall.tier1`) for the measurement',
+  },
+];
+
+/**
+ * The knobs this build **accepts, composes, records and does not enforce** - as a registry, because a comment is
+ * not a thing a test can check and a knob that composes and does nothing is the defect this exists to remove.
+ *
+ * The list is closed on purpose. Every entry says what it would take to enforce the knob; anything not in the
+ * list is a knob with a live reader, and `core/test/config.test.ts` fails if the two sets drift apart (the test
+ * reads the declarations and asserts the registry matches exactly). `cache.reselectPolicy` and
+ * `cache.blockTokens` share one entry because they are one mechanism - the assembler prices a re-selection with
+ * `cache-policy.ts` and never makes one, so the policy that would decide it and the block size it would align to
+ * are unenforced together.
+ *
+ * Precedent, and why this is a registry rather than five more comments: the plan gate was removed for exactly
+ * this shape - a field the full-configuration cell carried and no code read - and its removal was swept for in
+ * the presets, the schema and the report. Nothing swept for the rest, so three of these survived the pass that
+ * deleted the gate, and the fourth, `recall.tier1: 'embed'`, sat in the cell whose whole purpose is to be the full
+ * configuration until 2026-10-02, when it was answered by naming what runs instead: the value is rejected, and the
+ * mode's one remaining trace in the policy - `recall.embedModel`, which nothing loads a model for - is the entry
+ * below. The registry is what makes the sweep mechanical rather than another reading.
+ */
+export interface UnenforcedKnob {
+  /** `false`: declared, validated, printed, and read by no code path that changes behaviour */
+  enforced: false;
+  /** what it claims, in the words the declaration uses */
+  claims: string;
+  /** what would have to change for the claim to be true */
+  wouldNeed: string;
+}
+
+export const UNENFORCED_KNOBS: Readonly<Record<string, UnenforcedKnob>> = {
+  assemblyDeadlineMs: {
+    enforced: false,
+    claims: 'a hard deadline for the synchronous per-call assembly hook, on expiry of which the call passes through unmodified',
+    wouldNeed:
+      'the hook to race the assembly against a timer and return the untouched decision on expiry; read today only to be ' +
+      'printed on `/s1`. The bound that actually runs is `recall.anchorWaitMs`, which is 10 000 ms by default - forty ' +
+      'times this number, in the same policy object',
+  },
+  'cache.reselectPolicy': {
+    enforced: false,
+    claims: 'whether a selected context is re-selected per task, per turn, or when the break-even test says it pays',
+    wouldNeed:
+      'a caller for `cache-policy.ts#decideReselect`, which nothing in `packages/*/src` or `scripts/` calls; the assembler ' +
+      'records `cacheStability` and never re-selects on a policy',
+  },
+  'cache.blockTokens': {
+    enforced: false,
+    claims: 'the prefix-cache block size a selection is aligned to',
+    wouldNeed:
+      'a caller for `cache-policy.ts#alignToCacheBlocks`; the same missing mechanism as `cache.reselectPolicy` above',
+  },
+  'rgMaintenance.maxLagTurns': {
+    enforced: false,
+    claims: 'how far the association graph may lag the session, in turns',
+    wouldNeed:
+      'a lag measured in turns. `upkeep-queue.ts` compares it against a count of *pending session events* and nothing acts ' +
+      'on the comparison. The bound that does bound scoring concurrency is `s1.admissionLimit`',
+  },
+  'recall.embedModel': {
+    enforced: false,
+    claims: "the tier-1 embedding model's own default, used by the `embed` mode",
+    wouldNeed:
+      'an embedder. Tier-1 `embed` is not implemented and is not an accepted value (`LEGACY_TIER1` above rejects ' +
+      'it), so nothing loads a model here; a non-empty value is warned about at the end of `validatePolicy`, and a ' +
+      'profile that sets one is naming a mechanism this build does not have',
+  },
+};
 
 /**
  * Boolean policy paths a profile patch may set.
@@ -234,9 +345,12 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
     // function looked at any override, so a bad value costs an error and falls back to C2 rather than a
     // half-applied cell.
     if (typeof value !== 'string' || !rule.values.includes(value)) {
+      // A value this build used to advertise and never implemented gets its own sentence instead of the generic
+      // list: the reader needs to know the *mode* is missing, not that a string is not in an array.
+      const legacy = LEGACY_TIER1.find((r) => r.path === rule.path && r.value === value);
       issues.push({
         path: rule.path,
-        message: `must be one of ${rule.values.join(' | ')} (got ${JSON.stringify(value)})`,
+        message: legacy ? legacy.message : `must be one of ${rule.values.join(' | ')} (got ${JSON.stringify(value)})`,
         severity: 'error',
       });
       continue;
@@ -292,8 +406,9 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
 
   // The pairing a measured round found to be the worst of the four arms it ran, warned about and never rejected.
   //
-  // The pairing is `tas.on: false` with `recall.tier1: 'embed'`: recall selection running without the state proxy
-  // that keeps the head of the prompt byte-stable. Round `20261001-1300` measured that combination per step at
+  // The pairing is `tas.on: false` with recall selection on (`recall.tier1: 's1'`, the only selecting value): recall
+  // selection running without the state proxy that keeps the head of the prompt byte-stable. Round `20261001-1300`
+  // measured that combination per step at
   // 3 625 uncached input tokens against the baseline's 2 595, 2 574 output tokens against 1 523 and a 79.2% cache
   // hit rate against 86.7%; its counterpart - the stabiliser on with recall off (cell C1) - measured 1 783 uncached
   // input tokens per step, the fewest in the table, and 1 493 output tokens against the baseline's 1 523. No cell
@@ -315,6 +430,27 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
         `tokens against 2 595 and 2 574 output tokens against 1 523. With the stabiliser on and recall off the ` +
         `same run measured 1 783 uncached input tokens per step against the baseline's 2 595 and 1 493 output ` +
         `tokens against 1 523. Set tas.on true, or recall.tier1 "off", unless the pairing is what is under test`,
+      severity: 'warning',
+    });
+  }
+
+  // `recall.tier1: 'embed'` used to be accepted here and resolved as an alias for the System-1 tier. It is an
+  // error now (`LEGACY_TIER1`, applied in the enum loop above), because the defect was not the missing mechanism
+  // on its own - it was that a cell could *declare* the embed mode and be read as "not off". The value that runs
+  // is the one the recipe states: `s1` or `off`.
+
+  // What is left of that mode in the policy is its model name, and nothing reads it (`UNENFORCED_KNOBS`). A
+  // non-empty value is reported - the "composes, appears in every dump, never read" pattern this repository keeps
+  // finding - while the empty string, which `cordis.patch.yml` ships and every `STRING_PATHS` entry treats as
+  // "not set", stays silent. A warning rather than an error for the same reason `planGate`'s leftover key is one:
+  // a key with no reader costs a session nothing, and the session must not fail over a config it ignores.
+  const embedModel = getPath(source, 'recall.embedModel');
+  if (typeof embedModel === 'string' && embedModel !== '') {
+    issues.push({
+      path: 'recall.embedModel',
+      message:
+        `no reader: tier-1 "embed" is not implemented (see recall.tier1), so nothing loads this model ` +
+        `(${JSON.stringify(embedModel)}). The key is accepted and ignored; remove it from the profile`,
       severity: 'warning',
     });
   }

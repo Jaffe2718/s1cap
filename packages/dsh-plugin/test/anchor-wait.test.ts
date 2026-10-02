@@ -16,7 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { AssociationGraph, defaultPolicy } from '@s1cap/core';
-import { createStepObserver } from '../src/step-observer.ts';
+import { anchorWaitLine, createStepObserver } from '../src/step-observer.ts';
 import type { StepObserver } from '../src/step-observer.ts';
 
 const SESSION = 'S';
@@ -76,9 +76,9 @@ function harness(opts: {
   const slept: number[] = [];
   const probes: Record<string, unknown>[] = [];
   const warns: string[] = [];
-  let persisted: unknown = opts.seed?.snapshot();
   const stalled = deferred();
   const ticks = { value: T0 };
+  let persisted: unknown = opts.seed?.snapshot();
   const policy = defaultPolicy();
   if (opts.anchorWaitMs !== undefined) policy.recall.anchorWaitMs = opts.anchorWaitMs;
   const observer = createStepObserver({
@@ -236,7 +236,17 @@ test('a wait that reaches its deadline proceeds, and reports the remainder exact
   );
   const lines = h.probes.filter((p) => p.kind === 'anchor-wait');
   assert.equal(lines.length, 1, 'one probe line for the whole wait');
-  assert.deepEqual(lines[0], { schema: 0, kind: 'anchor-wait', ms: 1_000, polls: 2, unknown: 1, waited: true, gaveUp: true });
+  assert.deepEqual(lines[0], {
+    schema: 0,
+    kind: 'anchor-wait',
+    step: 1,
+    ms: 1_000,
+    polls: 2,
+    unknown: 1,
+    waited: true,
+    gaveUp: true,
+    outcome: 'gave-up',
+  });
 });
 
 test('an idle queue with nothing in flight is not waited on, and the fail-open path says so', async () => {
@@ -261,7 +271,19 @@ test('an idle queue with nothing in flight is not waited on, and the fail-open p
   assert.equal(stats.upkeep.applied, 0, 'no queue work was applied, because there was none');
 
   const lines = h.probes.filter((p) => p.kind === 'anchor-wait');
-  assert.deepEqual(lines, [{ schema: 0, kind: 'anchor-wait', ms: 10_000, polls: 0, unknown: 1, waited: false, gaveUp: true }]);
+  assert.deepEqual(lines, [
+    {
+      schema: 0,
+      kind: 'anchor-wait',
+      step: 1,
+      ms: 10_000,
+      polls: 0,
+      unknown: 1,
+      waited: false,
+      gaveUp: true,
+      outcome: 'not-started',
+    },
+  ]);
   const standDowns = h.warns.filter((w) => w.includes('anchor wait not started'));
   assert.equal(standDowns.length, 1, `the remainder is still reported, and as what it is: ${JSON.stringify(h.warns)}`);
   assert.match(standDowns[0] ?? '', /nothing queued and no scoring call in flight/);
@@ -297,12 +319,85 @@ test('a row the lexical fallback wrote is not a complete row: the wait still rep
   assert.match(standDowns[0] ?? '', /1 pair\(s\)/);
   assert.deepEqual(
     h.probes.filter((p) => p.kind === 'anchor-wait'),
-    [{ schema: 0, kind: 'anchor-wait', ms: 10_000, polls: 0, unknown: 1, waited: false, gaveUp: true }],
+    [
+      {
+        schema: 0,
+        kind: 'anchor-wait',
+        step: 1,
+        ms: 10_000,
+        polls: 0,
+        unknown: 1,
+        waited: false,
+        gaveUp: true,
+        outcome: 'not-started',
+      },
+    ],
     'and the count the fail-open rule will admit is reported, with the path it took',
   );
 });
 
-test('a row the backend judged is a complete row: the wait does not run at all', async () => {
+/**
+ * A wait that *succeeds* is an outcome, and it belongs on the tape (F9).
+ *
+ * The first version of this diagnostic wrote a line only when the fail-open rule was about to admit unjudged pairs
+ * - the stand-down and the give-up - so every wait that won was silent and the mechanism's effectiveness could not
+ * be measured from a round's artifacts at all: only its failures were on record. Round `20261002-2037` shows the
+ * cost. Its tape holds exactly one `anchor-wait` line, `{ms:10000, polls:0, unknown:2}`, on step 1 of 277: the
+ * stand-down branch, out of a knob configured at 10 000 ms. "The wait ran and cleared the row after N drains" is
+ * the number that decides whether the knob is worth its place, and it was unobtainable.
+ *
+ * Tested here as the pure function that writes the line, and not through a live wait, for a reason worth stating:
+ * the success branch is only entered when the backend's row arrives *between* a `queue.drain()` and the read that
+ * follows it in the same tick, and a unit fixture cannot put it there - the drain is synchronous, so the only thing
+ * that can complete the row during it is a Graph scorer that already has the answer, and the row it writes is
+ * lexical (which `unjudgedWithin` is written to disbelieve). What can be pinned is the record: it is a pure
+ * function of the outcome and four numbers, so the three branches are asserted directly.
+ */
+test('all three anchor-wait outcomes are written, with the step, and only two of them give up', () => {
+  const completed = anchorWaitLine('completed', 4, 10_000, 2, 0);
+  assert.deepEqual(
+    completed.line,
+    {
+      schema: 0,
+      kind: 'anchor-wait',
+      step: 4,
+      ms: 10_000,
+      polls: 2,
+      unknown: 0,
+      waited: true,
+      gaveUp: false,
+      outcome: 'completed',
+    },
+    'the success carries the step number and the poll count, and admits nothing unjudged',
+  );
+  assert.match(completed.message, /anchor wait completed after 10000ms \(2 drain\(s\)\)/);
+  assert.match(completed.message, /the fail-open rule admits nothing on this step/);
+
+  const gaveUp = anchorWaitLine('gave-up', 5, 10_000, 201, 3);
+  assert.equal(gaveUp.line['waited'], true, 'a wait that ran out of time did wait');
+  assert.equal(gaveUp.line['gaveUp'], true);
+  assert.equal(gaveUp.line['outcome'], 'gave-up');
+  assert.equal(gaveUp.line['step'], 5);
+  assert.match(gaveUp.message, /anchor wait gave up after 10000ms \(201 drain\(s\)\): 3 pair\(s\)/);
+
+  const notStarted = anchorWaitLine('not-started', 6, 10_000, 0, 2);
+  assert.equal(notStarted.line['waited'], false, 'the stand-down never polled, which is what `waited` says');
+  assert.equal(notStarted.line['gaveUp'], true, 'and it still gives up on the row: the pairs are admitted unjudged');
+  assert.equal(notStarted.line['outcome'], 'not-started');
+  assert.equal(notStarted.line['step'], 6);
+  assert.match(notStarted.message, /anchor wait not started/);
+  assert.match(notStarted.message, /fail-open rule admits its 2 pair\(s\)/);
+
+  // The three are distinguishable from each other, which is the whole point: the pre-fix line carried neither
+  // `outcome` nor `step`, and a stand-down was written identically to a completed wait with no polls.
+  assert.equal(
+    new Set([completed.line['outcome'], gaveUp.line['outcome'], notStarted.line['outcome']]).size,
+    3,
+    'three outcomes, three readings',
+  );
+});
+
+test('the common case is silent: an anchor row that is already judged writes no line', async () => {
   const seed = seededGraph();
   // Same weight, same pair, different provenance: the backend answered this window.
   await seed.scoreNew({
@@ -315,6 +410,9 @@ test('a row the backend judged is a complete row: the wait does not run at all',
 
   assert.ok(observation !== undefined, 'the step assembled');
   assert.deepEqual(h.slept, [], 'a judged row costs no sleep');
-  assert.equal(h.warns.filter((w) => w.includes('anchor wait gave up')).length, 0, 'and nothing is reported');
+  assert.equal(h.warns.filter((w) => w.includes('anchor wait')).length, 0, 'and nothing is reported');
   assert.equal(h.probes.filter((p) => p.kind === 'anchor-wait').length, 0, 'not even a probe line');
+  // The record shows the same fact from the other side: nothing was admitted unjudged, so `unknownAdmitted` is
+  // absent - which is what "the wait had nothing to do" means in the control plane.
+  assert.equal('unknownAdmitted' in (observation?.kind === 'assembled' ? observation.event : {}), false);
 });

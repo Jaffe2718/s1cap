@@ -510,3 +510,180 @@ test('a delivered block arriving on the session-event stream is dropped at inges
   );
   assert.equal(graph.getSegment('s1cap-deadbeef'), undefined, 'and nothing was added to the graph');
 });
+
+// ------------------------------------------------------- the record's fail-open counter (F4)
+
+/**
+ * F4: `unknownAdmitted` reached the assembler's result and nothing else.
+ *
+ * The field was computed by `assemble()` since the fail-open branch was written, is asserted on the assembler's own
+ * result in `core.test.ts`, is required by the documents (`CELLS-RUN.md`: a run that lowers `w` must carry
+ * `fallback`, `unknownAdmitted` and `recallTree` beside it) and is referred to by the plugin's comments as if it
+ * were written down - and of round `20261002-2037`'s 277 `assembly` records, **zero** carried the key. The round's
+ * first delivery is the case it hid: `candidates: 0`, `selected: 1`, no `fallback`, and one 372-token block, which
+ * with no candidates and no recency fallback can only be the fail-open branch admitting unjudged pairs.
+ */
+test('the assembly record carries the fail-open admission count, and omits it when it is zero', async () => {
+  // The fixture is `core.test.ts`'s fail-open pair, driven through `observeStep` instead of `assemble`: a window
+  // whose only pair the backend never judged, so recall finds no edge and the fail-open rule is what fills the block.
+  const policy = cellPolicy('C2');
+  const graph = new AssociationGraph();
+  const observation = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 1,
+    messages: [
+      { id: 'sys', role: 'system', content: [{ type: 'text', text: 'You are a coding agent.' }], source: { kind: 'system-prompt' } },
+      { id: 'old', role: 'user', content: [{ type: 'text', text: 'alpha beta gamma' }] },
+      { id: 'x', role: 'user', content: [{ type: 'text', text: 'delta epsilon' }] },
+    ],
+    // `undefined` from the batch scorer is the backend not answering this window: the graph writes a lexical row,
+    // which is not a judgement, so the pair stays unknown.
+    scoreBatch: () => undefined,
+  });
+  assert.equal(observation.kind, 'assembled');
+  if (observation.kind !== 'assembled') return;
+
+  assert.equal(observation.event.candidates, 0, 'sanity: no edge cleared the threshold, so the walk found nothing');
+  assert.equal(observation.event.selected, 2, 'and both unjudged segments were admitted rather than left out');
+  assert.equal(observation.event.fallback, undefined, 'not by the recency window: the fail-open rule suppressed it');
+  assert.equal(
+    observation.event.unknownAdmitted,
+    2,
+    'the admission is on the record, which is what makes the block explainable after the round',
+  );
+
+  // The other direction, and the reason the field is omitted rather than zeroed: a step that admitted nothing must
+  // not look like a step whose admission count was dropped. `{}` vs absent is the convention `recallTree` uses.
+  //
+  // Two constraints shape the fixture, and both cost a rejected attempt. The recallable turn is an *assistant*
+  // segment: the anchor is the newest `user` segment, so a second user message sits behind it and can never be
+  // recalled at all. And it must not be inside the verbatim tail: `tail.k` takes the last three segments of the
+  // pool and the assembler excludes them, so a history turn with three short turns after it is the one that is
+  // left for the walk - with fewer, everything in front of the anchor is "recent" and `selected` is 0.
+  const judgedGraph = new AssociationGraph();
+  const judged = await observeStep({
+    ...BASE,
+    policy,
+    graph: judgedGraph,
+    step: 1,
+    messages: [
+      { id: 'sys', role: 'system', content: [{ type: 'text', text: 'You are a coding agent.' }], source: { kind: 'system-prompt' } },
+      { id: 'h1', role: 'assistant', content: [{ type: 'text', text: 'the comparison is off by one second' }], source: { kind: 'model' } },
+      { id: 'h2', role: 'tool', content: [{ type: 'text', text: 'auth.ts: 120 lines' }], source: { kind: 'tool' } },
+      { id: 'h3', role: 'assistant', content: [{ type: 'text', text: 'narrowing it down' }], source: { kind: 'model' } },
+      { id: 'h4', role: 'tool', content: [{ type: 'text', text: 'expiry at line 88' }], source: { kind: 'tool' } },
+      { id: 'x', role: 'user', content: [{ type: 'text', text: 'delta epsilon' }] },
+    ],
+    scoreBatch: async (_current, candidates) => candidates.map(() => 0.9),
+  });
+  assert.equal(judged.kind, 'assembled');
+  if (judged.kind !== 'assembled') return;
+  assert.equal(judged.event.selected, 1, 'the backend judged this pair, so recall selected it on its own edge');
+  assert.deepEqual(judged.layout.recalled.map((s) => s.id), ['h1'], 'and the selected turn is the history one');
+  assert.equal(judged.event.fallback, undefined, 'and no fallback was needed');
+  assert.equal(
+    judged.event.unknownAdmitted,
+    undefined,
+    'and nothing was admitted unjudged - an absence, not a recorded zero',
+  );
+});
+
+// ------------------------------------------------------- the anchor's sibling chunks (F5)
+
+/**
+ * F5: with the corrected seed, x is one *chunk* of the question.
+ *
+ * The seed is now the newest `user` segment in the graph window, which is right as a root - and a long user message
+ * is split into chunks that share a `chunkOf` parent (`segmenter.ts`), so that newest segment is the *last chunk* of
+ * the question. Nothing excluded its siblings: they sat in `tail` or in `history`, the assembler's `excluded` set was
+ * built from pinned/tail/anchor only, and the sibling guard only stops two chunks of one parent being selected
+ * together - the anchor's own parent is never in `selectedParents`, because the anchor is not selected by the walk.
+ * So a chunk of the *current* question could be selected and delivered as "an earlier user turn, quoted verbatim",
+ * which is both false and redundant. Measured in round `20261002-2037`: both deliveries quote the task prompt, and
+ * the delivered body is its middle chunk.
+ */
+test('a chunk of the current question is never recalled as history', async () => {
+  const policy = cellPolicy('C2');
+  // One long user message, chunked by the segmenter (512-token chunks) into several pieces that all share
+  // `chunkOf: 'q'`. The paragraph breaks are what makes the segmenter pack it into more than two pieces; a block of
+  // newlines with no blank line goes through the sentence splitter and can come out as one or two.
+  const long = Array.from(
+    { length: 8 },
+    (_, i) =>
+      `Section ${i} of the question. The failing test is in auth.ts and the expiry comparison is off by one ` +
+      'second, which makes the check pass for tokens that should already have been rejected. Explain how you would ' +
+      'narrow it down, which callers are affected, and what the smallest safe change is.',
+  ).join('\n\n');
+  // Three judged history turns, so `history` holds something other than the question's own chunks and the walk has
+  // a legitimate candidate. They are short, which is what leaves them *behind* the question in the pool - the tail
+  // takes the last `tail.k` segments of the pool, and the question's chunks are at the end of it.
+  const history = [
+    { id: 'h1', role: 'assistant', content: [{ type: 'text', text: 'the comparison is off by one second' }], source: { kind: 'model' } },
+    { id: 'h2', role: 'tool', content: [{ type: 'text', text: 'auth.ts: 120 lines, token check at line 88' }], source: { kind: 'tool' } },
+    { id: 'h3', role: 'assistant', content: [{ type: 'text', text: 'I will narrow it down to the expiry path' }], source: { kind: 'model' } },
+  ];
+  const graph = new AssociationGraph();
+  const observation = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 1,
+    messages: [
+      { id: 'sys', role: 'system', content: [{ type: 'text', text: 'You are a coding agent.' }], source: { kind: 'system-prompt' } },
+      ...history,
+      { id: 'q', role: 'user', content: [{ type: 'text', text: long }] },
+    ],
+    // Every pair judged relevant, so every segment in the window is a candidate: the sibling chunks would be
+    // selected if nothing excluded them.
+    scoreBatch: async (_current, candidates) => candidates.map(() => 0.99),
+  });
+  assert.equal(observation.kind, 'assembled');
+  if (observation.kind !== 'assembled') return;
+
+  const siblings = observation.segments.filter((s) => s.chunkOf === 'q').map((s) => s.id);
+  assert.ok(siblings.length > 1, `sanity: the long question was chunked (${JSON.stringify(observation.segments.map((s) => s.id))})`);
+  const anchor = observation.layout.anchor;
+  assert.equal(anchor.chunkOf, 'q', 'sanity: the anchor is a chunk of the question, not a standalone event');
+  const anchorParent = anchor.chunkOf ?? anchor.id;
+  const otherSiblings = siblings.filter((id) => id !== anchor.id);
+  assert.ok(otherSiblings.length > 0, 'sanity: there is at least one sibling for the guard to exclude');
+  assert.ok(
+    Object.keys(observation.event.recallTree).length > 0,
+    'sanity: the walk ran, so an empty result here would be evidence of something else',
+  );
+  // The sibling was *offered* to the walk - the tree records what recall returned, and it came back with a hit on
+  // the question's own first chunk. That is what makes the next assertion a test of the guard rather than of an
+  // empty graph: without `excludeIds` this hit is selectable, because the sibling guard only stops two chunks of
+  // one parent being selected *together* and the anchor's parent is never in `selectedParents`.
+  const treeIds = JSON.stringify(observation.event.recallTree);
+  assert.ok(
+    otherSiblings.some((id) => treeIds.includes(id)),
+    `sanity: the walk reached a sibling chunk, so the exclusion is load-bearing: tree ${treeIds}`,
+  );
+
+  const selected = observation.layout.recalled.map((s) => `${s.id}(${s.chunkOf ?? s.id})`);
+  assert.ok(
+    observation.layout.recalled.every((s) => (s.chunkOf ?? s.id) !== anchorParent),
+    `no block may quote the question the model is answering: selected ${JSON.stringify(selected)}`,
+  );
+  // And they are excluded from the *pool* too, not merely from the selection: a sibling must not be re-presented
+  // through the verbatim tail either, since that list is built from the pool.
+  assert.ok(
+    observation.layout.tail.every((s) => (s.chunkOf ?? s.id) !== anchorParent),
+    `the verbatim tail holds turns, and the current question is not one of them: ${JSON.stringify(observation.layout.tail.map((s) => s.id))}`,
+  );
+  // The question is still in the layout exactly once, as the anchor - which is the point: it is not "history".
+  const inLayout = [...observation.layout.recalled, ...observation.layout.tail, observation.layout.anchor];
+  assert.equal(
+    inLayout.filter((s) => s.chunkOf === 'q').length,
+    1,
+    'the question appears in the layout once, at the anchor',
+  );
+  // And the history turns are still recalled or tailed, so the exclusion did not empty the view.
+  assert.ok(
+    history.some((h) => inLayout.some((s) => s.id === h.id)),
+    `the turns that are genuine history are still placed: ${JSON.stringify(inLayout.map((s) => s.id))}`,
+  );
+});

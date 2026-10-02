@@ -180,6 +180,16 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
   // The harness's own guard, kept for the same reason it is kept there: a first step with nothing claimed is
   // not a step at all. Checked before the general "no messages" case so the recorded reason is the specific one
   // rather than a true but useless restatement of it.
+  //
+  // **And this module's guards are the only place that rule is reachable**, which `docs/STATUS.md` used to state
+  // the other way round: it said a step with nothing claimed must insert at the **end**, since index 0 would put a
+  // note about the task ahead of the system instructions. The insertion point below still implements exactly that
+  // (`at < 0 -> messages.length`), and the branch is unreachable for the case the doc names first - an *empty*
+  // decision - because the refusal on the next line returns before it, and the line after that refuses for any
+  // non-array too. Only a decision that is non-empty but claims nothing reaches the end-insertion, which is the
+  // test at the bottom of `test/context-delivery.test.ts`. The two statements were left contradicting each other
+  // because the refusal's *reason* is the open question (the empty decision is also the harness's turn-termination
+  // signal - see `index.ts`'s pre-step comment); until that is decided, the doc and this guard say the same thing.
   if (input.step === 1 && input.messages.length === 0) {
     return NOT_DELIVERED('step 1 with no claimed messages: the harness treats this as no step at all');
   }
@@ -220,6 +230,16 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
   // Already delivered: the previous injection is part of the log and comes back through the decision, so
   // re-adding it every step would grow one copy per step. The check has to be content-based, because the id in
   // the log is the harness's own, not this one — the harness checks the same way (`sameContextPayload`).
+  //
+  // **This check cannot fire in production, and that is a fact about the harness rather than a bug to fix here.**
+  // `decision.messages` is `inbox.claim(...)` plus one projected context message: `claim` *removes* what it
+  // returns, and a message appended to the session (the channel this module's insert takes) never enters the
+  // inbox at all. So the previous injection does not come back through the decision - the round's tape proves it,
+  // with the payload's message count `{0: 276, 1: 1}` over all 277 steps and the single non-empty one carrying the
+  // human prompt, not the block. The unit test below passed only because it fed the old payload back by hand. It
+  // is kept as the cheap first test and as the correct rule *if* some other middleware ever re-splices the block
+  // into an inbox; the guard that actually runs is the per-session payload-id set in `index.ts`
+  // (`preStepMiddleware`), which keys on what S1CAP itself delivered instead of on what the harness hands back.
   for (const message of input.messages) {
     if (textOf(message) === text) {
       return NOT_DELIVERED('this exact context is already in the transcript: not delivered twice', blocks);

@@ -260,7 +260,7 @@ function composeFigure({ run, cells, outDir, labelOf, headerHeight }) {
       cell === 'C0'
         ? 'baseline: chronological history, nothing ordered, nothing delivered'
         : cell === 'C1'
-          ? 'TAS alone: state proxy first, current task before recall, nothing judged'
+          ? 'second control: the TAS switches are recorded configuration and nothing is delivered, so the model reads the baseline\'s list'
           : cell === 'C2'
             ? 'full configuration: TAS ordering plus System-1 recall selection'
             : `(${labelOf.get(cell) ?? 'no role recorded'})`;

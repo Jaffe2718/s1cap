@@ -49,9 +49,13 @@
           # unknown key on every load. 0.55 is the default, so the value is not restated here.
           depth: 2
           fanout: 8
-          # tier1: embed (local ANN) | s1 (noul batch) | off
-          tier1: embed
-          # "" = the tier-1 embedding model's own default
+          # tier1: s1 (one batched `noul` call — the implemented mode) | off. The designed third mode, `embed`
+          # (local embedding + ANN top-k), is NOT implemented: no embedder exists and `source: "embed"` is never
+          # written to an edge, so `validatePolicy` rejects the literal `embed` rather than reading it as "not off"
+          # (packages/core/src/config.ts, `LEGACY_TIER1`).
+          tier1: s1
+          # "" = not set. Kept because it is the embed mode's model name and that mode is not implemented: a
+          # non-empty value here names a model nothing loads, and `validatePolicy` warns about it.
           embedModel: ""
           budgetRatio: 0.35
           # `recall.minRecalledShare` is absent on purpose: the default is 0, and at 0.25 the token-share floor

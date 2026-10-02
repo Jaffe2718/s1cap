@@ -145,23 +145,51 @@ export const S1_PRICE_PER_M_INPUT = 0.042;
                      
                                                                              
                    
-                                                                                                               
-                       
      
-                                                                                                                
                                                                                                                  
-                                                                                                          
+                                                                      
+    
+                                                                                                              
+                                                                                                             
+                                                                                                           
+                                                                                                         
+                                                                                                                
+                                                                                                            
+                                                                                                 
+     
+                       
+     
+                                                                                                              
+                                                                  
+    
+                                                                                                                 
+                                                                                                             
+                                            
      
                        
      
                                                                                                                
-                                                  
+                                                                                                            
+                         
     
                                                                                                                   
                                                                                                                   
                                                                                                              
                                                                                                                 
                                                     
+     
+                         
+     
+                                                                                                          
+    
+                                                                                             
+    
+                                                                                                              
+                                                                                                                 
+                                                                                                           
+                                                                                                                
+                                                                                                                
+                                                                                                    
      
                          
               
@@ -188,7 +216,40 @@ export const S1_PRICE_PER_M_INPUT = 0.042;
                          
                                                                 
                           
+     
+                                                                                                                 
+                                
+    
+                                                                                                             
+                                                                                                           
+                                                                                                                
+                                                                                                                  
+                                                                                                              
+                                                                                                          
+                                                                                                                 
+                                                                                                          
+     
                     
+     
+                                                                                                               
+                                     
+    
+                                                                                                                
+                                                                                                               
+                                                                                                         
+                                                                                                               
+                                                                                                        
+                                                                                                                  
+                                                                                                             
+                                                                                        
+    
+                                                                                                                 
+                                                                                                                 
+                                                                                                             
+                                                                                                      
+                   
+     
+                           
      
                                                                                          
     
@@ -261,6 +322,24 @@ export const S1_PRICE_PER_M_INPUT = 0.042;
                     
                                                       
                   
+     
+                                                                                                  
+    
+                                                                                                          
+                                                                                                              
+                                                                                                  
+                                                                                                      
+                                                                                                                 
+                                                                                                               
+                                                                                                                 
+                                                                                                         
+                                                                      
+    
+                                                                                                              
+                                                                                                   
+     
+                      
+                     
  
 
 /** Cost of one LLM call in USD. */

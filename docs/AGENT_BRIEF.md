@@ -77,7 +77,7 @@ points, the overflow flow — is still 0.1.7-rc.2 evidence and has **not** been 
 - DSH = DeepSeek Harness, open source (<https://github.com/deepseek-ai/deepseek-harness>), Electron app + agent runtime. Profiles live at `~/.dsh/profiles/<name>/` with `package.json` (field `dsh.profile.bundles`) and `cordis.patch.yml` (loader patch entries: `id` / `name` / `config`); `patchReload: live` enables hot reload.
 - **Plugin = npm package** declaring `dsh.bundle.patch: "./cordis.patch.yml"` (+ optional `dsh.client` for web-UI injection, `dsh.compatibility.dshReleases`). Install: `dsh plugin --profile web add <pkg|file:path>` — auto-registers in bundles and composes insert lines.
 - Official peer contracts (from `dsh-command-context-trim@0.3.2`, npm registry, read then): `@deepseek-ai/cordis ^4.0.2`, `@deepseek-ai/dsh-llm`, `dsh-session`, `dsh-commands`, `dsh-compaction`, `dsh-invariants`, `dsh-token-meter`, `@deepseek-ai/schemastery` (0.1.2-rc.1 line). That package's own compatibility declaration — `0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.5-rc.3 / 0.1.7-rc.2` — is a dated record of the copy read, and says nothing about this project's releases: `dsh-s1cap` declares its own (§6), and it names `0.2.0-rc.2`.
-- **Session model — the load-bearing fact:** a persistent **append-only event log** (the human record, never rewritten) is separate from the **surface** (the model view). Model-only rewrites happen via `surfaceOp {op:'replace', startSeq, endSeq}` on `user/message` events (0.1.2 shape used `start`/`end`; probe which shape the host accepts — context-trim does a one-shot probe). `system/message` is node 0 (0.1.5+) and a **barrier**: never trimmed, never crossed. **The transcript shown to the user stays strictly chronological — this natively satisfies the project's "user sees chronology, model sees assembled context" requirement.**
+- **Session model — the load-bearing fact:** a persistent **append-only event log** (the human record, never rewritten) is separate from the **surface** (the model view). Model-only rewrites happen via `surfaceOp {op:'replace', startSeq, endSeq}` on `user/message` events (0.1.2 shape used `start`/`end`; probe which shape the host accepts — context-trim does a one-shot probe). `system/message` is node 0 (0.1.5+) and a **barrier**: never trimmed, never crossed. **The transcript shown to the user stays strictly chronological — the capability behind the project's "user sees chronology, model sees assembled context" requirement.** The capability is the host's, not a delivered assembly: S1CAP's own write-back into this surface is the 🔜 row of `docs/ARCHITECTURE.md` §3, and until it exists the assembled *order* reaches the model through no cell.
 - Hook points: `agent/pre-step` (before each LLM call — where compaction registers its pressure path), `agent/request-error` (Cordis **waterfall**; `{prepend: true}` unshifts ahead of compaction's recovery), `agent.runMaintenance()` (idle-time ops), `ctx.tokenMeter` (shadow-price token accounting, O(1) projection), `compaction/prune` + `toolResultPruner` (tool-result slimming with `toolPairingBalancedBefore/After`), `model/selection` intent.
 - Overflow flow today: request fails `CONTEXT_WINDOW_EXCEEDED` → (prepend) model-free trim / in-place slim → retry → else compaction (prune + LLM summarize).
 - Dev/verify commands: `dsh --dump-config`, isolated installs via `DSH_HOME`, `npm run link:harness` pattern, `node --test` suites, session-log replay tests ("replay rewritten log → identical token totals").
@@ -160,10 +160,12 @@ pre-flight instance (own `DSH_HOME`, `cell: C2`, port 19494):*
   > record as carrying `planGate: true`. The plugin deliberately writes no such key now — a record announcing a
   > component the policy does not have is the exact artifact the removal exists to stop producing — so a reader who
   > went looking for it found nothing and could not tell a stale quote from a broken build. The record's keys are
-  > `s1`, `configuredProvider`, `conflicts`, `relevance`, `xFirst`, `recall`, `tas` and `governance`; the last three
-  > of those were added by this pass, `governance` carrying `admissionLimit`, `maxPairsPerSweep`, the resolved
-  > `breaker` thresholds, the context accounting and the two recall floors. `verify-wiring.mjs` asserts them all
-  > against each cell's recipe. The older quotations of the record elsewhere in this file that predate 2026-10-02 are
+  > `s1`, `configuredProvider`, `conflicts`, `relevance`, `xFirst`, `deliver`, `recall`, `tas` and `governance`.
+  > `deliver` is the field that says whose assembled view reaches the model — `false` in both control arms, `true` in
+  > `C2` alone — and it, like the last three, was added by this pass, `governance` carrying `admissionLimit`,
+  > `maxPairsPerSweep`, the resolved `breaker` thresholds, the context accounting and the two recall floors.
+  > `verify-wiring.mjs` asserts `tas.on`, `xFirst`, `deliver` and the governance block against each cell's recipe.
+  > The older quotations of the record elsewhere in this file that predate 2026-10-02 are
   > historical and say so. The lane is therefore
   **called**, not merely constructed: every one of those 14 calls answered `ok: true` from
   `provider: laya-serve`, `routedModel: laya-rl-agent`, `endpoint: http://127.0.0.1:8008`, `attempts: 1`
@@ -253,10 +255,10 @@ Two planes:
   <img alt="S1CAP technical route - five lanes: harness session (Run + Verify with an inner-loop self-edge, Stop - the model's own call), System-2 LLM step, S1CAP control (ASSEMBLER and PLAN GATE), asynchronous RG upkeep (Association Graph, RG Upkeep), System-1 backends" src="./figures/s1cap-technical-route.light.svg">
 </picture>
 - **Event intake:** the harness adapter turns session events (user input x, tool results, reasoning traces) into `RawEvent`s and writes the assembled context back to the **model view only** (§5.1, §6).
-- **Segment / Recall:** message-level segments (never token-level, per the project's segmentation rule) + two-tier candidate generation — tier-0 metadata (free, always on) and tier-1 (embedding ANN *or* S1 noul batch, config-selected).
+- **Segment / Recall:** message-level segments (never token-level, per the project's segmentation rule) + two-tier candidate generation — tier-0 metadata (free, always on) and tier-1, whose implemented mode is `s1` (one batched `noul` call, what every selecting cell runs) while the second designed mode, `embed` (a local embedding ANN), is designed and **NOT IMPLEMENTED**: `recall.tier1` is `s1` or `off` and nothing else, and a literal `embed` is rejected by `validatePolicy` (`docs/FORMULAS.md` §2).
 - **S1 association backend:** scores each new segment against history segments (batched `noul` questions, ≤ 20 per call) and returns the weights that expand the RG.
 - **Association graph (RG):** nodes = segments; edges = verified relevance weights with `w·exp(−Δt/λ)` recency decay; in-memory index at M0 (SQLite persistence lands with M1).
-- **ASSEMBLER:** bounded-BFS selection under the token budget + Trace-as-State layout + cache-aware prefix policy; rewrites the *model view* only (DSH `surfaceOp`; proxy message rewrite elsewhere).
+- **ASSEMBLER:** bounded-BFS selection under the token budget + Trace-as-State layout + cache-aware prefix policy; the layout it assembles and the ordering switches that produced it are **recorded**, and what reaches the model today is one inserted `recalled` block — the *model view* rewrite (DSH `surfaceOp`; proxy message rewrite elsewhere) is the model-view write-back, which does not exist yet (§5.3, and the 🔜 row in `docs/ARCHITECTURE.md` §3).
 - **System-2 LLM:** the governed host model; consumes the assembled context and emits reasoning, candidate plans and tool calls.
 - **S1 decision backend:** scores the LLM's candidate plans in one `choice` call and returns probabilities + confidence.
 - **PLAN GATE:** consumes those scores — normalization, abstention, attempt cap `M=2`, execution ordering — and does **not** call System-1 itself.
@@ -304,15 +306,17 @@ interface AssociationEdge {
   from: string; to: string;
   w: number;                                              // tier-2 verified weight ∈ [0,1]
   wTier1: number;                                         // pre-verification candidate weight
-  source: 'meta' | 'embed' | 's1-noul' | 's1-score';
+  source: 'meta' | 'embed' | 's1-noul' | 's1-score';    // 'embed' is never assigned: no embedder exists (§5.2)
   verifiedAt: number; provenance: string;                 // question id + answer for /s1 why
 }
 
 interface AssemblyPolicy {
-  cell: 'C0' | 'C1' | 'C2';                               // §9.1: C0 baseline, C1 TAS alone, C2 full
+  cell: 'C0' | 'C1' | 'C2';                               // §9.1: C0 baseline, C1 second control (TAS switches
+                                                          // recorded, nothing delivered), C2 full — the only delivering cell
   tas: { on: boolean; tMaxChars: number; updatePolicy: 'perTask' | 'perTurn' };
-  recall: { threshold: number; depth: number; fanout: number; tier1: 'embed' | 's1' | 'off';
-            embedModel?: string; budgetRatio: number;
+  recall: { threshold: number; depth: number; fanout: number; tier1: 's1' | 'off';
+            embedModel?: string;                            // no reader: the embed mode is designed, not implemented
+            budgetRatio: number;
             minRecalledShare: number;                       // token-share floor under the recall block; DEFAULT 0 = OFF
             minRecalledSegments: number };                  // segment-count floor; DEFAULT 1 - the guard that fires the fallback
   tail: { k: number };                                    // verbatim recent turns always kept
@@ -362,11 +366,11 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 ### 5.2 Association-graph construction (per new segment p) — S1 association backend
 
 - **Tier 0 (metadata, free):** edges to segments sharing `taskTag`, same tool family, reply-to chain; fixed weight 0.6.
-- **Tier 1 (candidates):** mode `embed` — local embedding + ANN top-k (k=32) cosine; or mode `s1` — one `/v1/systemone` call: `state = p` (≤512 tok), `questions = {"rel_<i>": noul "Does this segment discuss the same task, entity, or topic as the state?"}` over candidate ids, ≤20 questions per call (**context-rot guard**), normalized server-side.
+- **Tier 1 (candidates):** mode `s1` — the implemented mode, and the only one that runs — one `/v1/systemone` call: `state = p` (≤512 tok), `questions = {"rel_<i>": noul "Does this segment discuss the same task, entity, or topic as the state?"}` over candidate ids, ≤20 questions per call (**context-rot guard**), normalized server-side. The second designed mode, `embed` (local embedding + ANN top-k (k=32) cosine), is **NOT IMPLEMENTED**: no embedder exists anywhere under `packages/`, `source: 'embed'` is never assigned to an edge, `recall.embedModel` has no reader, and a literal `embed` is rejected by `validatePolicy` (`docs/FORMULAS.md` §2).
 - **Tier 2 (verification, lazy — only for edges that could enter assembly):** `score` question per edge → `w ∈ [0,1]`; abstain (confidence < 0.5) → keep tier-1 weight × 0.8.
 - **Decay:** `w_eff = w · exp(−Δt/λ)`, λ default 30 min of active session time (tunable).
 - **Persistence:** SQLite (`segments`, `edges`, weights, verification provenance).
-- Complexity: tier-1 embed is O(log n) ANN per segment; tier-2 batches into ONE parallel-question call (§1.2). Total per turn stays in the tens of ms locally, sub-cent in cost.
+- Complexity: the implemented tier-1 (`s1`) is one batched call per window; the **embed mode's** O(log n) ANN per segment is designed and **NOT IMPLEMENTED**, so no turn pays it today; tier-2 batches into ONE parallel-question call (§1.2). Total per turn stays in the tens of ms locally, sub-cent in cost.
 
 ### 5.3 Context assembly (per LLM call) — the Trace-as-State transplant
 
@@ -399,7 +403,7 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
   floor writes `fallback` on the assembly record; both are recorded on the wiring record under `governance.recall`,
   and `docs/FORMULAS.md` §3.5 states both as formulas with the same correction.
 - **Cache-awareness:** the pinned prefix is never reordered; T grows append-only; `updatePolicy: perTask` keeps T byte-stable within a task so the cache invalidation of `[T | recalled | tail | x]` happens at task boundaries, not per turn. The residual cache penalty is *measured*, not assumed (H3).
-- **DSH realization:** model-only rewrite via `surfaceOp {op:'replace'}` — the user-facing transcript is never touched. Non-DSH: the proxy rewrites the messages array before forwarding.
+- **DSH realization:** the intended model-only rewrite via `surfaceOp {op:'replace'}` — the user-facing transcript is never touched; non-DSH, the proxy rewrites the messages array before forwarding. **Neither is the delivery that runs today:** that write-back is the 🔜 model-view row of `docs/ARCHITECTURE.md` §3 (`packages/proxy` is not written), and the one live delivery channel inserts the `recalled` block, so `tas.on`/`xFirst` decide what S1CAP *records* rather than what the model reads.
 
 ### 5.4 Plan gate (factor S1G on) — S1 decision backend
 
@@ -436,7 +440,7 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
   - message-append events → SEGMENTER + tier-1 RECALL incrementally (background, awaitable);
   - `agent/pre-step` listener → ASSEMBLER → surface replace ops (non-S1 path < 50 ms);
   - token-meter integration → budget + fixed overhead; own usage events from response `usage`;
-  - plan gate → assistant tool-call batch hook (ordering-only intervention, never alters semantics).
+  - plan gate → assistant tool-call batch hook (ordering-only intervention, never alters semantics) — **designed and wired into no cell** (§5.4; the plug-in point exists, the knob and the cell that carried it do not).
 - Commands, as shipped: `/s1` (status — policy, resolved System-1 backend, Laya state, sinks), `/s1-ping` (probe the resolved backend's `/health`), `/s1-laya` (`discover | start | stop | status`), `/s1-tune` (the knobs: BFS depth `d`, relevance threshold `r`, S1 window `w`, anchor wait, `xFirst`, `provider=`, the Laya interpreter/weights fields). All four exist on 0.2.0-rc.2 (§1.8). The earlier sketch in this section — `/s1 status`, `/s1 config`, `/s1 graph`, `/s1 why <seq>` — was a design note, not the surface that shipped: what shipped takes its arguments on `/s1-tune`, and the RG/provenance readbacks described there are not separate commands.
 - Settings UI (`dsh.client` inject): the three cell presets (C0–C2), τ/d/fanout/K sliders, S1 provider picker (cloud Jev | local EdgeJev | laya-serve | none), telemetry export.
 - Tests: `DSH_HOME` isolated profile; `dsh --dump-config` assertion; `node --test` units for SEGMENTER/RG/ASSEMBLER on synthetic sessions; **replay correctness** — rewrite a persisted session log, replay, totals must match tokenMeter exactly (the context-trim test pattern).
@@ -505,17 +509,26 @@ Report **cache-hit rate before/after each assembly change** per call — the TAS
 
 ### 9.1 Design — 2×2 crossing, three arms run (within-task pairing)
 
-| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: recall selection) | System-1 lane |
-|---|---|---|---|
-| C0 baseline | off / off (chronological, x last) | off (native compaction only) | none (`s1.provider: "none"`) |
-| C1 | **on / on** (`[pinned\|T\|x\|history]`) | off | none (`s1.provider: "none"`) |
-| C2 full | **on / on** | **on** | live provider, `retryAttempts: 2`, `admissionLimit: 8` |
+| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: recall selection) | Delivery (`deliver`: does the assembled view reach the model?) | System-1 lane |
+|---|---|---|---|---|
+| C0 baseline | off / off (chronological, x last) | off (native compaction only) | off (nothing is delivered) | none (`s1.provider: "none"`) |
+| C1 | **on / on** — **recorded, not delivered** | off | off (its one channel is empty: `tier1: 'off'` leaves the `recalled` block empty by construction) | none (`s1.provider: "none"`) |
+| C2 full | **on / on** — **recorded, not delivered** | **on** | **on — the only delivering cell** (one inserted `recalled` block) | live provider, `retryAttempts: 2`, `admissionLimit: 8` |
+
+Factor A is a **recorded** difference in every row: the ordering switches decide what S1CAP writes into its own
+record, and `tas.on`/`xFirst` reach the model through no cell, because delivery inserts the `recalled` block and
+never the assembled order (`docs/ARCHITECTURE.md` §5). `C1` is therefore a second control arm whose model-visible
+input is `C0`'s, and the registered contrast is `C0` vs `C2`.
 
 Factor B was "selection + plan gate" and is now selection alone: the gate was configured `on` for C2 and could not
 fire (§5.4), so a table that lists it as part of the factor claims a difference between C1 and C2 that the run did
 not have. `admissionLimit` is the cell's back-pressure against a backend that refuses rather than queues — see
 `bench/cells/C2.json`'s `_meta.admissionLimit` for the measured round (5 992 requests, 64.4 % refused at 2.70/s)
 behind it.
+
+**What the two model-visible inputs are, exactly.** `C0` and `C1` are the harness's own message list and nothing
+else, so they differ by nothing; `C2` is that same list plus one inserted `recalled` block. So the ordering is not
+what a `C0`-vs-`C2` difference can be attributed to today, and the recall lane is.
 
 `tas.on` and `xFirst` are independent switches that the presets here move together — `tas.on` is whether the state
 proxy T exists at all (the trace-as-state mechanism of paper T), `xFirst` is whether the current task x sits before
@@ -528,7 +541,7 @@ record carry those names. Round `20261001-1300` ran under an earlier four-cell l
 | round `20261001-1300` label | what it ran | today |
 | --- | --- | --- |
 | `C1` | baseline | **`C0`** |
-| `C2` | TAS alone | **`C1`** |
+| `C2` | read as TAS alone then; **nothing delivered**, so a second control arm today | **`C1`** |
 | `C3` | recall selection with `tas.on: false` | **dropped, no successor** |
 | `C4` | the full configuration | **`C2`** |
 
@@ -538,7 +551,10 @@ backend coverage was below the 0.5 floor (`docs/CELLS-RUN.md` carries the per-st
 Everything below — the hypotheses, the protocol lines and the milestones — uses today's names; where a figure is
 quoted it keeps the round it came from and the label it ran under. Two labels keep the comparisons apart:
 the **registered rule** is the pre-registered comparison against the baseline, `C2` vs `C0` (§9.3); the **design
-contrast** is `C1` vs `C2`, the comparison that decides whether the System-1 half earns its place.
+contrast** is `C0` vs `C2` — the comparison that decides whether the System-1 half earns its place. `C1` vs `C2` is
+not that pair: since 2026-10-02 `C1` is a second control arm that delivers nothing, so its model-visible input is
+`C0`'s and a difference there would be the instrument rather than the method (`docs/CELLS-RUN.md` states what the
+`C0`-vs-`C2` pair measures while the ordering stays unrouted).
 
 Same tasks, same model with `reasoningEffort` pinned, same harness version, same tool allowlist, randomized run
 order. No sampling parameter is claimed — not a temperature and not a seed — because DSH's model configuration
@@ -555,20 +571,35 @@ Terminal-Bench 4.0 all 66, tau2-bench full `base` split (`[VERIFY]` exact count 
 ### 9.3 Metrics, hypotheses, success rule
 
 - **Primary:** solve rate per benchmark. **Secondary:** $/task, tokens/task (hit/miss/out split), wall-clock/task (net LLM + S1 + tools), cache-hit rate, S1 calls & ms, tool errors, overflow/compaction events.
-- **H2** (plan gate): `C2` spends fewer wasted-attempt tokens.
+- **H2** (plan gate): `C2` spends fewer wasted-attempt tokens. **No arm can deliver this today**: the gate is
+  designed, implemented and unit-tested, but it is wired into no cell — round `20261002-2037` wrote zero `plan_gate`
+  records while C2 carried the knob `on`, because neither trigger (a numbered plan in an assistant message, a
+  `todo/write` session event) occurred, and the knob has since been removed from the policy, the presets, the config
+  schema and the report. The design is `docs/FORMULAS.md` §4, the decision and the mechanism are in
+  `packages/core/src/types.ts` and `packages/core/src/plan-gate.ts`, and `docs/ARCHITECTURE.md` §3 carries the row as
+  *kept, not wired*; an arm with a plan source the model actually writes to is what would test H2.
 - **H3** (selection, stabiliser and cache — one contrast, and it cuts both ways): the TAS layout changes the hit
   rate and the net cost effect is measured per `updatePolicy`; the selection claim rides the same contrast and is
   stated here rather than as a hypothesis of its own. With the recall-only arm dropped, `C2` is the only arm
-  that runs System-1 governance, so the claim that governance reduces context tokens at a non-inferior solve rate
-  can only be observed as `C1` vs `C2` — TAS alone against the full configuration — which is exactly where the
-  cache effect is measured; two hypotheses riding one contrast cannot be separated afterwards, which is why **H1
-  is retired, folded here, not renumbered**. The round's own numbers, where they still apply: the stabiliser
-  contrast (round `C2` vs `C1`, today's `C1` vs `C0`) moved 1 783 / 11 166 / 1 493 uncached / cached / output
-  tokens per step against 2 595 / 16 936 / 1 523, at 86.2% against 86.7% hit rate — about 0.69× on uncached input;
-  the selection contrast (round `C4` vs `C2`, today's `C2` vs `C1`) moved 3 363 / 42 372 / 2 318 per step against
-  1 783 / 11 166 / 1 493, at 92.6% against 86.2% — the best hit rate beside the largest counts on all three
-  components, which is why the counts are the measurement and the hit rate stays a mechanism diagnostic. The
-  dropped arm's figures (round `C3`) apply to no surviving cell and are recorded in `docs/CELLS-RUN.md`.
+  that runs System-1 governance, and the pair the claim is observed over is the registered contrast — **`C0` vs
+  `C2`**, baseline against the full configuration — which is exactly where the cache effect is measured; two
+  hypotheses riding one contrast cannot be separated afterwards, which is why **H1 is retired, folded here, not
+  renumbered**. `C1` is not that pair and cannot be: since 2026-10-02 it is a second control arm that delivers
+  nothing, so its model-visible input is `C0`'s. **And what `C0` vs `C2` measures today is the recall lane, not
+  TAS**: `C2`'s one delivery channel inserts the `recalled` block and nothing else, the state proxy `T` is
+  deliberately never sent, and TAS's ordering reaches the model only through the model-view write-back, which does
+  not exist (`docs/ARCHITECTURE.md` carries it as a 🔜 row; `packages/proxy` is not written) and is a separate
+  project — so until it does, no arm can attribute anything to `tas.on` or `xFirst`. The round's own numbers are
+  therefore history rather than a stabiliser effect: in round `20261001-1300` the arm then read as TAS alone (round
+  `C2`, today's `C1`) delivered nothing — 13 assemblies, 13 refusals, 0 with a non-empty recalled block — and the
+  baseline (round `C1`, today's `C0`) was refused by policy on 19 of 19, so that arm's 1 783 / 11 166 / 1 493
+  uncached / cached / output tokens per step against the baseline's 2 595 / 16 936 / 1 523, at 86.2% against 86.7%,
+  compare two recordings of a layout and not two model inputs. Neither recorded round's contrast measured TAS. The
+  same round's selection figures (round `C4` vs `C2`, today's `C2` vs `C1`: 3 363 / 42 372 / 2 318 per step against
+  1 783 / 11 166 / 1 493, at 92.6% against 86.2%) are the recall lane's — the best hit rate beside the largest
+  counts on all three components, which is why the counts are the measurement and the hit rate stays a mechanism
+  diagnostic. The dropped arm's figures (round `C3`) apply to no surviving cell and are recorded in
+  `docs/CELLS-RUN.md`.
 - **H4** (transfer): `C0`→`C2` deltas persist on a second harness (opencode) at 10% subsample.
 - **Success rule (the registered rule; replaces "win any of three"):** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp absolute) **AND** ≥10% improvement in cost/task **OR** time/task with 95% CI excluding 0 (paired bootstrap, 10k resamples; Holm correction across the secondary family). A cell that wins cost but loses >2 pp solve rate is **not** a win. Report all cells + a quality-vs-cost Pareto figure.
 - `[VERIFY]` power analysis in `bench/stats` before the grid: with paired n=100 (SWE-V) McNemar at 80% power resolves ~14–15 pp differences; n=66 (TB) ~18 pp; report the minimal detectable effect honestly.

@@ -103,7 +103,7 @@ test('assemble: two chunks of one passage cannot both be selected', () => {
   const policy = defaultPolicy();
   policy.recall.threshold = 0.1;
   policy.recall.budgetRatio = 0.9;
-  policy.recall.tier1 = 'embed';
+  policy.recall.tier1 = 's1';
 
   const parent = { ...seg('long1', 0, 100), kind: 'toolResult' as SegmentKind };
   const chunks: Segment[] = [

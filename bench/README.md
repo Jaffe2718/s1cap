@@ -1,12 +1,15 @@
 # bench — three-cell ablation harness
 
-The design space is the 2×2 ablation — `tas.on`/`xFirst` against S1 governance — and **the scheme runs three cells:
-C0, C1 and C2.** Cell presets live in `cells/`; runners land with M2 (`docs/AGENT_BRIEF.md` §9).
+The scheme runs **three cells — `C0`, `C1` and `C2` — and it is not a 2×2: two of the three are controls (`C0` the
+baseline, `C1` a second control arm that delivers nothing) and one is the arm under test (`C2`), so the registered
+contrast is `C0` against `C2`.** The design space behind them is the `tas.on`/`xFirst` crossing against S1
+governance, and the full crossing is what a later phase would run. Cell presets live in `cells/`; runners land with
+M2 (`docs/AGENT_BRIEF.md` §9).
 
 | Cell | `tas.on` + `xFirst` | S1 governance (recall selection) |
 |---|---|---|
 | C0 baseline | off / off | off (native compaction only) |
-| C1 TAS alone | **on / on** | off |
+| C1 second control | **on / on** — recorded configuration, nothing delivered | off |
 | C2 full | **on / on** | **on** |
 
 **The plan gate is no longer part of that governance, in any cell.** It was, until 2026-10-02: C2 carried
@@ -14,8 +17,8 @@ C0, C1 and C2.** Cell presets live in `cells/`; runners land with M2 (`docs/AGEN
 was written for — contains **zero** `plan_gate` records in any of its artifacts across 277 steps, because the gate can
 only read a plan from a numbered list in an assistant message or a `todo/write` session event, and that run produced
 neither. The knob is removed from the presets, the policy, the config schema, the status route and the report rather
-than given a new plan source: adding one would change what C2 *is* mid-study, and the C1-vs-C2 contrast below is a
-comparison between the two cells that were actually run. `packages/core/src/types.ts` carries the full reasoning, and
+than given a new plan source: adding one would change what C2 *is* mid-study, and the `C0`-vs-`C2` contrast below is a
+comparison between cells that were actually run. `packages/core/src/types.ts` carries the full reasoning, and
 `bench/cells/C2.json`'s `_meta.planGateRemoved` the evidence. The mechanism is kept and still unit-tested
 (`packages/core/src/plan-gate.ts`, `packages/dsh-plugin/src/plan-gate-runtime.ts`) for whichever arm next has a plan
 source the model writes to. Nothing takes over its role.
@@ -50,11 +53,18 @@ are the only comparisons available here: the dropped arm's absolute totals are *
 tokens against 400 034 — but that is a step-count difference rather than an effect, because it ran 11 steps against
 the baseline's 19, and absolute totals are not comparable across these cells.
 
-It is also not the contrast the project's claim rests on. That contrast is **C1 (TAS alone) against C2 (the full
-configuration)** — C1 measured **14 441** tokens per step against the baseline's 21 054 (about 0.69×), **1 783**
-uncached input tokens per step against 2 595 (also about 0.69×) and **1 493** output tokens against 1 523, so if C2
-cannot beat C1, the System-1 half has not earned its place in the configuration, and nothing about that argument
-needs a fourth arm. The pairing that dropped arm named is still one `validatePolicy` warns about
+It is also not the contrast the project's claim rests on. That contrast is **C0 (the baseline) against C2 (the full
+configuration)** — the pair the registered rule tests (`docs/FORMULAS.md` §8), and the only one this run set can
+support, because `C2` is the only cell whose assembled view reaches the model. The figures the old `C1`-vs-`C2`
+reading rested on are history and not a contrast: in round `20261001-1300` the arm then read as TAS alone (round
+`C2`, today's `C1`) measured **14 441** tokens per step against the baseline's 21 054 (about 0.69×), **1 783**
+uncached input tokens per step against 2 595 (also about 0.69×) and **1 493** output tokens against 1 523 — but that
+round's own control plane shows **both arms delivering nothing** (13 of 13 deliveries `delivered: false`, 0 with a
+non-empty recalled block, against 19 of 19 refused by policy in the baseline), and two arms whose model-visible input
+differed by nothing cannot support a difference of 0.69× per step. So those figures are not a stabiliser effect, and
+**what `C0` vs `C2` measures today is the recall lane, not TAS**: the ordering reaches the model only through the
+model-view write-back, which does not exist yet (`docs/ARCHITECTURE.md`; a separate project). The pairing that
+dropped arm named is still one `validatePolicy` warns about
 (`recall.tier1 !== 'off'` with `tas.on: false`), so a profile can still select it, on purpose rather than by
 accident — no preset does. The budget that dropping the arm frees goes to repeats of C0, C1 and C2
 (`docs/CELLS-RUN.md`), because one run per cell cannot separate an effect from noise.
@@ -85,8 +95,10 @@ bench/
 
 ## Selection status — deferred to M3 (user decision 2026-09-28)
 
-Which suites to run, how many instances per cell, and whether recall uses lexical scoring or embeddings are
-**evaluation-stage questions**; they are deliberately unanswered until M3. Nothing in M1/M2 depends on them,
+Which suites to run and how many instances per cell are **evaluation-stage questions**; they are deliberately
+unanswered until M3. One question that used to sit here is closed: `recall.tier1` accepts only `s1` (one batched
+`noul` call, the mode every selecting cell runs) and `off`, and the `embed` mode is designed, **not implemented**,
+and **rejected** by `validatePolicy` (`docs/FORMULAS.md` §2). Nothing in M1/M2 depends on them,
 because the two pieces that would have been expensive to retrofit are already in place:
 
 - **token / cache telemetry**: `packages/core/src/telemetry.ts` v1 already records the three quantities per step —
@@ -99,5 +111,9 @@ because the two pieces that would have been expensive to retrofit are already in
   invariants fixed in *every* cell (`termination: model-owned`, `rgMaintenance.mode: async`) and asserted in
   `packages/core/test/authority.test.ts`.
 
-Still open, and cheap to close later: recall scoring is lexical today (BM25/entity overlap); adding an
-embedding backend touches the assembler's candidate generation only.
+Still open, and cheap to close later: the tier-1 *axis* of the design is **unmeasured**. `recall.tier1` accepts only
+`s1` and `off`; the implemented `s1` mode is one batched `noul` call whose refusals fall back to the local lexical
+scorer, so "recall scoring is lexical today" describes the fallback rather than the selector; and the `embed` mode is
+designed and **not implemented** — no embedder, `source: 'embed'` never assigned to an edge, `recall.embedModel` read
+by nothing — so no arm can run or deliver an embedding-based recall, and a rename cannot measure it. Implementing it
+touches the assembler's candidate generation only.

@@ -6,7 +6,9 @@
  *
  * A tape is written by the plugin in `observation: tape` mode (one line per LLM call). Replaying the same
  * tape twice must give the same digest; `--dump` prints the records so a difference can be located.
- * `--cell` defaults to `C2`, the full configuration; `C0` is the baseline and `C1` is TAS alone. A name that is not
+ * `--cell` defaults to `C2`, the full configuration and the only cell that delivers; `C0` is the baseline and `C1` is
+ * a second control arm that delivers nothing (its TAS switches are recorded configuration, not a model-visible
+ * ordering). A name that is not
  * a cell is refused rather than replayed, because the digest is filed under the name it was asked for.
  */
 import { readFileSync } from 'node:fs';

@@ -16,6 +16,28 @@
  * one - a numbered or bulleted step in an assistant message. S1CAP never invents a plan, so the gate can only
  * ever reorder something the model already decided to do, which is what makes an advisory order meaningful
  * rather than a second opinion that quietly replaced the first.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * **THIS MODULE IS UNWIRED, AND ITS OPTIONS TYPE IS STALE. Read both points before wiring it back.**
+ *
+ * 1. Nothing under any `packages/*&#47;src` imports it: the only importer in the tree is
+ *    `packages/dsh-plugin/test/plan-gate.test.ts`. It is kept - and not deleted - for the same reason its core
+ *    half (`core/src/plan-gate.ts`) is: the mechanism was written, was measured as never firing, and was removed
+ *    from the policy, and a future arm that wants it should start from the code rather than from the figure. It
+ *    was removed because round `20261002-2037` produced **zero** `plan_gate` records across 277 steps and 289
+ *    tool calls - see the long note in `packages/core/src/types.ts` beside the missing `planGate` field.
+ * 2. `PlanGateOptions.policy.planGate` **no longer exists on `AssemblyPolicy`** - it is in no cell preset, no
+ *    `bench/cells/*.json` and not in `KNOWN_PATHS`. The field is still declared on the interface below because
+ *    this file predates the removal, and the test supplies its own options object *with* the field, so the ten
+ *    green tests prove the mechanism works when fed a policy object the real policy cannot produce. The build is
+ *    type erasure (`scripts/build-packages.mjs`; `typescript` is not installed), so wiring this module back would
+ *    not fail a build: it would throw `Cannot read properties of undefined (reading 'on')` at the first read of
+ *    `opts.policy.planGate.on` - the first plan of the first round that tried it. Whoever wires it must first
+ *    re-declare the policy field (and add it to `KNOWN_PATHS`, the presets and the wiring record), or take the
+ *    gate's settings from `PlanGateOptions` directly.
+ *
+ * The tripwire that keeps point 1 true is in `packages/dsh-plugin/test/plan-gate.test.ts`: it scans every
+ * `packages/*&#47;src` file and fails if any of them imports this module.
  */
 import { choice, normalize } from '@s1cap/s1-client';
                                                      
@@ -28,6 +50,11 @@ const MAX_SUMMARY_CHARS = 400;
 const MAX_PLANS = 3;
 
                                   
+     
+                                                                                                              
+                                                                                                               
+                                                              
+     
                                                                                                          
                                     
                                  
