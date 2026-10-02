@@ -4,7 +4,8 @@
     "role": "full configuration: Trace-as-State ordering + System-1 governance (selection via association graph + plan gate)",
     "status": "run set for the next round (C0, C1, C2)",
     "note": "The project's own configuration: TAS on, recall selection on, plan gate on, x first; `xFirst: true` and `deliver: true` come from `cellPolicy('C2')` (packages/core/src/types.ts) and are not repeated here, because a value in this file would silently override the cell. The arm it has to beat is C1, TAS alone: if the full configuration cannot beat the stabiliser without System-1, the System-1 half has not earned its place.",
-    "retry": "`s1.retryAttempts: 2` is set below per docs/CELLS-RUN.md's setup, and this cell needs it most: C2 makes an order of magnitude more System-1 calls than the other two arms, the shared Laya refuses rather than queues at its admission limit, and a measured round lost 732 of 2 016 calls to `503 server busy` - a refused call falls back to the local lexical scorer, so an unrecovered refusal turns an S1-governed cell into a partly lexical one. The retry waits the server's own `Retry-After` and is answered, and `attempts`/`waitedMs` on the `s1_call` record report how often it was needed; report `judgedPairs / scoredPairs` either way."
+    "retry": "`s1.retryAttempts: 2` is set below per docs/CELLS-RUN.md's setup, and this cell needs it most: C2 makes an order of magnitude more System-1 calls than the other two arms, the shared Laya refuses rather than queues at its admission limit, and a measured round lost 732 of 2 016 calls to `503 server busy` - a refused call falls back to the local lexical scorer, so an unrecovered refusal turns an S1-governed cell into a partly lexical one. The retry waits the server's own `Retry-After` and is answered, and `attempts`/`waitedMs` on the `s1_call` record report how often it was needed; report `judgedPairs / scoredPairs` either way.",
+    "provider": "`s1.provider` below names the lane this cell runs. It is `laya-serve`, the **local** backend at `http://127.0.0.1:8008`, and the live per-cell profile pins `s1.baseUrl` to that address (docs/CELLS-RUN.md's setup) - so the value here has to be the one the profile overrides it with, or the file describes a lane no cell uses. It previously read `jev`, the earlier **remote** System-1 service, which is not what any run has used and which would additionally have needed an API key it does not have: a reader who took that value seriously would look for a credential that nothing requires. What a cell actually ran is recorded, and can be re-read, from its own `kind:\"wiring\"` tape record - `verify-wiring.mjs` asserts it - so treat that record, not this file, as the authority."
   },
   "cell": "C2",
   "tas": { "on": true, "tMaxChars": 8000, "updatePolicy": "perTask" },
@@ -17,5 +18,5 @@
   },
   "tail": { "k": 3 },
   "planGate": { "on": true, "maxPlans": 3, "attemptCap": 2, "abstainConfidence": 0.5 },
-  "s1": { "provider": "jev", "questionsPerCall": 20, "retryAttempts": 2 }
+  "s1": { "provider": "laya-serve", "questionsPerCall": 20, "retryAttempts": 2 }
 }
