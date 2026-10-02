@@ -21,9 +21,20 @@ This document uses Markdown + LaTeX to fix all mathematical definitions of S1CAP
 | $K$ | Number of recent-tail verbatim turns kept | 3 |
 | $B$ | Context token budget | §3.1 |
 | $\rho$ | Recall-block share of the budget | 0.35 |
-| $\mu$ | Minimum recall-block fill rate (fallback below this) | 0.25 |
+| $\mu$ | Minimum recall-block fill rate (token share; fallback below this) | **0 — off by default** ⁽¹⁾ |
+| $\mu_{\mathrm{seg}}$ | Minimum recall-block **segment count** (fallback below this) — the guard that actually runs | 1 |
 | $m,\ M$ | Number of candidate plans / attempt limit | $3,\ 2$ |
 | $c_{\min}$ | Plan gate abstention confidence | 0.5 |
+
+⁽¹⁾ **The in-force fallback rule is the count floor, not the token share.** This document, `ARCHITECTURE.md:57` and
+`AGENT_BRIEF.md` §3.5 all stated $\mu = 0.25$ as the rule that fires the recency fallback; the code's default is
+`recall.minRecalledShare: 0` (`packages/core/src/types.ts`, `defaultPolicy()`), i.e. **off**, because at 0.25 it
+fired on 9 of 9 steps of a live run and discarded every System-1 selection before delivery could see it
+(`packages/core/src/assembler.ts`, beside the guard). What does run is `recall.minRecalledSegments: 1`
+(`packages/core/src/config.ts`), a floor of one segment under a recall selection: fewer than one selected segment
+is not a selection, so the block falls back to the recency window. Both fields are now recorded on the
+`kind:"wiring"` tape record (`governance.recall`) so a run cannot be read through the wrong one. A reader modelling
+*when* the fallback fires must use $\mu_{\mathrm{seg}}$, not $\mu$.
 
 ## 1. Segmentation (SEGMENTER)
 
@@ -126,9 +137,21 @@ That is, the working memory demand of condition-first versus condition-last show
 
 ### 3.5 Fallback
 
+The **token-share** rule, which is off by default ($\mu = 0$, table note 1):
+
 $$
 \sum_{h \in R'} \mathrm{tok}(h) < \mu \rho B \implies \text{degrade to recency window (chronological last-}N\text{), log a degradation event}
 $$
+
+The **count** rule, which is the one in force ($\mu_{\mathrm{seg}} = 1$):
+
+$$
+|R'| < \mu_{\mathrm{seg}} \implies \text{degrade to recency window (chronological last-}N\text{), log a degradation event}
+$$
+
+Both are `AssemblyPolicy.recall.minRecalledShare` / `.minRecalledSegments`; both are recorded on the wiring
+record; either degradation is written to the assembly record as `fallback` (see §5.1, "what a report has to
+carry").
 
 ## 4. Plan gate (S1 decision backend + PLAN GATE, factor S1G on)
 
@@ -215,13 +238,38 @@ either lane would put a price list back in the middle of a quantity comparison. 
 — the two control arms of the current scheme, which pin `s1.provider: "none"` — has a $C_{\mathrm{S1}}$ of zero
 *by construction*, and a report has to say that rather than print a bare 0 beside a refused lane's real spend.
 
+> **The lane's two token halves are reported separately (2026-10-02).** $C_{\mathrm{S1}}$ above prices the lane on
+> $n_{\mathrm{in}}^{\mathrm{S1}}$ **only** ("Jev output is free"). `scripts/cell-report.mjs` used to print one column,
+> $\sum (n_{\mathrm{in}}^{\mathrm{S1}} + n_{\mathrm{out}}^{\mathrm{S1}})$ — a mixture of the quantity this formula
+> prices with one it prices at zero. It is now two rows, `System-1 lane input tokens (the priced quantity)` and
+> `System-1 lane output tokens (free under the cost model)`, cell-level, per turn and per step. In round
+> `20261002-2037` the output half is 0 on every one of the 5 992 records, which is exactly why the mixture was
+> invisible; a cost statement uses the input row.
+
 Every System-1 column carries its coverage, $\mathrm{judgedPairs}/\mathrm{scoredPairs}$ from the association graph
 (`packages/core/src/assoc-graph.ts`), with the failure split beside it (503 refused / transport timeout / other).
-A cell counts as **S1-governed** only at coverage $\ge 0.5$; below that the majority of its graph was scored by the
-local lexical fallback and the cell is not a measurement of System-1 however it is labelled. Round
-`20261001-1300` measured 16.9 / 33.4 / 22.5 / 39.2% (round labels `C1` / `C2` / `C3` / `C4`) — no arm cleared the
-floor. Where a cell has no lane, coverage is **undefined** rather than 0: `judgedPairs` is 0 because the backend was
-never asked, which is a different claim from a backend that judged none of what it was shown.
+A cell counts as **S1-governed** only at coverage $\ge 0.5$ **over the window the run was offered**:
+
+$$
+\mathrm{coverage}^{\mathrm{offered}} \;=\; \frac{\mathrm{judgedPairs}}{\mathrm{scoredPairs} + \mathrm{deferredPairs}} \;\ge\; 0.5
+$$
+
+Below that the majority of its graph was scored by the local lexical fallback and the cell is not a measurement of
+System-1 however it is labelled. Round `20261001-1300` measured 16.9 / 33.4 / 22.5 / 39.2% (round labels `C1` /
+`C2` / `C3` / `C4`) under the ratio this floor used to be stated over — no arm cleared it. Where a cell has no lane,
+coverage is **undefined** rather than 0: `judgedPairs` is 0 because the backend was never asked, which is a
+different claim from a backend that judged none of what it was shown.
+
+> **Why the floor moved to the second denominator (2026-10-02).** The admission gate defers a window it will not
+> send, and `AssociationGraph.scoreNew` gives those pairs back to the cursor
+> (`packages/core/src/assoc-graph.ts`): a deferred pair never reaches `scoredPairs`. So
+> $\mathrm{judgedPairs}/\mathrm{scoredPairs}$ **rises when the run declines work** — with `admissionLimit: 8` and a
+> breaker that can hold for `cooldownMs`, a saturated cell can reach 0.5 by not asking. A validity floor a run can
+> satisfy by declining work is not a floor. The floor is therefore stated over the pairs the arrival order offered,
+> `scoredPairs + deferredPairs`, and `judgedPairs/scoredPairs` is kept as the secondary reading it always was: the
+> share of what the backend was *shown* that it answered. `scripts/cell-report.mjs` prints both ratios, the deferral
+> share, and the deferred count beside every coverage figure, in the markdown and in the machine-readable CSV
+> (`System-1 coverage (judged/(scored+deferred))`, `deferred share of offered`).
 
 Output length is part of the comparison or it is a confounder. $n_{\mathrm{out}}$ was 55–80% of what a price-weighted
 total would have charged in every cell of that round — a statement about the quantities, since output dominates any
@@ -236,7 +284,8 @@ run's own evidence — `evidence/<cell>/control.jsonl`, `home/<cell>/sessions/**
 `home/<cell>/.s1cap/rg/*.json` — and prints the metrics above **per cell, per turn and per step**: time (turns,
 steps, LLM calls, System-1 calls, other tool calls; LLM time, System-1 time, other tool time, with the step and turn
 frames printed beside them so the residual is visible instead of assumed), cost (cached-hit input tokens, uncached
-input tokens, output tokens, plus the System-1 lane's own tokens) and completion (benchmark-only — the current
+input tokens, output tokens, plus the System-1 lane's own tokens **split into input — the priced quantity — and
+output, which the cost model prices at zero**) and completion (benchmark-only — the current
 stimulus completes in every cell, and the report prints that as one constant column rather than a per-turn table of
 the same value). The cache hit rate appears once, under mechanism diagnostics, never in the cost table:
 
@@ -384,7 +433,117 @@ $$
 p_{(i)}^{\mathrm{adj}} = \max_{j \le i}\Big\{\min\big(1,\ (K-j+1)\,p_{(j)}\big)\Big\}
 $$
 
-**Success criterion (overall)**: completion rate non-inferior **and** cost or time improved by ≥10% (CI excluding 0). The analysis script is frozen and committed before the full run.
+**Success criterion (overall)**: completion rate non-inferior **and** cost or time improved by ≥10% (CI excluding 0).
+
+#### 8.1 The tool, and what it refuses
+
+`scripts/paired-stats.mjs` is the implementation of the four rules above. It is dependency-free, it is the
+analysis script this section says is frozen before the full run, and it exists because until it did the protocol
+was words: a grep for `McNemar|bootstrap|Holm` across `scripts/*.mjs`, `packages/*/src/*.ts` and `docs/*.md`
+returned documentation and no code, so no round could be declared a *result* by the committed tooling
+(`.s1cap-ablation/s1cap-audit-lane.md` finding F7; `DEFECT-GATE.md` item F7).
+
+```
+node scripts/paired-stats.mjs --input <results.json> [--seed 20261002] [--b 10000] [--min-n 20]
+node scripts/paired-stats.mjs --self-test
+```
+
+**The pairing unit is the task, and the pairing is enforced.** Two arms are compared only over task keys both
+arms ran, and the number of pairs used is printed. A ragged input — an arm missing a task another arm has — is
+**refused**, not silently contracted; so is a metric missing from one arm of one task, because a paired
+statistic over different task sets is not a paired statistic. `--allow-drop` narrows the comparison to the
+shared keys and prints exactly which keys it dropped. The input groups the arms of one task under one key
+(`tasks["swe-1001"]["C2"]`) rather than listing per-arm rows, because a flat row list lets the two arms of one
+task land under two keys and the result is two unpaired means that nothing in the output reveals as unpaired.
+A repeat is a second draw and needs its own key (`"swe-1001#r2"`), not an average folded onto this one.
+
+**The seed and B are recorded, so a rerun reproduces the numbers.** The bootstrap resamples tasks (not arms,
+not observations within a task) with a seeded 32-bit mulberry32 generator, $B = 10^4$ by default, and reports
+the interval from type-7 quantiles. Every output prints `B`, the seed, the pair count `n`, the α, the minimum
+n in force and the **explicit family** — the list of comparisons Holm corrected, not an implied one:
+
+```
+  family (stated, not implied)
+    primary                 : solved (binary, McNemar; non-inferiority margin 0.02)
+    secondary family        : cost, timeMs, steps  →  K = 3
+    correction              : Holm step-down, applied to the secondary family as one family
+  reproducibility
+    bootstrap B             : 10000
+    seed                    : 20261002   (generator: mulberry32; resampled unit: the task)
+    minimum paired n        : 20   (parameter --min-n; the registered plan fixes none)
+```
+
+A margin of 0.02 is `--method asymptotic` (§9.3's margin is a shifted test, not §8's zero-margin sign test);
+run with the default `--method exact` and the tool refuses the combination rather than substituting one test
+for the other. The secondary family is whatever the run names in `family`, and the correction above is unchanged
+by its size: §8 registers $K=2$ (cost, time), which is the family this protocol corrects by default. §5.1
+forbids collapsing $(n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}})$ into a scalar, so the token triple
+enters as **its own continuous metrics** rather than as one cost total — the tokens *are* the registered
+secondary quantities, and `cost` above is only a name for a total a run chooses to form, with the price list
+that formed it recorded beside it. A run that registers the token triple as well as cost and time states a
+family of $K \ge 2$, and the tool corrects exactly the family it prints and no more: membership is never
+inferred from which metrics happen to be present in the file.
+
+**What it refuses, and why the refusal is the point.** The optimization loop of
+[AGENT_BRIEF.md](./AGENT_BRIEF.md) §9.7 draws **one** task at a time. One task gives the bootstrap nothing to
+resample — every resample is that same task, so the percentile interval has zero width and the achieved
+p-value is 0 or 1 — and gives McNemar no discordant structure. Both come out *degenerate*, and a degenerate
+interval is indistinguishable in a table from a precise one. The tool therefore reports one of three statuses
+rather than a number:
+
+| status | when | what is printed |
+|---|---|---|
+| `ok` | every arm on the same task keys, every metric complete, and `n ≥ --min-n` | the p-values, intervals, the Holm family and the success flag |
+| `refused: insufficient-pairing` | an arm is missing a task another arm has, or a metric is missing from one arm of one task | what is missing, for which key and which arm, and what the input needs — no p-value, no interval, no success flag |
+| `refused: insufficient-n` | fewer than `--min-n` paired tasks | the count it has, the minimum it needs, where that minimum comes from, and why one task is not enough |
+
+**The minimum n is an explicit parameter, because the registered plan does not fix one.** §8 above states the
+test, the margin, B and α and no per-arm n; `AGENT_BRIEF.md` §9.1 states the *grid's* per-arm n (SWE-bench
+Verified 100, Terminal-Bench 66, tau2 full `base` split) and §9.3 defers the power analysis to `bench/stats` as
+a `[VERIFY]`; §9.6 prices ~446 episodes per arm. Three numbers are therefore in play, and the tool prints the
+one in force with its provenance rather than assuming one:
+
+- **the default, 20** — the parameter `--min-n`, recorded in every output. It is a floor on computability and
+  elementary resolution, not a power guarantee.
+- **6, the exact test's own floor** — the exact two-sided p-value is $2\cdot 2^{-(b+c)}$, so $b+c \ge 6$ is
+  required for $p \le 0.05$ at all, even with every discordant pair on one side. No paired run of five tasks
+  can reject at the registered α whatever it observes.
+- **what an arm's own n resolves is not a single number, and the tool does not print one.** The sign test runs
+  on the *discordant* pairs $b+c$, so the resolvable difference is $(z_{1-\alpha/2} + z_{1-\beta})/\sqrt{b+c}$
+  = 2.80 pp × 100/√(b+c). At n = 100 tasks with the discordance a solve-rate change actually produces, that is
+  tens of percentage points — 28 pp if all 100 tasks were discordant, 56 pp at 25 % discordance — whereas
+  §9.3's power note quotes 14–15 pp for that arm, which $\sqrt{b+c}$ places at $b+c \approx 373$: more
+  discordant pairs than the arm has tasks. Every output therefore prints the discordant count it observed and
+  the sensitivity that count buys, so the gap between the note and the data is visible instead of being
+  averaged into a figure nobody can check. **The registered plan's power note and its per-arm n are not
+  reconciled here, and §9.3's figure should be treated as unresolved until `bench/stats` records the
+  discordance it assumed.**
+
+**Standing rule: frozen and committed before the full run, not tuned afterwards.** This is §9.4's
+pre-registration and it applies to this file: the analysis is fixed in a commit that precedes the first full
+registered run, and a run's numbers are read with the revision of `scripts/paired-stats.mjs` that produced
+them. Changing a test, a margin, α, the seed, B, the minimum n or the membership of the family after seeing
+results is a new registration and invalidates the round it was applied to retroactively — which is why all of
+them are parameters that appear in the tool's own output rather than constants inside it, and why `--self-test`
+exists: a protocol whose implementation cannot be checked against hand-computed cases is a protocol that is
+one edit away from being unverifiable.
+
+**Not implemented, and stated rather than approximated.** Non-inferiority at a nonzero margin $\delta$ is
+tested by the asymptotic shifted statistic $z = (\hat\Delta + \delta)\sqrt{b+c}$; §8's *exact* route for it is an
+inversion of the binomial test on $b/(b+c)$, which is not registered here and is therefore not computed.
+`--method exact` with a nonzero margin refuses rather than quietly substituting a different test. The
+bootstrap's p-value is the achieved level read off the resample distribution, not a registered statistic: it
+exists so Holm has a number to order, and §8's secondary criterion is the interval against the −10 % line. An
+achieved p of `0.000000` at $B = 10^4$ means *no resample crossed zero* — a lower bound of $1/B$, not a
+p-value of zero.
+
+#### 8.2 What a round still has to supply
+
+The tool reads a per-task, per-arm result set (the shape is in its header). `scripts/cell-report.mjs` emits
+per-cell, per-turn and per-step *descriptive* rows — it has no per-task identity in its CSV — so a round that
+wants this analysis has to record the per-task triple `(solved, cost, time)` per cell as well, keyed by task.
+Until it does, §8's criterion is computable from a file a human assembles and not from the round's own
+artifacts; that gap is in the run set's court, not this tool's.
 
 ## 9. Complexity summary
 
@@ -431,6 +590,21 @@ fewer pairs are offered, so the graph the BFS walks becomes sparser and recall m
 *through those edges*. That loss is real and nothing in round `20261001-1300` measured it (`w = 1024` never bound
 there), so a run that lowers `w` must carry `fallback`, `unknownAdmitted` and `recallTree` beside it.
 `scoredPairs` / `judgedPairs` measure how much was judged, not how much recall then used.
+
+> **Where those three are carried, and how a report reads them (2026-10-02).** `recallTree` is written on every
+> assembly record and `fallback` / `unknownAdmitted` when they are defined (`packages/core/src/observer.ts`), and
+> until this date `scripts/cell-report.mjs` read none of them: the word "fallback" appeared in it only in the prose
+> about the local lexical scorer. A run that lowered `w`, or whose recency fallback fired, could therefore not honour
+> this requirement from its own report. The mechanism-diagnostics table now has three rows — `recall block source`
+> (`N backend / M recency-fallback`, with the fallback's kinds), `unjudged pairs admitted ('unknownAdmitted')`, and
+> `recall structure recorded (steps / nodes placed)` — and the same three are rows in the CSV. All three are
+> **three-valued**: a cell whose build did not write the field prints `— (not recorded by this snapshot)`, which is a
+> different statement from "the event did not happen". In round `20261002-2037` the first two are unrecorded (that
+> build wrote neither) and `recallTree` is present on all 277 C2 assemblies, 5 950 nodes placed.
+>
+> Why it matters for `w`: the recency fallback **replaces the System-1 selection with the last-N window**, so
+> without it in the report `selected` / `candidates` cannot be read as evidence about the *selector* — "recall
+> selected nothing" and "recall was overridden" are different facts about the same count.
 
 Measured offline in `packages/core/test/window.test.ts` (`w = 64`, 400 segments): `scoredPairs` stays within
 `total * w` and strictly below full pairwise scoring, the first segment still holds its edges after leaving the

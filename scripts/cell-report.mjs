@@ -344,7 +344,12 @@ const METRICS = [
   { key: 'hitTokens', group: 'cost', unit: 'token', scopes: ['cell', 'turn', 'step'], label: 'cached-hit input tokens' },
   { key: 'missTokens', group: 'cost', unit: 'token', scopes: ['cell', 'turn', 'step'], label: 'uncached input tokens' },
   { key: 'outTokens', group: 'cost', unit: 'token', scopes: ['cell', 'turn', 'step'], label: 'output tokens' },
-  { key: 's1Tokens', group: 'cost', unit: 'token', scopes: ['cell', 'turn', 'step'], label: "System-1 lane's own tokens" },
+  // F19: two rows, not one sum. `FORMULAS.md` prices the lane on **input only** (`C_S1 = p_s1 Σ n_in^S1`, "Jev
+  // output is free"), so a single `Σ input + output` column mixes the quantity the cost model prices with one it
+  // prices at zero. In the recorded round `outputTokens` is 0 on every record, which is exactly why the mixture
+  // was invisible; in a healthy round it would not be. The input row is the priced quantity.
+  { key: 's1InputTokens', group: 'cost', unit: 'token', scopes: ['cell', 'turn', 'step'], label: 'System-1 lane input tokens (the priced quantity)' },
+  { key: 's1OutputTokens', group: 'cost', unit: 'token', scopes: ['cell', 'turn', 'step'], label: 'System-1 lane output tokens (free under the cost model)' },
   // --- completion -------------------------------------------------------------------------
   // One column, constant in this project's runs: the stimulus is a single short task and every cell
   // finishes it. It is reported as a cell-level count of completed turns (and the wall-clock cost of
@@ -540,10 +545,21 @@ function mtimeOf(path) {
  * both, or a `0` coverage for both, would make "not configured" indistinguishable from "configured
  * and broken" - which is the single reading this report exists to prevent.
  *
+ * There is a **third** reading, and until the audit it printed as the first (F3): a cell whose
+ * configuration conflicted - `laya.enabled: true` beside `provider: "none"`, or a local provider with
+ * neither `baseUrl` nor `pythonPath` - is demoted to `provider: "none"` by `buildBackend`
+ * (`packages/dsh-plugin/src/index.ts`), so its wiring record says `s1: "none"` exactly as a control
+ * arm's does. The distinguishing evidence is the *configured* provider beside the resolved one, which
+ * the plugin now writes onto the same record (along with the conflict text). A `none` whose
+ * `configuredProvider` names something else is a **demotion**, it is reported as one, and it must
+ * never be read as "this cell had no lane by construction".
+ *
  * The evidence, in order of authority (never inferred from the call count alone):
  *   1. `<home>/<cell>/.s1cap/tape.jsonl` `kind:"wiring"` - written once at activation, and its `s1`
  *      field is literally `'none'` when the resolved backend is the Off choice, or
- *      `{provider, mode, baseUrl}` when one is wired (dsh-plugin/src/index.ts).
+ *      `{provider, mode, baseUrl}` when one is wired (dsh-plugin/src/index.ts). Its
+ *      `configuredProvider`/`conflicts` pair is what separates a choice from a demotion; a record
+ *      written before the audit has neither and is reported as "unknown", not as "no conflict".
  *   2. the same tape's `kind:"tuning-file"` `effective.provider`.
  *   3. `provider` on the cell's own `s1_call` records (the configured name, recorded even on refusals).
  *   4. nothing at all: with no provider evidence anywhere and no call records, the lane was absent -
@@ -551,7 +567,10 @@ function mtimeOf(path) {
  */
 function findLaneEvidence(cellDir, cell, control) {
   const tapePath = join(cellDir, '.s1cap', 'tape.jsonl');
-  const record = { state: 'unknown', provider: null, mode: null, baseUrl: null, source: 'no provider evidence in the run directory', tapePath: null };
+  const record = {
+    state: 'unknown', provider: null, mode: null, baseUrl: null, source: 'no provider evidence in the run directory',
+    tapePath: null, configuredProvider: null, conflicts: [],
+  };
   if (existsSync(tapePath)) {
     record.tapePath = tapePath;
     let lines = [];
@@ -570,6 +589,10 @@ function findLaneEvidence(cellDir, cell, control) {
         continue;
       }
       if (o.kind === 'wiring' && o.s1 !== undefined) {
+        // `configuredProvider`/`conflicts` are read on both shapes. A wiring record written before the audit has
+        // neither, which stays "unknown" rather than becoming "no conflict": those are different statements.
+        if (o.configuredProvider !== undefined) record.configuredProvider = String(o.configuredProvider);
+        if (Array.isArray(o.conflicts)) record.conflicts = o.conflicts.map((c) => String(c));
         if (o.s1 === 'none') {
           record.state = 'none';
           record.provider = 'none';
@@ -580,6 +603,20 @@ function findLaneEvidence(cellDir, cell, control) {
           record.mode = o.s1.mode ?? null;
           record.baseUrl = o.s1.baseUrl ?? null;
           record.source = `tape.jsonl wiring record: s1 = ${JSON.stringify(o.s1)}`;
+        }
+        // Was the `none` a choice or a demotion? A conflict makes `buildBackend` resolve
+        // `{...config.s1, provider: 'none'}`, so the resolved provider is `none` while the configured one is not.
+        // The two readings that follow are not interchangeable and the report must not merge them (F3).
+        if (
+          record.state === 'none' &&
+          record.configuredProvider !== null &&
+          record.configuredProvider !== 'none'
+        ) {
+          record.state = 'demoted';
+          record.source =
+            `tape.jsonl wiring record: configured s1.provider = ${JSON.stringify(record.configuredProvider)}, ` +
+            `resolved s1 = "none"` +
+            (record.conflicts.length > 0 ? `; ${record.conflicts.length} conflict(s)` : '; no conflict text recorded');
         }
         return record;
       }
@@ -619,7 +656,7 @@ function emptyScope() {
   return {
     turns: 0, steps: 0, llmCalls: 0, s1Calls: 0, toolCalls: 0,
     llmMs: 0, s1Ms: 0, toolMs: 0, stepFrameMs: 0, turnFrameMs: 0, idleMs: 0,
-    hitTokens: 0, missTokens: 0, outTokens: 0, s1Tokens: 0,
+    hitTokens: 0, missTokens: 0, outTokens: 0, s1InputTokens: 0, s1OutputTokens: 0,
     s1Ok: 0, s1Refused: 0, s1Questions: 0,
     injections: 0, contextSteps: 0, assemblySteps: 0,
     turnsCompleted: 0, completionMs: 0,
@@ -630,7 +667,7 @@ function emptyScope() {
 const SUM_KEYS = [
   'turns', 'steps', 'llmCalls', 's1Calls', 'toolCalls',
   'llmMs', 's1Ms', 'toolMs', 'stepFrameMs', 'turnFrameMs', 'idleMs',
-  'hitTokens', 'missTokens', 'outTokens', 's1Tokens',
+  'hitTokens', 'missTokens', 'outTokens', 's1InputTokens', 's1OutputTokens',
   's1Ok', 's1Refused', 's1Questions',
   'injections', 'contextSteps', 'assemblySteps',
   'turnsCompleted', 'completionMs', 'humanMessages', 'injectedMessages',
@@ -807,7 +844,8 @@ function aggregate(cell) {
     const bucket = bucketFor(attributeByTime(r.ts, steps, turns, lastTurnEnd));
     bucket.s1Calls += 1;
     bucket.s1Ms += r.ms || 0;
-    bucket.s1Tokens += (r.inputTokens || 0) + (r.outputTokens || 0);
+    bucket.s1InputTokens += r.inputTokens || 0;
+    bucket.s1OutputTokens += r.outputTokens || 0;
     bucket.s1Questions += r.questions || 0;
     if (r.ok) bucket.s1Ok += 1;
     else {
@@ -819,7 +857,7 @@ function aggregate(cell) {
   // turn totals for System-1 must include the 'between steps' bucket: those calls belong to the
   // turn even though they belong to no step, and hiding them would understate the turn.
   for (const t of turnMap.values()) {
-    for (const k of ['s1Calls', 's1Ms', 's1Tokens', 's1Ok', 's1Refused', 's1Questions']) {
+    for (const k of ['s1Calls', 's1Ms', 's1InputTokens', 's1OutputTokens', 's1Ok', 's1Refused', 's1Questions']) {
       t[k] += t.gap[k] || 0;
     }
   }
@@ -861,7 +899,10 @@ function aggregate(cell) {
   // ever disagree the attribution is wrong, and the report says so rather than hiding it.
   totals.s1Calls = s1Records.length;
   totals.s1Ms = s1Records.reduce((a, r) => a + (r.ms || 0), 0);
-  totals.s1Tokens = s1Records.reduce((a, r) => a + (r.inputTokens || 0) + (r.outputTokens || 0), 0);
+  // F19: the lane's two token halves, counted apart. `FORMULAS.md` prices `Σ n_in` only ("Jev output is free"), so
+  // the input sum is the billable figure and the output sum is shown beside it rather than added to it.
+  totals.s1InputTokens = s1Records.reduce((a, r) => a + (r.inputTokens || 0), 0);
+  totals.s1OutputTokens = s1Records.reduce((a, r) => a + (r.outputTokens || 0), 0);
   totals.s1Ok = s1Records.filter((r) => r.ok).length;
   totals.s1Refused = totals.s1Calls - totals.s1Ok;
   totals.s1Questions = s1Records.reduce((a, r) => a + (r.questions || 0), 0);
@@ -871,12 +912,14 @@ function aggregate(cell) {
   totals.contextSteps = delivery.length;
   totals.injections = delivery.filter((r) => r.delivered).length;
 
-  const attributed = { s1Calls: 0, s1Ms: 0, s1Tokens: 0 };
+  const attributed = { s1Calls: 0, s1Ms: 0, s1InputTokens: 0, s1OutputTokens: 0 };
   for (const s of stepMap.values()) {
-    attributed.s1Calls += s.s1Calls; attributed.s1Ms += s.s1Ms; attributed.s1Tokens += s.s1Tokens;
+    attributed.s1Calls += s.s1Calls; attributed.s1Ms += s.s1Ms;
+    attributed.s1InputTokens += s.s1InputTokens; attributed.s1OutputTokens += s.s1OutputTokens;
   }
   for (const t of turnList) {
-    attributed.s1Calls += t.gap.s1Calls; attributed.s1Ms += t.gap.s1Ms; attributed.s1Tokens += t.gap.s1Tokens;
+    attributed.s1Calls += t.gap.s1Calls; attributed.s1Ms += t.gap.s1Ms;
+    attributed.s1InputTokens += t.gap.s1InputTokens; attributed.s1OutputTokens += t.gap.s1OutputTokens;
   }
   const reconciled = attributed.s1Calls + tailScope.s1Calls + idleScope.s1Calls + preScope.s1Calls;
   if (reconciled !== totals.s1Calls) {
@@ -909,21 +952,62 @@ function aggregate(cell) {
   // judgedPairs is 0 because the backend never judged anything, but the local lexical scorer still
   // built edges, so 0/N would read as "the backend judged none of what it was shown" - a claim about
   // a backend that was never asked. `laneAbsent` is what every System-1 column is rendered through.
+  //
+  // `laneDemoted` is the same undefined coverage reached a different way, and it must not print as
+  // `laneAbsent`: a demoted cell *did* have a lane configured, and the reason it made no calls is a
+  // configuration error the operator can act on, not a design decision (F3). The two share every
+  // rendering rule for the numbers - there are none to show either way - and differ in every word
+  // that says why.
   const laneAbsent = cell.lane.state === 'none' || (cell.lane.state === 'unknown' && s1Records.length === 0);
+  const laneDemoted = cell.lane.state === 'demoted';
+  // The pairs the window would have offered, had the gate not held any back. This is the denominator the
+  // validity floor is defined over (F5, `docs/FORMULAS.md`): `judged/scored` alone *rises* when the run
+  // declines work, because a deferred pair is given back by the graph and never reaches `scoredPairs`.
+  const offeredPairs = rgScored + rgDeferred;
+  // `null` when there is nothing to qualify, and separately `null` when the snapshot predates the field:
+  // "no pair was deferred" and "this snapshot cannot say" are different statements about the same 0.
+  const deferredShare = rgDeferredRecorded ? (offeredPairs > 0 ? rgDeferred / offeredPairs : null) : null;
+  // F9: what `FORMULAS.md:431` requires beside a `w`-lowering run. Three-valued for the same reason the
+  // deferral row is: a build that did not write the field and a run in which the event did not happen
+  // are different readings, and only the record can tell them apart.
+  const fallbackSteps = assembly.filter((r) => r.fallback !== undefined);
+  const fallbackRecorded = assembly.some((r) => 'fallback' in r);
+  const unknownAdmittedTotal = assembly.some((r) => 'unknownAdmitted' in r)
+    ? assembly.reduce((a, r) => a + (Number(r.unknownAdmitted) || 0), 0)
+    : null;
+  const recallTreeSteps = assembly.filter((r) => r.recallTree !== undefined);
+  // The tree is `{ [anchorId]: { [hitId]: {...} } }` (`assembler.ts`, `recallTreeOf`): ids and nothing else, one
+  // node per hit the walk placed. The node count is therefore "how much of a walk there was" and `{}` is a real
+  // reading - recall found nothing - rather than a missing value. A record with no `recallTree` key at all is the
+  // missing case, and the three-valued renderer says which of the two a cell has.
+  const countRecallNodes = (node) => {
+    if (node === null || typeof node !== 'object') return 0;
+    let n = 0;
+    for (const value of Object.values(node)) {
+      n += 1 + countRecallNodes(value);
+    }
+    return n;
+  };
+  const recallTreeNodes = recallTreeSteps.reduce((a, r) => a + countRecallNodes(r.recallTree), 0);
   const diagnostics = {
     laneState: cell.lane.state,
     laneAbsent,
+    laneDemoted,
     laneProvider: cell.lane.provider,
     laneMode: cell.lane.mode,
     laneBaseUrl: cell.lane.baseUrl,
     laneSource: cell.lane.source,
+    laneConfiguredProvider: cell.lane.configuredProvider ?? null,
+    laneConflicts: cell.lane.conflicts ?? [],
     laneLabel: laneAbsent
       ? (cell.lane.state === 'none' ? `absent (${cell.lane.source})` : 'absent (no provider evidence)')
-      : `present: ${cell.lane.provider ?? 'unknown'}${cell.lane.mode ? ` (${cell.lane.mode})` : ''}${cell.lane.baseUrl ? ` at ${cell.lane.baseUrl}` : ''}`,
+      : laneDemoted
+        ? `**DEMOTED** to none by a configuration conflict: configured ${cell.lane.configuredProvider}`
+        : `present: ${cell.lane.provider ?? 'unknown'}${cell.lane.mode ? ` (${cell.lane.mode})` : ''}${cell.lane.baseUrl ? ` at ${cell.lane.baseUrl}` : ''}`,
     s1Calls: totals.s1Calls,
     s1Ok: totals.s1Ok,
     s1Refused: totals.s1Refused,
-    s1SuccessRate: totals.s1Calls > 0 ? totals.s1Ok / totals.s1Calls : (laneAbsent ? null : 0),
+    s1SuccessRate: totals.s1Calls > 0 ? totals.s1Ok / totals.s1Calls : (laneAbsent || laneDemoted ? null : 0),
     s1ErrorTop: [...s1Errors.entries()].sort((a, b) => b[1] - a[1])[0] || null,
     scoredPairs: rgScored,
     judgedPairs: rgJudged,
@@ -931,7 +1015,21 @@ function aggregate(cell) {
     // A cell whose graph predates the field has no deferral *reading*; printing 0 for it would claim the run was
     // never held back, which is a different statement from "this snapshot cannot say".
     deferredRecorded: rgDeferredRecorded,
-    coverage: laneAbsent ? null : (rgScored > 0 ? rgJudged / rgScored : null),
+    offeredPairs,
+    deferredShare,
+    coverage: laneAbsent || laneDemoted ? null : (rgScored > 0 ? rgJudged / rgScored : null),
+    // The ratio the validity floor is defined over: judged out of everything the arrival order offered, deferrals
+    // included. Printed beside `coverage`, never instead of it, so a run that stopped asking is visible as such.
+    coverageOffered: laneAbsent || laneDemoted
+      ? null
+      : (offeredPairs > 0 && rgDeferredRecorded ? rgJudged / offeredPairs : null),
+    fallbackSteps: fallbackSteps.length,
+    fallbackRecorded,
+    fallbackKinds: [...new Set(fallbackSteps.map((r) => (typeof r.fallback === 'string' ? r.fallback : JSON.stringify(r.fallback))))],
+    unknownAdmittedTotal,
+    recallTreeRecorded: assembly.some((r) => 'recallTree' in r),
+    recallTreeSteps: recallTreeSteps.length,
+    recallTreeNodes,
     edgeSourceS1: edgeSources['s1-noul'] || 0,
     edgeSourceLexical: edgeSources.lexical || 0,
     rgEdges: (cell.rg.edges || []).length,
@@ -990,12 +1088,12 @@ function valueFor(metric, scope) {
   return v === undefined ? null : v;
 }
 
-// `s1Ms` and `s1Tokens` are System-1 columns exactly as `s1Calls` is, so they get the same
-// treatment: coverage printed beside them, the calls that no step owns printed as their own rows
-// rather than dropped, and an explicit lane marker so a configured-but-refused zero can never be
-// read as a not-configured zero. Only `s1Calls` is annotated inline with the coverage percentage,
-// because a percentage repeated inside a millisecond or token cell makes the number unreadable.
-const S1_METRICS = new Set(['s1Calls', 's1Ms', 's1Tokens']);
+// `s1InputTokens`/`s1OutputTokens` and `s1Ms` are System-1 columns exactly as `s1Calls` is, so they get the same
+// treatment: coverage printed beside them, the calls that no step owns printed as their own rows rather than
+// dropped, and an explicit lane marker so a configured-but-refused zero can never be read as a not-configured zero.
+// Only `s1Calls` is annotated inline with the coverage percentage, because a percentage repeated inside a
+// millisecond or token cell makes the number unreadable.
+const S1_METRICS = new Set(['s1Calls', 's1Ms', 's1InputTokens', 's1OutputTokens']);
 const isS1Metric = (m) => S1_METRICS.has(m.key);
 
 /**
@@ -1005,11 +1103,16 @@ const isS1Metric = (m) => S1_METRICS.has(m.key);
  *   `0 (no S1 lane)`   - the cell has no lane; the zero is by construction
  *   `0 (lane present; 0 ok of N)` - the lane exists and refused or timed out; never a bare `0`
  * Non-zero values need no marker, and non-System-1 metrics are rendered plainly.
+ *
+ * A demoted lane is the third case and is *not* folded into the first: it has no calls, so the number is 0, but
+ * it was configured and then refused, which is a defect in the run and not a property of the arm. The mark says
+ * which (F3).
  */
 function renderS1Value(metric, cell, value, { cellLevel }) {
   const base = renderValue(metric, value);
   if (!isS1Metric(metric)) return base;
   const d = cell.a.diagnostics;
+  if (d.laneDemoted) return `${base} (lane demoted to "none" by a conflict)`;
   if (d.laneAbsent) return `${base} (no S1 lane)`;
   if (base === '0') {
     return cellLevel
@@ -1019,13 +1122,55 @@ function renderS1Value(metric, cell, value, { cellLevel }) {
   return base;
 }
 
-/** Coverage beside a System-1 column: a fraction when the lane exists, `undefined` when it does not. */
+/**
+ * The deferral that qualifies a coverage figure, as a share of the window the run was offered.
+ *
+ * `null` in two different situations that must not print alike: a snapshot with no `deferredPairs` field at all
+ * ("not recorded"), and a graph with no pairs to defer ("0 of 0"). The first is a missing reading; the second is a
+ * measured zero share. F5 - the coverage ratio can be *raised* by declining work, because `assoc-graph.ts` gives a
+ * deferred pair back to the cursor and it never reaches `scoredPairs`, so the share has to appear beside every
+ * coverage figure rather than only in the diagnostics table.
+ */
+function deferredShareText(d) {
+  if (!d.deferredRecorded) return 'deferral share: not recorded by this snapshot';
+  if (d.deferredShare === null) return `deferral share: 0 of 0 pairs (nothing was offered to the gate)`;
+  return (
+    `deferral share: ${fmtPct(d.deferredShare)} (${fmtInt(d.deferredPairs)} deferred of ` +
+    `${fmtInt(d.offeredPairs)} offered = scored + deferred)`
+  );
+}
+
+/**
+ * Coverage beside a System-1 column: a fraction when the lane exists, `undefined` when it does not.
+ *
+ * Two denominators, both printed, because they answer different questions. `judged/scored` is the share of what
+ * the backend was *shown* that it answered; the floor `FORMULAS.md` sets for a cell to count as S1-governed is
+ * now defined over `judged/(scored+deferred)` - the window the arrival order offered - because the first ratio
+ * rises when the gate holds work back, and a floor a run can satisfy by declining work is not a floor.
+ */
 function coverageFor(cell) {
   const d = cell.a.diagnostics;
-  if (d.laneAbsent) {
-    return `undefined — no S1 lane (judged ${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)}; the lexical fallback still built ${fmtInt(d.edgeSourceLexical)} edge(s))`;
+  if (d.laneDemoted) {
+    const why = d.laneConflicts.length > 0 ? d.laneConflicts[0] : 'no conflict text recorded on the wiring record';
+    return (
+      `undefined — **lane demoted** (configured ${d.laneConfiguredProvider}, resolved none by a conflict: ${why}); ` +
+      `judged ${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)} by the lexical fallback, which still built ` +
+      `${fmtInt(d.edgeSourceLexical)} edge(s); ${deferredShareText(d)}`
+    );
   }
-  return `${fmtPct(d.coverage)} (${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)} judged/scored)`;
+  if (d.laneAbsent) {
+    return (
+      `undefined — no S1 lane (judged ${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)}; the lexical fallback ` +
+      `still built ${fmtInt(d.edgeSourceLexical)} edge(s)); ${deferredShareText(d)}`
+    );
+  }
+  const offered = d.coverageOffered === null
+    ? 'offered-denominator coverage: n/a (deferrals not recorded by this snapshot)'
+    : `judged/(scored+deferred) = ${fmtPct(d.coverageOffered)}`;
+  return (
+    `${fmtPct(d.coverage)} (${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)} judged/scored; ${offered}); ` +
+    deferredShareText(d)
+  );
 }
 
 function coverageLine(cells) {
@@ -1035,7 +1180,10 @@ function coverageLine(cells) {
 /** Render one System-1 bucket cell, annotating the call count with the cell's coverage. */
 function annotateS1(metric, cell, bucket) {
   const v = renderS1Value(metric, cell, valueFor(metric, bucket), { cellLevel: false });
-  return metric.key === 's1Calls' ? `${v} (cov ${cell.a.diagnostics.laneAbsent ? 'n/a' : fmtPct(cell.a.diagnostics.coverage)})` : v;
+  const d = cell.a.diagnostics;
+  return metric.key === 's1Calls'
+    ? `${v} (cov ${d.laneAbsent || d.laneDemoted ? 'n/a' : fmtPct(d.coverage)})`
+    : v;
 }
 
 /** All System-1 bucket sums for a metric, in the order the tables print them. */
@@ -1049,11 +1197,22 @@ function s1BucketSum(cell, metric) {
 
 /** One header line naming, per cell, whether it had a System-1 lane at all. */
 function laneHeaderLine(cells) {
-  const present = cells.filter((c) => !c.a.diagnostics.laneAbsent);
+  const present = cells.filter((c) => !c.a.diagnostics.laneAbsent && !c.a.diagnostics.laneDemoted);
   const absent = cells.filter((c) => c.a.diagnostics.laneAbsent);
+  const demoted = cells.filter((c) => c.a.diagnostics.laneDemoted);
   const parts = [];
   if (present.length > 0) {
     parts.push(`had a System-1 lane: ${present.map((c) => `${c.display} — ${c.a.diagnostics.laneLabel}`).join(' · ')}`);
+  }
+  // Named before the absent cells, and in the loudest of the three tones: this is the one of the three readings
+  // that is a defect in the round rather than a decision about the arm, and it used to print as a decision (F3).
+  if (demoted.length > 0) {
+    parts.push(
+      `had a System-1 lane **configured and demoted to none by a configuration conflict**: ` +
+        `${demoted.map((c) => `${c.display} — ${c.a.diagnostics.laneLabel}`).join(' · ')}` +
+        ' (their calls, tokens and time are zero because no backend was ever resolved; this is NOT a no-lane ' +
+        'control, and their coverage is undefined for a different reason than a control arm\'s)',
+    );
   }
   if (absent.length > 0) {
     parts.push(
@@ -1130,10 +1289,12 @@ function renderMarkdown(analysis) {
   out.push(mdTable(['metric', 'unit', ...headers],
     timeMetrics.map((m) => [m.label, UNIT_LABEL[m.unit], ...cells.map((c) => renderS1Value(m, c, valueFor(m, c.a.totals), { cellLevel: true }))])));
   out.push('');
-  if (cells.some((c) => c.a.diagnostics.laneAbsent)) {
+  if (cells.some((c) => c.a.diagnostics.laneAbsent || c.a.diagnostics.laneDemoted)) {
     out.push('A System-1 `0 (no S1 lane)` means the cell had no lane configured, so the zero is by construction;');
-    out.push('`0 (lane present; …)` means a lane existed and its calls were refused or timed out. The two are');
-    out.push('never printed the same way.');
+    out.push('`0 (lane present; …)` means a lane existed and its calls were refused or timed out; and');
+    out.push('`0 (lane demoted to "none" by a conflict)` means a lane **was** configured and a configuration');
+    out.push('conflict dropped the session to `provider: "none"` before it made a call. The three are never');
+    out.push('printed the same way - the third is a defect in the round, not a property of the arm.');
     out.push('');
   }
   out.push('`turn frame` is `turn/end − turn/start`; `step frame` is `step/end − step/start`; `between-step idle`');
@@ -1194,30 +1355,54 @@ function renderMarkdown(analysis) {
   out.push('');
   out.push('`scoredPairs` is what the backend was *offered* and `judgedPairs` what it answered. Since 2026-10-02 a');
   out.push('third number sits beside them, because the upkeep now stops asking a backend that is refusing:');
-  out.push('`deferredPairs` is the work the admission gate held back, which was offered to nobody. It is deliberately');
-  out.push('**not** in the coverage denominator - a pair that was never shown is not a pair the backend failed to');
-  out.push('judge - and it is deliberately not omitted either, because silence about it would make "the run stopped');
-  out.push('asking" indistinguishable from "the backend answered little". Deferred work is not scored lexically: the');
-  out.push('graph holds its cursor and offers the window again, so a deferred pair is delayed, not lost.');
+  out.push('`deferredPairs` is the work the admission gate held back, which was offered to nobody. `judged/scored`');
+  out.push('deliberately leaves it out - a pair that was never shown is not a pair the backend failed to judge - but');
+  out.push('that ratio **rises when the run declines work**, because the graph gives a deferred pair back to its');
+  out.push('cursor and it never reaches `scoredPairs`. The validity floor is therefore stated over the window the');
+  out.push('arrival order offered, `judged / (scored + deferred)`, and both denominators are printed together so a');
+  out.push('cell that looks S1-governed because it stopped asking cannot hide behind the ratio that flatters it.');
+  out.push('Both are `undefined` for a cell that had no lane at all, and that is not the same reading as a low one.');
   out.push('');
-  out.push('Two readings that look alike are kept apart here. A cell with the lane switched off has zero');
-  out.push('System-1 calls, tokens and time *by construction*; a cell with a lane whose backend refused every');
-  out.push('request has a real call count, a real failure split and a measured coverage. The lane state is read,');
-  out.push('never inferred from the call count: it comes from the `kind:"wiring"` record the plugin writes once');
-  out.push('at activation onto the cell\'s own tape (`home/<cell>/.s1cap/tape.jsonl`), whose `s1` field is');
-  out.push('literally `"none"` for the Off choice and `{provider, mode, baseUrl}` otherwise; the tape\'s');
-  out.push('`tuning-file` record and the `provider` on the `s1_call` records are the fallbacks. Only when none');
-  out.push('of those exist is the absence inferred from the silence, and the report says so.');
+  out.push('Three readings that look alike are kept apart here, and until the audit two of them did not. A cell');
+  out.push('whose lane is switched off has zero System-1 calls, tokens and time *by construction*; a cell with a');
+  out.push('lane whose backend refused every request has a real call count, a real failure split and a measured');
+  out.push('coverage; and a cell whose lane was **configured and then demoted to `none` by a configuration');
+  out.push('conflict** has the same zeroes as the first while being a defect rather than a decision. The lane state');
+  out.push('is read, never inferred from the call count: it comes from the `kind:"wiring"` record the plugin writes');
+  out.push('once at activation onto the cell\'s own tape (`home/<cell>/.s1cap/tape.jsonl`), whose `s1` field is');
+  out.push('literally `"none"` for the Off choice and `{provider, mode, baseUrl}` otherwise. The record now also');
+  out.push('carries `configuredProvider` and `conflicts`, which is what tells a demotion from a choice - a `none`');
+  out.push('whose configured provider names something else was demoted. The tape\'s `tuning-file` record and the');
+  out.push('`provider` on the `s1_call` records are the fallbacks. Only when none of those exist is the absence');
+  out.push('inferred from the silence, and the report says so.');
   out.push('');
   out.push(mdTable(['diagnostic', ...headers], [
     ['System-1 lane', ...cells.map((c) => c.a.diagnostics.laneLabel)],
-    ['System-1 calls ok / refused / total', ...cells.map((c) => (c.a.diagnostics.laneAbsent
-      ? '— (no S1 lane)'
+    ['System-1 lane configured provider', ...cells.map((c) => (
+      c.a.diagnostics.laneConfiguredProvider === null
+        ? '— (not recorded by this snapshot)'
+        : String(c.a.diagnostics.laneConfiguredProvider)))],
+    ['configuration conflicts behind the demotion', ...cells.map((c) => (
+      c.a.diagnostics.laneDemoted
+        ? (c.a.diagnostics.laneConflicts.length > 0
+          ? c.a.diagnostics.laneConflicts.map((x) => `"${x}"`).join('; ')
+          : '— (demoted, but no conflict text on the wiring record)')
+        : (c.a.diagnostics.laneConflicts.length > 0 ? `none affecting the lane (${c.a.diagnostics.laneConflicts.length} recorded)` : '— (none)')))],
+    ['System-1 calls ok / refused / total', ...cells.map((c) => (c.a.diagnostics.laneAbsent || c.a.diagnostics.laneDemoted
+      ? (c.a.diagnostics.laneDemoted ? '— (lane demoted; no backend was resolved)' : '— (no S1 lane)')
       : `${fmtInt(c.a.diagnostics.s1Ok)} / ${fmtInt(c.a.diagnostics.s1Refused)} / ${fmtInt(c.a.diagnostics.s1Calls)}`))],
-    ['System-1 call success rate', ...cells.map((c) => (c.a.diagnostics.laneAbsent ? '— (no S1 lane)' : fmtPct(c.a.diagnostics.s1SuccessRate)))],
-    ['System-1 calls refused', ...cells.map((c) => (c.a.diagnostics.laneAbsent ? '— (no S1 lane)' : fmtInt(c.a.diagnostics.s1Refused)))],
-    ['top refusal reason', ...cells.map((c) => (c.a.diagnostics.s1ErrorTop ? `${c.a.diagnostics.s1ErrorTop[0]} ×${c.a.diagnostics.s1ErrorTop[1]}` : (c.a.diagnostics.laneAbsent ? '— (no S1 lane)' : '— (none refused)')) )],
-    ['association pairs judged / scored', ...cells.map((c) => (c.a.diagnostics.laneAbsent
+    ['System-1 call success rate', ...cells.map((c) => (c.a.diagnostics.laneAbsent
+      ? '— (no S1 lane)'
+      : c.a.diagnostics.laneDemoted ? '— (lane demoted; no backend was resolved)' : fmtPct(c.a.diagnostics.s1SuccessRate)))],
+    ['System-1 calls refused', ...cells.map((c) => (c.a.diagnostics.laneAbsent
+      ? '— (no S1 lane)'
+      : c.a.diagnostics.laneDemoted ? '— (lane demoted; no backend was resolved)' : fmtInt(c.a.diagnostics.s1Refused)))],
+    ['top refusal reason', ...cells.map((c) => (c.a.diagnostics.s1ErrorTop
+      ? `${c.a.diagnostics.s1ErrorTop[0]} ×${c.a.diagnostics.s1ErrorTop[1]}`
+      : (c.a.diagnostics.laneDemoted
+        ? '— (lane demoted; the backend was never asked)'
+        : c.a.diagnostics.laneAbsent ? '— (no S1 lane)' : '— (none refused)')))],
+    ['association pairs judged / scored', ...cells.map((c) => ((c.a.diagnostics.laneAbsent || c.a.diagnostics.laneDemoted)
       ? `${fmtInt(c.a.diagnostics.judgedPairs)} / ${fmtInt(c.a.diagnostics.scoredPairs)} (backend never judged)`
       : `${fmtInt(c.a.diagnostics.judgedPairs)} / ${fmtInt(c.a.diagnostics.scoredPairs)}`))],
     // The third number, and the reason `judged / scored` stays readable when the backend is refusing: a pair the
@@ -1225,18 +1410,48 @@ function renderMarkdown(analysis) {
     ['association pairs deferred (not offered)', ...cells.map((c) => (c.a.diagnostics.deferredRecorded
       ? fmtInt(c.a.diagnostics.deferredPairs)
       : '— (not recorded by this snapshot)'))],
-    ['**System-1 coverage**', ...cells.map((c) => (c.a.diagnostics.laneAbsent ? '**undefined** (no S1 lane)' : `**${fmtPct(c.a.diagnostics.coverage)}**`))],
+    ['association pairs offered (scored + deferred)', ...cells.map((c) => (c.a.diagnostics.deferredRecorded
+      ? fmtInt(c.a.diagnostics.offeredPairs)
+      : '— (not recorded by this snapshot)'))],
+    ['deferred share of offered', ...cells.map((c) => (c.a.diagnostics.deferredShare === null
+      ? '— (not recorded by this snapshot)'
+      : fmtPct(c.a.diagnostics.deferredShare)))],
+    ['**System-1 coverage**', ...cells.map((c) => (c.a.diagnostics.laneDemoted
+      ? '**undefined** (**lane demoted by a conflict**)'
+      : c.a.diagnostics.laneAbsent ? '**undefined** (no S1 lane)' : `**${fmtPct(c.a.diagnostics.coverage)}**`))],
+    ['System-1 coverage over offered (floor denominator)', ...cells.map((c) => (c.a.diagnostics.coverageOffered === null
+      ? (c.a.diagnostics.laneDemoted ? '— (lane demoted by a conflict)' : c.a.diagnostics.laneAbsent ? '— (no S1 lane)' : '— (deferrals not recorded by this snapshot)')
+      : fmtPct(c.a.diagnostics.coverageOffered)))],
+    ['recall block source', ...cells.map((c) => (c.a.diagnostics.fallbackRecorded
+      ? `${fmtInt(c.a.diagnostics.assemblySteps - c.a.diagnostics.fallbackSteps)} backend / ${fmtInt(c.a.diagnostics.fallbackSteps)} recency-fallback` +
+        (c.a.diagnostics.fallbackKinds.length > 0 ? ` (${c.a.diagnostics.fallbackKinds.join(', ')})` : '')
+      : '— (not recorded by this snapshot)'))],
+    ['unjudged pairs admitted (`unknownAdmitted`)', ...cells.map((c) => (c.a.diagnostics.unknownAdmittedTotal === null
+      ? '— (not recorded by this snapshot)'
+      : fmtInt(c.a.diagnostics.unknownAdmittedTotal)))],
+    ['recall structure recorded (steps / nodes placed)', ...cells.map((c) => (c.a.diagnostics.recallTreeRecorded
+      ? `${fmtInt(c.a.diagnostics.recallTreeSteps)} / ${fmtInt(c.a.diagnostics.recallTreeNodes)}`
+      : '— (not recorded by this snapshot)'))],
     ['association edges from s1-noul / lexical', ...cells.map((c) => `${fmtInt(c.a.diagnostics.edgeSourceS1)} / ${fmtInt(c.a.diagnostics.edgeSourceLexical)}`)],
     ['context injections delivered', ...cells.map((c) => `${fmtInt(c.a.diagnostics.injections)} of ${fmtInt(c.a.diagnostics.contextSteps)} steps`)],
     ['cache hit rate (hit ÷ (hit+miss))', ...cells.map((c) => fmtPct(c.a.diagnostics.cacheHitRate))],
     ['human messages / harness- or plugin-injected', ...cells.map((c) => `${fmtInt(c.a.diagnostics.humanMessages)} / ${fmtInt(c.a.diagnostics.injectedMessages)}`)],
   ]));
   out.push('');
-  out.push('Coverage is `judgedPairs / scoredPairs` for a cell that had a lane. For a cell with no lane it is');
-  out.push('**undefined**, not 0: `judgedPairs` is 0 because the backend was never asked, and printing 0/N');
-  out.push('would describe a backend that judged none of what it was shown, which is a different claim about a');
-  out.push('backend that does not exist in that cell. The lexical fallback still scores and still builds edges,');
-  out.push('which is why the edge row is split by source.');
+  out.push('Coverage is `judgedPairs / scoredPairs` for a cell that had a lane, and `judgedPairs / (scoredPairs +');
+  out.push('deferredPairs)` for the floor `FORMULAS.md` sets at 0.5 - the first says how much of what the backend');
+  out.push('was shown it answered, the second how much of the window the run would have offered it answered. For a');
+  out.push('cell with no lane *or with a lane demoted by a conflict*, coverage is **undefined**, not 0: `judgedPairs`');
+  out.push('is 0 because the backend was never asked, and printing 0/N would describe a backend that judged none of');
+  out.push('what it was shown, which is a different claim about a backend that does not exist in that cell. The');
+  out.push('lexical fallback still scores and still builds edges, which is why the edge row is split by source.');
+  out.push('');
+  out.push('The recall rows are `FORMULAS.md`\'s requirement that a run which lowers `w` carries `fallback` and');
+  out.push('`unknownAdmitted` beside it, plus the `recallTree` root count. "Recency-fallback" is the event that');
+  out.push('silently replaces the System-1 selection with the last-N window, so without it `selected`/`candidates`');
+  out.push('cannot be read as evidence about the *selector* - "recall selected nothing" and "recall was overridden"');
+  out.push('are different facts about the same count. `— (not recorded by this snapshot)` means the build did not');
+  out.push('write the field at all, which a round must not read as "the event did not happen".');
   out.push('');
   out.push('The message row is the counting trap in the session store: `user/message` records include the two');
   out.push('the harness injects at session start (`Current runtime context…`, the `<system-reminder>` skill');
@@ -1257,7 +1472,7 @@ function renderMarkdown(analysis) {
       ...cells.map((c) => {
         const t = c.a.turnList.find((x) => x.turn === idx);
         if (!t) return '-';
-        if (m.key === 's1Calls') return `${renderS1Value(m, c, valueFor(m, t), { cellLevel: false })} (cov ${c.a.diagnostics.laneAbsent ? 'n/a' : fmtPct(c.a.diagnostics.coverage)})`;
+        if (m.key === 's1Calls') return `${renderS1Value(m, c, valueFor(m, t), { cellLevel: false })} (cov ${c.a.diagnostics.laneAbsent || c.a.diagnostics.laneDemoted ? 'n/a' : fmtPct(c.a.diagnostics.coverage)})`;
         return isS1Metric(m) ? renderS1Value(m, c, valueFor(m, t), { cellLevel: false }) : renderValue(m, valueFor(m, t));
       }),
     ]);
@@ -1328,7 +1543,9 @@ function renderMarkdown(analysis) {
       const n = c.a.totals.steps;
       const v = rowValue(c);
       if (v === null || !n) return '-';
-      if (isS1Metric(m) && c.a.diagnostics.laneAbsent) return `0 (no S1 lane; ÷${n})`;
+      if (isS1Metric(m) && (c.a.diagnostics.laneAbsent || c.a.diagnostics.laneDemoted)) {
+        return `${c.a.diagnostics.laneDemoted ? '0 (lane demoted by a conflict' : '0 (no S1 lane'}; ÷${n})`;
+      }
       const mean = v / n;
       return m.unit === 'ms' ? `${(mean / 1000).toFixed(2)}s (÷${n})` : `${mean.toFixed(1)} (÷${n})`;
     })];
@@ -1420,18 +1637,47 @@ function renderCsv(analysis) {
     }
     // diagnostics are emitted with their own metric names so a cost table can never absorb them
     const d = c.a.diagnostics;
+    const noLane = d.laneAbsent || d.laneDemoted;
     const diag = [
       ['mechanism', 'System-1 lane', 'flag', d.laneLabel],
       ['mechanism', 'System-1 lane absent (zero by construction)', 'flag', d.laneAbsent ? 1 : 0],
+      // A third flag rather than a reuse of the one above: `laneAbsent = 1` used to be the only way to say "there
+      // were no calls", and it read the same for a control arm and for a cell whose backend was demoted by a
+      // conflict - the conflation F3 is about. Every downstream consumer that reads only the CSV needs both.
+      ['mechanism', 'System-1 lane demoted by a configuration conflict', 'flag', d.laneDemoted ? 1 : 0],
+      ['mechanism', 'System-1 lane configured provider', 'flag', d.laneConfiguredProvider ?? ''],
       ['mechanism', 'System-1 lane provider', 'flag', d.laneProvider ?? ''],
-      ['mechanism', 'System-1 calls ok', 'count', d.laneAbsent ? 0 : d.s1Ok],
-      ['mechanism', 'System-1 calls refused', 'count', d.laneAbsent ? 0 : d.s1Refused],
+      ['mechanism', 'System-1 lane conflicts', 'count', d.laneConflicts.length],
+      ['mechanism', 'System-1 lane conflict detail', 'flag', d.laneConflicts.join(' | ')],
+      ['mechanism', 'System-1 calls ok', 'count', noLane ? 0 : d.s1Ok],
+      ['mechanism', 'System-1 calls refused', 'count', noLane ? 0 : d.s1Refused],
       ['mechanism', 'System-1 call success rate', 'ratio', d.s1SuccessRate],
       ['mechanism', 'association pairs scored', 'count', d.scoredPairs],
       ['mechanism', 'association pairs judged', 'count', d.judgedPairs],
+      // F5: the fields a reader of *this file* needs to qualify the ratio below, and which the audit found entirely
+      // absent from it. `deferredPairs` is omitted, not zeroed, when the snapshot predates the field - a 0 would
+      // claim the run was never held back.
+      ['mechanism', 'association pairs deferred', 'count', d.deferredRecorded ? d.deferredPairs : null],
+      ['mechanism', 'association pairs offered (scored + deferred)', 'count', d.deferredRecorded ? d.offeredPairs : null],
+      ['mechanism', 'deferred share of offered', 'ratio', d.deferredShare],
+      ['mechanism', 'deferred pairs recorded by this snapshot', 'flag', d.deferredRecorded ? 1 : 0],
       // omitted rather than written as 0 when the lane is absent: a 0 here would be read as a measurement
-      ['mechanism', 'System-1 coverage (judged/scored)', 'ratio', d.laneAbsent ? null : d.coverage],
-      ['mechanism', 'System-1 coverage state', 'flag', d.laneAbsent ? 'undefined (no S1 lane)' : 'defined'],
+      ['mechanism', 'System-1 coverage (judged/scored)', 'ratio', noLane ? null : d.coverage],
+      // The floor's denominator (`FORMULAS.md`): a deferred pair is given back by the graph and never reaches
+      // `scoredPairs`, so `judged/scored` can be raised by declining work. This ratio cannot.
+      ['mechanism', 'System-1 coverage (judged/(scored+deferred))', 'ratio', d.coverageOffered],
+      ['mechanism', 'System-1 coverage state', 'flag', d.laneDemoted
+        ? 'undefined (lane demoted by a conflict)'
+        : d.laneAbsent ? 'undefined (no S1 lane)' : 'defined'],
+      // F9: `FORMULAS.md:431` requires these beside any run that lowered `w`. Omitted when the build did not write
+      // them, so "the record cannot say" never arrives as "the event did not happen".
+      ['mechanism', 'recall block source', 'flag', d.fallbackRecorded
+        ? (d.fallbackSteps === 0 ? 'backend (no recency fallback)' : `recency-fallback on ${d.fallbackSteps} step(s)`)
+        : null],
+      ['mechanism', 'recall recency-fallback steps', 'count', d.fallbackRecorded ? d.fallbackSteps : null],
+      ['mechanism', 'unjudged pairs admitted (unknownAdmitted)', 'count', d.unknownAdmittedTotal],
+      ['mechanism', 'recall structure steps recorded', 'count', d.recallTreeRecorded ? d.recallTreeSteps : null],
+      ['mechanism', 'recall structure nodes placed', 'count', d.recallTreeRecorded ? d.recallTreeNodes : null],
       ['mechanism', 'association edges from s1-noul', 'count', d.edgeSourceS1],
       ['mechanism', 'association edges from lexical', 'count', d.edgeSourceLexical],
       ['mechanism', 'context injections delivered', 'count', d.injections],
@@ -1929,6 +2175,7 @@ function renderSvgs(analysis) {
     display: c.label !== c.name ? `${c.label} (${c.name})` : c.name,
     colour: CELL_COLOURS[i % CELL_COLOURS.length],
     laneAbsent: c.a.diagnostics.laneAbsent,
+    laneDemoted: c.a.diagnostics.laneDemoted,
   }));
   // A chart gets screenshotted and forwarded on its own, so the release and the model travel with it
   // as their own caption group, second - after the run directory and before anything else - where no
@@ -1943,6 +2190,7 @@ function renderSvgs(analysis) {
   const s1Label = (key, name, raw, text) => {
     const cell = cells.find((x) => x.name === name);
     if (!cell) return text;
+    if (cell.a.diagnostics.laneDemoted) return `${text} (lane demoted)`;
     if (cell.a.diagnostics.laneAbsent) return `${text} (no lane)`;
     if (text === '0') return '0 (lane, 0 ok)';
     return text;
@@ -1959,7 +2207,13 @@ function renderSvgs(analysis) {
   const costMetrics = METRICS.filter((m) => m.group === 'cost' && m.scopes.includes('cell'));
 
   const laneSummary = cells
-    .map((c) => `${c.label !== c.name ? c.label : c.name}: ${c.a.diagnostics.laneAbsent ? 'no S1 lane' : `S1 ${c.a.diagnostics.laneProvider ?? 'present'}`}`)
+    .map((c) => {
+      const d = c.a.diagnostics;
+      const name = c.label !== c.name ? c.label : c.name;
+      if (d.laneDemoted) return `${name}: S1 lane DEMOTED to none by a conflict (configured ${d.laneConfiguredProvider})`;
+      if (d.laneAbsent) return `${name}: no S1 lane`;
+      return `${name}: S1 ${d.laneProvider ?? 'present'}`;
+    })
     .join(' · ');
 
   const valueOfFrom = (totalsOf) => (key, name) => {
@@ -2040,17 +2294,22 @@ function renderSvgs(analysis) {
       sub(),
       ...prov(),
       `group: mechanism · one group per metric, one bar per cell · snapshot ${snapshotAt}`,
-      `coverage = judgedPairs / scoredPairs from the association-graph snapshot`,
+      `coverage = judgedPairs / scoredPairs; the floor is defined over judgedPairs / (scoredPairs + deferredPairs)`,
       laneSummary,
     ],
     width,
     panels: [
       {
         title: 'System-1 governance',
-        note: 'coverage is the share of scored association pairs the backend actually judged. A cell with no lane has no coverage at all - not a coverage of zero - so its bar is absent.',
+        note: 'coverage is the share of scored association pairs the backend actually judged; "over offered" adds the deferred pairs the gate held back, which is the denominator FORMULAS.md sets the 0.5 floor over. A cell with no lane has no coverage at all - not a coverage of zero - so its bar is absent, and a cell whose lane was demoted by a conflict is absent for a different reason.',
         unit: 'ratio',
         metrics: [
           { key: 'coverage', label: 'System-1 coverage (judged/scored)' },
+          // F5: the floor's denominator drawn beside the ratio it qualifies. `judged/scored` *rises* when the gate
+          // holds work back, so a chart showing only it can make a cell that stopped asking look healthier than one
+          // that kept asking and was refused. This series cannot be raised by declining work.
+          { key: 'coverageOffered', label: 'coverage over offered (judged/(scored+deferred))' },
+          { key: 'deferredShare', label: 'deferred share of the offered window' },
           { key: 's1SuccessRate', label: 'System-1 call success rate' },
           { key: 'cacheHitRate', label: 'cache hit rate (diagnostic only)' },
         ],
@@ -2062,9 +2321,17 @@ function renderSvgs(analysis) {
         labelFor: (key, name, raw, text) => {
           const cell = cells.find((x) => x.name === name);
           if (raw === null || raw === undefined) {
-            return cell && cell.a.diagnostics.laneAbsent && (key === 'coverage' || key === 's1SuccessRate')
-              ? 'n/a (no lane)'
-              : 'n/a';
+            if (!cell) return 'n/a';
+            if (cell.a.diagnostics.laneDemoted && (key === 'coverage' || key === 's1SuccessRate')) {
+              return 'n/a (lane demoted)';
+            }
+            if (cell.a.diagnostics.laneAbsent && (key === 'coverage' || key === 's1SuccessRate')) {
+              return 'n/a (no lane)';
+            }
+            // A coverage over the offered window that is absent because the snapshot predates `deferredPairs` and
+            // one that is absent because there were no pairs at all are different readings. Both draw as `n/a`; the
+            // markdown and the CSV carry which one it is.
+            return 'n/a';
           }
           return text;
         },
@@ -2437,6 +2704,94 @@ function buildSyntheticRun(root) {
   };
   const tapeF = [{ schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true }];
 
+  // --- cell G: a lane whose coverage is *raised* by the work it declined -----------------------------
+  //
+  // The hazard F5 is about, made arithmetic. The gate holds 10 pairs back; `assoc-graph.ts` gives them to the
+  // cursor again, so they never reach `scoredPairs`, which stays 10 while `judgedPairs` is 6. `judged/scored` is
+  // therefore 0.60 - above the 0.5 validity floor - while the run only ever answered 6 of the 20 pairs the arrival
+  // order offered. The second denominator is 6/20 = 0.30, below the floor. Without `deferredPairs` in the
+  // machine-readable export, this cell reads as S1-governed.
+  const G = [];
+  const evG = (type, time, data) => G.push({ type, time, seq: G.length, data });
+  G.push({ type: 'session', version: 4, id: 'session-gggg', createdAt: 900 });
+  evG('turn/start', 1000, { turn: 1 });
+  evG('user/message', 1001, { content: [{ type: 'text', text: 'human' }], source: { kind: 'user' } });
+  evG('step/start', 1010, { turn: 1, step: 1 });
+  evG('assistant/message', 1030, { turn: 1, step: 1, message: { role: 'assistant', content: [] }, usage: { inputTokens: 2, cacheReadTokens: 10, outputTokens: 1, totalTokens: 13 } });
+  evG('step/end', 1035, { turn: 1, step: 1 });
+  evG('turn/end', 1040, { turn: 1, reason: { kind: 'completed' } });
+  const controlG = [
+    // The second assembly record carries the recency fallback and the unjudged-admitted count: the two fields
+    // `FORMULAS.md:431` requires beside a run that lowered `w`, and which no report printed before F9.
+    { type: 'assembly', schema: 1, ts: 1005, sessionId: 'session-gggg', seq: 0, candidates: 3, selected: 2, recallTree: { s0: { s1: {}, s2: {} } } },
+    { type: 'assembly', schema: 1, ts: 1018, sessionId: 'session-gggg', seq: 1, candidates: 1, selected: 1, fallback: 'recency-window', unknownAdmitted: 4, recallTree: {} },
+    { type: 'context_delivery', schema: 1, ts: 1006, sessionId: 'session-gggg', cell: 'G', delivered: false, reason: 'the decision carried no messages', blocks: [] },
+    { type: 's1_call', schema: 1, ts: 1012, sessionId: 'session-gggg', provider: 'laya-serve', role: 'assoc', kind: 'noul', questions: 5, inputTokens: 100, outputTokens: 0, ms: 10, ok: true },
+    { type: 's1_call', schema: 1, ts: 1014, sessionId: 'session-gggg', provider: 'laya-serve', role: 'assoc', kind: 'noul', questions: 5, inputTokens: 0, outputTokens: 0, ms: 0, ok: false, error: 'S1HttpError: systemone 503: server busy' },
+  ];
+  const rgG = {
+    schema: 2, sessionId: 'session-gggg', scoredPairs: 10, judgedPairs: 6, deferredPairs: 10, order: ['a', 'b'], segments: [],
+    edges: [{ from: 'a', to: 'b', w: 0.3, source: 's1-noul', verifiedAt: 1030 }],
+    scores: [{ from: 'a', to: 'b', w: 0.3, source: 's1-noul', at: 1030 }],
+  };
+  const tapeG = [{ schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true, configuredProvider: 'laya-serve', conflicts: [] }];
+
+  // --- cell H: a lane CONFIGURED and then demoted by a configuration conflict -------------------------
+  //
+  // The reading F3 is about. `s1: "none"` on the wiring record - byte-for-byte what cell E writes - but the
+  // `configuredProvider` beside it says `laya-serve`, and `conflicts` says why. The old report merged this with
+  // cell E: "undefined - no S1 lane", i.e. a C2 whose backend was demoted printed as a deliberate control arm, in
+  // the direction that flatters the round.
+  const H = [];
+  const evH = (type, time, data) => H.push({ type, time, seq: H.length, data });
+  H.push({ type: 'session', version: 4, id: 'session-hhhh', createdAt: 900 });
+  evH('turn/start', 1000, { turn: 1 });
+  evH('user/message', 1001, { content: [{ type: 'text', text: 'human' }], source: { kind: 'user' } });
+  evH('step/start', 1010, { turn: 1, step: 1 });
+  evH('assistant/message', 1030, { turn: 1, step: 1, message: { role: 'assistant', content: [] }, usage: { inputTokens: 2, cacheReadTokens: 10, outputTokens: 1, totalTokens: 13 } });
+  evH('step/end', 1035, { turn: 1, step: 1 });
+  evH('turn/end', 1040, { turn: 1, reason: { kind: 'completed' } });
+  const controlH = [
+    { type: 'assembly', schema: 1, ts: 1005, sessionId: 'session-hhhh', seq: 0, candidates: 2, selected: 1 },
+    { type: 'context_delivery', schema: 1, ts: 1006, sessionId: 'session-hhhh', cell: 'H', delivered: false, reason: 'the decision carried no messages', blocks: [] },
+  ];
+  const rgH = {
+    schema: 2, sessionId: 'session-hhhh', scoredPairs: 6, judgedPairs: 0, deferredPairs: 0, order: ['a', 'b'], segments: [],
+    edges: [{ from: 'a', to: 'b', w: 0.3, source: 'lexical', verifiedAt: 1030 }],
+    scores: [{ from: 'a', to: 'b', w: 0.3, source: 'lexical', at: 1030 }],
+  };
+  const tapeH = [{
+    schema: 0,
+    kind: 'wiring',
+    s1: 'none',
+    configuredProvider: 'laya-serve',
+    conflicts: ['only one S1 backend may be active: laya.enabled=true conflicts with s1.provider="jev" (set provider to "laya-serve", or disable Laya)'],
+    relevance: false,
+  }];
+  // --- cell I: a present lane whose graph predates `deferredPairs` -------------------------------------
+  //
+  // The one case where the second denominator cannot be computed at all. It must say "not recorded", never 0, and
+  // the deferral row must keep saying it too - the audit confirmed that property and it must survive this change.
+  const I = [];
+  const evI = (type, time, data) => I.push({ type, time, seq: I.length, data });
+  I.push({ type: 'session', version: 4, id: 'session-iiii', createdAt: 900 });
+  evI('turn/start', 1000, { turn: 1 });
+  evI('user/message', 1001, { content: [{ type: 'text', text: 'human' }], source: { kind: 'user' } });
+  evI('step/start', 1010, { turn: 1, step: 1 });
+  evI('assistant/message', 1030, { turn: 1, step: 1, message: { role: 'assistant', content: [] }, usage: { inputTokens: 2, cacheReadTokens: 10, outputTokens: 1, totalTokens: 13 } });
+  evI('step/end', 1035, { turn: 1, step: 1 });
+  evI('turn/end', 1040, { turn: 1, reason: { kind: 'completed' } });
+  const controlI = [
+    // No `fallback`, no `unknownAdmitted`, no `recallTree`: a pre-fix build. All three rows must say so rather than
+    // printing "the event did not happen".
+    { type: 'assembly', schema: 1, ts: 1005, sessionId: 'session-iiii', seq: 0, candidates: 1, selected: 1 },
+    { type: 'context_delivery', schema: 1, ts: 1006, sessionId: 'session-iiii', cell: 'I', delivered: false, reason: 'the decision carried no messages', blocks: [] },
+  ];
+  const rgI = {
+    schema: 1, sessionId: 'session-iiii', scoredPairs: 4, judgedPairs: 2, order: ['a'], segments: [], edges: [], scores: [],
+  };
+  const tapeI = [{ schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true }];
+
   const mkCell = (name, events, control, rg, tape) => {
     const home = join(root, 'home', name);
     const storeDir = join(home, 'sessions', '--workspace--', `session-${name.toLowerCase()}`);
@@ -2462,6 +2817,9 @@ function buildSyntheticRun(root) {
   mkCell('B', B, controlB, rgB);
   mkCell('E', E, controlE, rgE, tapeE);
   mkCell('F', F, controlF, rgF, tapeF);
+  mkCell('G', G, controlG, rgG, tapeG);
+  mkCell('H', H, controlH, rgH, tapeH);
+  mkCell('I', I, controlI, rgI, tapeI);
   // The round's software identity, exactly as the harness writes it, including the plugin that does
   // *not* declare this release as supported - the case that motivated recording it at all.
   writeFileSync(join(root, 'manifest.json'), `${JSON.stringify({
@@ -2540,11 +2898,14 @@ function runSelfTest() {
       assertTrue(full.text.includes('turn/end'), 'the multi-frame walk should reach the last frame');
     }, 'multi-frame zstd walk reaches every frame (naive decode does not)');
 
-    const analysis = analyseRun(root, ['A', 'B', 'E', 'F'], new Map([['A', 'alpha'], ['E', 'never'], ['F', 'refused']]), '2026-01-01T00:00:00.000Z');
+    const analysis = analyseRun(root, ['A', 'B', 'E', 'F', 'G', 'H', 'I'], new Map([['A', 'alpha'], ['E', 'never'], ['F', 'refused'], ['G', 'shrinkable'], ['H', 'demoted'], ['I', 'predeferral']]), '2026-01-01T00:00:00.000Z');
     const A = analysis.cells.find((c) => c.name === 'A');
     const B = analysis.cells.find((c) => c.name === 'B');
     const E = analysis.cells.find((c) => c.name === 'E');
     const F = analysis.cells.find((c) => c.name === 'F');
+    const G = analysis.cells.find((c) => c.name === 'G');
+    const H = analysis.cells.find((c) => c.name === 'H');
+    const I = analysis.cells.find((c) => c.name === 'I');
 
     check(() => {
       assertEqual(A.a.totals.turns, 2, 'A turns');
@@ -2567,8 +2928,18 @@ function runSelfTest() {
       assertEqual(A.a.totals.hitTokens, 600, 'A hit tokens');
       assertEqual(A.a.totals.missTokens, 60, 'A uncached input tokens');
       assertEqual(A.a.totals.outTokens, 18, 'A output tokens');
-      assertEqual(A.a.totals.s1Tokens, 7 + 9 + 9 + 3, 'A System-1 lane tokens');
-    }, 'cell A tokens (hit 600, miss 60, out 18, S1 lane 28)');
+      // F19: the lane's two halves, counted apart. A's five calls carry input 7+8+9+3+0 = 27 and output 0+1+0+0+0 =
+      // 1. The old single column printed 28 - the *sum* of the quantity `FORMULAS.md` prices and one it prices at
+      // zero. The priced figure is the input row.
+      assertEqual(A.a.totals.s1InputTokens, 7 + 8 + 9 + 3 + 0, 'A System-1 lane input tokens');
+      assertEqual(A.a.totals.s1OutputTokens, 0 + 1 + 0 + 0 + 0, 'A System-1 lane output tokens');
+      assertEqual(
+        A.a.totals.s1InputTokens + A.a.totals.s1OutputTokens,
+        28,
+        'the two rows still add up to what the single column used to print',
+      );
+      assertTrue(A.a.totals.s1Tokens === undefined, 'and the mixed column is gone rather than left beside them');
+    }, 'cell A tokens (hit 600, miss 60, out 18, S1 lane 27 in + 1 out - split, not summed)');
 
     check(() => {
       const s11 = A.a.steps.find((s) => s.turn === 1 && s.step === 1);
@@ -2635,7 +3006,8 @@ function runSelfTest() {
       assertEqual(B.a.totals.steps, 1, 'B steps');
       assertEqual(B.a.totals.s1Calls, 2, 'B S1 calls');
       assertEqual(B.a.totals.s1Ms, 4, 'B S1 time');
-      assertEqual(B.a.totals.s1Tokens, 11, 'B S1 lane tokens');
+      assertEqual(B.a.totals.s1InputTokens, 11, 'B S1 lane input tokens');
+      assertEqual(B.a.totals.s1OutputTokens, 0, 'B S1 lane output tokens');
       assertTrue(B.a.steps.every((s) => s.turn === 1 && s.step === 1), 'B has no step 1.2');
     }, 'cell B is smaller than A and keeps its own step count');
 
@@ -2653,7 +3025,11 @@ function runSelfTest() {
       assertTrue(md.includes('| - |') || md.includes('| - |'), 'missing steps render as a dash, not as zero');
       const s1Section = md.split('### System-1 calls per step')[1] || '';
       assertTrue(s1Section.includes('coverage beside each System-1 column'), 'coverage is repeated beside System-1 columns');
-      for (const label of ['System-1 time per step', 'System-1 lane\'s own tokens per step']) {
+      for (const label of [
+        'System-1 time per step',
+        'System-1 lane input tokens (the priced quantity) per step',
+        'System-1 lane output tokens (free under the cost model) per step',
+      ]) {
         const sec = md.split(`### ${label}`)[1] || '';
         assertTrue(sec.includes('coverage beside each System-1 column'), `coverage is repeated in "${label}"`);
         assertTrue(sec.includes('between turns (after step/end'), `"${label}" carries the unattributed rows`);
@@ -2669,7 +3045,8 @@ function runSelfTest() {
       assertEqual(E.label, 'never', 'E display label');
       assertEqual(E.a.totals.s1Calls, 0, 'E System-1 calls');
       assertEqual(E.a.totals.s1Ms, 0, 'E System-1 time');
-      assertEqual(E.a.totals.s1Tokens, 0, 'E System-1 lane tokens');
+      assertEqual(E.a.totals.s1InputTokens, 0, 'E System-1 lane input tokens');
+      assertEqual(E.a.totals.s1OutputTokens, 0, 'E System-1 lane output tokens');
       assertEqual(E.a.diagnostics.judgedPairs, 0, 'E judgedPairs');
       assertEqual(E.a.diagnostics.scoredPairs, 8, 'E scoredPairs');
       assertEqual(E.a.diagnostics.coverage, null, 'E coverage is undefined, not 0');
@@ -2719,6 +3096,100 @@ function runSelfTest() {
       assertTrue(!lines.some((l) => l.startsWith('E,never,mechanism,System-1 coverage (judged/scored)')), 'csv omits a numeric coverage for E rather than writing 0');
       assertTrue(lines.some((l) => l.startsWith('F,refused,mechanism,System-1 coverage (judged/scored),ratio,diagnostic,,,,0')), 'csv writes F\'s measured coverage 0');
     }, 'csv is long-format, keeps the cache hit rate out of the cost group, and distinguishes the two System-1 zeros');
+
+    check(() => {
+      // F5. The cell whose coverage is raised by the work it declined: 6 judged of 10 scored is 0.60, above the 0.5
+      // floor, while only 6 of the 20 pairs the arrival order offered were ever answered. The second denominator is
+      // the one the floor is defined over, and both must be readable from the report *and* from the CSV.
+      assertEqual(G.a.diagnostics.scoredPairs, 10, 'G scored pairs');
+      assertEqual(G.a.diagnostics.deferredPairs, 10, 'G deferred pairs');
+      assertEqual(G.a.diagnostics.offeredPairs, 20, 'G offered = scored + deferred');
+      assertEqual(G.a.diagnostics.coverage, 0.6, 'G judged/scored, raised by declining work');
+      assertEqual(G.a.diagnostics.coverageOffered, 0.3, 'G judged/(scored+deferred), the floor denominator');
+      assertTrue(G.a.diagnostics.coverage > 0.5 && G.a.diagnostics.coverageOffered < 0.5,
+        'the fixture must actually straddle the 0.5 floor, or it proves nothing');
+      assertEqual(G.a.diagnostics.deferredShare, 0.5, 'G deferred share = 10/20');
+
+      const mdG = renderMarkdown(analysis);
+      assertTrue(mdG.includes('judged/(scored+deferred) = 30.0%'), 'the offered denominator is printed beside coverage');
+      assertTrue(mdG.includes('deferral share: 50.0% (10 deferred of 20 offered = scored + deferred)'),
+        'the deferral share and its denominator are printed beside every coverage figure');
+
+      // F9. The recency fallback is the event that silently replaces the System-1 selection with the last-N window.
+      assertEqual(G.a.diagnostics.fallbackSteps, 1, 'G records one step on the recency fallback');
+      assertEqual(G.a.diagnostics.fallbackRecorded, true, 'G recorded the field');
+      assertEqual(G.a.diagnostics.unknownAdmittedTotal, 4, 'G admits four unjudged pairs');
+      assertEqual(G.a.diagnostics.recallTreeSteps, 2, 'G recorded a recall tree on both assemblies');
+      assertEqual(G.a.diagnostics.recallTreeNodes, 3, 'two nodes under s0, one under s1, and an empty tree');
+      assertTrue(mdG.includes('1 backend / 1 recency-fallback'), 'the recall block source row names the fallback');
+      assertTrue(mdG.includes('unjudged pairs admitted (`unknownAdmitted`)'), 'the unknownAdmitted row exists');
+      assertTrue(mdG.includes('recall structure recorded (steps / nodes placed)'), 'the recall tree row exists');
+
+      // F3. The demoted lane, which used to print exactly as the no-lane control.
+      assertEqual(H.a.diagnostics.laneState, 'demoted', 'H lane state is demoted, not none');
+      assertEqual(H.a.diagnostics.laneDemoted, true, 'H is flagged demoted');
+      assertEqual(H.a.diagnostics.laneAbsent, false, 'H is NOT the no-lane reading');
+      assertEqual(H.a.diagnostics.laneConfiguredProvider, 'laya-serve', 'H names what the recipe asked for');
+      assertEqual(H.a.diagnostics.laneConflicts.length, 1, 'H carries the reason');
+      assertEqual(H.a.diagnostics.coverage, null, 'H coverage is undefined - no backend was resolved');
+      assertEqual(E.a.diagnostics.laneDemoted, false, 'E stays a configuration, not a demotion');
+      const mdH = renderMarkdown(analysis);
+      assertTrue(mdH.includes('**lane demoted**'), 'the demoted cell says "demoted", not "no S1 lane"');
+      assertTrue(mdH.includes('lane demoted to "none" by a conflict'), 'and every System-1 zero says so');
+      assertTrue(mdH.includes('configured and demoted to none by a configuration conflict'),
+        'the header line names the demoted cells separately from the no-lane ones');
+      assertTrue(mdH.includes('demoted (H)'), 'the demoted cell appears in the coverage line');
+
+      // F5/I: a snapshot that predates `deferredPairs` must say "not recorded", never 0 - the property the audit
+      // verified and this change must not lose.
+      assertEqual(I.a.diagnostics.deferredRecorded, false, 'I predates the deferral field');
+      assertEqual(I.a.diagnostics.coverageOffered, null, 'I has no offered denominator');
+      assertEqual(I.a.diagnostics.coverage, 0.5, 'but I still has judged/scored');
+      assertEqual(I.a.diagnostics.recallTreeRecorded, false, 'I recorded no recall tree');
+      assertEqual(I.a.diagnostics.unknownAdmittedTotal, null, 'I recorded no unknownAdmitted');
+      const mdI = renderMarkdown(analysis);
+      assertTrue(mdI.includes('deferral share: not recorded by this snapshot'), 'I says the deferral is unrecorded');
+      assertTrue(mdI.includes('offered-denominator coverage: n/a (deferrals not recorded by this snapshot)'),
+        'and so is the offered denominator');
+      const iRows = renderCsv(analysis).split('\n').filter((l) => l.startsWith('I,'));
+      assertTrue(iRows.some((l) => l.includes('deferred pairs recorded by this snapshot,flag,diagnostic,,,,0')),
+        'the CSV flags the missing deferral field');
+      assertTrue(!iRows.some((l) => l.includes('association pairs deferred,')), 'and omits the count rather than zeroing it');
+      assertTrue(!iRows.some((l) => l.includes('System-1 coverage (judged/(scored+deferred))')), 'and omits the ratio');
+      assertTrue(mdI.includes('undefined — no S1 lane'), 'E keeps the no-lane wording');
+    }, 'F3/F5/F9: a demoted lane prints as demoted, coverage carries its deferral denominator, and the recall rows are reported or marked unrecorded');
+
+    check(() => {
+      // The CSV is the machine-readable half: every field the markdown states must be readable from it, because a
+      // downstream consumer never sees the prose (F5's second half).
+      const lines = csv.trim().split('\n');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs deferred,count,diagnostic,,,,10')),
+        'csv carries deferredPairs');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs offered (scored + deferred),count,diagnostic,,,,20')),
+        'csv carries the offered denominator');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,deferred share of offered,ratio,diagnostic,,,,0.5')),
+        'csv carries the deferral share');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,System-1 coverage (judged/(scored+deferred)),ratio,diagnostic,,,,0.3')),
+        'csv carries the floor denominator');
+      assertTrue(lines.some((l) => l.startsWith('H,demoted,mechanism,System-1 lane demoted by a configuration conflict,flag,diagnostic,,,,1')),
+        'csv flags the demoted lane');
+      assertTrue(lines.some((l) => l.startsWith('E,never,mechanism,System-1 lane demoted by a configuration conflict,flag,diagnostic,,,,0')),
+        'and does not flag the no-lane control');
+      assertTrue(lines.some((l) => l.startsWith('H,demoted,mechanism,System-1 lane configured provider,flag,diagnostic,,,,laya-serve')),
+        'csv carries the configured provider');
+      // The conflict text itself, quoted by the CSV writer because it contains a comma - which is the point of the
+      // quoting, so the assertion looks for the fragment rather than the whole line.
+      assertTrue(lines.some((l) => l.includes('System-1 lane conflict detail') && l.includes('only one S1 backend may be active')),
+        'csv carries the conflict text');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,recall block source,flag,diagnostic,,,,recency-fallback on 1 step(s)')),
+        'csv carries the recall block source');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,unjudged pairs admitted (unknownAdmitted),count,diagnostic,,,,4')),
+        'csv carries unknownAdmitted');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,recall structure nodes placed,count,diagnostic,,,,3')),
+        'csv carries the recall tree node count');
+      assertTrue(!lines.some((l) => l.startsWith('E,never,mechanism,System-1 coverage (judged/(scored+deferred))')),
+        'the offered denominator is omitted, not zeroed, for a cell with no lane');
+    }, 'F3/F5/F9 in the CSV: the deferredPairs family, the demotion flags and the recall rows are all machine-readable');
 
     const svgs = renderSvgs(analysis);
 
@@ -2778,7 +3249,8 @@ function runSelfTest() {
       assertEqual(time.bands.map((b) => b.title).join(' / '),
         'Time - counts / Time - wall clock (the step, decomposed) / Time - System-1 lane (concurrent, not additive)',
         'time.svg panel order');
-      assertTrue(time.bands[1].metrics === 4 && time.bands[1].cells === 4, 'wall-clock panel draws 4 metrics x 4 cells');
+      assertTrue(time.bands[1].metrics === 4 && time.bands[1].cells === analysis.cells.length,
+        `wall-clock panel draws 4 metrics x ${analysis.cells.length} cells`);
       assertTrue(time.bands[2].metrics === 1, 'the System-1 panel draws one metric');
 
       // and the audit must actually fail on the defect it exists for: stack one panel on another's

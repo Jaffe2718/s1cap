@@ -313,6 +313,16 @@ export function createS1Relevance(opts                    )              {
     // smaller requests are the ones with the small prefill, so it is not obviously a latency loss even when every
     // request answers.
     let requestSize = perCall;
+    /**
+     * What each chunk resolved to, collected rather than acted on inside the attempt loop.
+     *
+     * The release of the admission slot, the "the whole window falls back" decision and the lexical hand-off can
+     * all only be taken once the loop is over: the first because a slot has to be back in the gate before the
+     * retry backoff, the others because they are properties of the *window* and not of one batch. Collecting the
+     * chunks also lets the weights be read in candidate order at the end, which is what keeps a partial batch from
+     * being misread as a full one.
+     */
+    const batches                                                                                               = [];
     while (cursor < candidates.length) {
       // What this chunk would ask for with no back-pressure. It is the yardstick that keeps `reducedBatches`
       // meaning "smaller because the backend pushed back" rather than "smaller because the window ran out", which
@@ -320,11 +330,14 @@ export function createS1Relevance(opts                    )              {
       const natural = Math.min(perCall, candidates.length - cursor);
       let size = Math.min(requestSize, candidates.length - cursor);
       let batch           = [];
-      let answers                                                              ;
+      let answers                                                                          ;
+      let deferredChunk = false;
 
       // The attempt loop: `attempt` is 1-based and the first pass is the original request, so a window that never
-      // fails makes exactly the calls it made before this loop existed.
-      for (let attempt = 1; ; attempt += 1) {
+      // fails makes exactly the calls it made before this loop existed. Labelled because three different exits
+      // inside it mean "this chunk is done" - the answer arrived, the gate refused the attempt, or the attempts ran
+      // out - and a `break` that silently meant "next chunk" would be the way a judged window is dropped.
+      retryLoop: for (let attempt = 1; ; attempt += 1) {
         batch = [];
         for (let i = cursor; i < candidates.length && batch.length < size; i += 1) batch.push(i);
         if (batch.length < natural) stats.reducedBatches += 1;
@@ -338,139 +351,179 @@ export function createS1Relevance(opts                    )              {
         // the gate exists to ration. The wait between two attempts is `Retry-After`, which the gate does not
         // replace: `retryAttempts` still governs one refusal, and the gate governs a backend that refuses all of
         // them.
-        // Admission, taken immediately before the request and never released by it: `decide` is the frame that
-        // makes the call, so it hands the slot back to the gate when the request settles. Acquired per *chunk*
-        // and reused across its retries - a retry is the same request being asked again, and charging the gate
-        // twice for it would let one refused window exhaust a budget meant for windows.
-        let admittedThisChunk = false;
-        if (opts.backpressure !== undefined && !admittedThisChunk) {
-          const admission = opts.backpressure.tryAcquire();
-          if (!admission.ok) {
-            stats.blocked += 1;
-            stats.backpressured = true;
-            if (admission.reason === 'breaker-open') stats.blockedByBreaker += 1;
-            else stats.blockedByLimit += 1;
-            // Reported once per state change rather than once per window: the gate is a mode, and a line per
-            // deferred window on a saturated backend is a log nobody reads.
-            if (stats.blocked === 1 || stats.blocked % 50 === 0) {
-              opts.onWarn?.(
-                `[s1cap] relevance: not asking (${admission.reason}); ${stats.blocked} window(s) held back so far. ` +
-                  'Their pairs are reported as the graph\'s `deferredPairs` and are not scored lexically.',
-              );
-            }
-            return S1_DEFERRED;
-          }
-          admittedThisChunk = true;
-        }
-
-        // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
-        // the candidate's position in the window, so the model can still tell which part of the history it is
-        // being asked about.
-        // Rendered once per batch rather than once per question: it was called inside the loop, so a fourteen
-        // question batch sliced the same 1200-character string fourteen times. More to the point, its length is the
-        // number that explains a 15-second call, so it is counted and reported instead of being left to be guessed
-        // at from a latency nobody can attribute.
-        const stateText = render(current);
-        // `state` is serialized once by the System-1 protocol. Repeating it inside every question made a
-        // 20-candidate request carry 21 copies of the same current segment. Long tool traces exposed the cost:
-        // one cell spent 28.96M lane tokens while only five context deliveries fired. Keep the state in the
-        // request's state field and let each question carry only its candidate.
-        stats.promptChars += stateText.length;
-        const questions                                          = {};
-        batch.forEach((candidateIndex, slot) => {
-          const candidateText = render(candidates[candidateIndex]           );
-          stats.promptChars += candidateText.length;
-          questions[`h${slot}`] = noul(
-            `Does retrieving this candidate help answer or continue the current segment?\n\n` +
-              `Candidate h${candidateIndex}:\n${candidateText}`,
-            {
-              true: 'retrieving the candidate would help with the current segment',
-              false: 'the candidate is unrelated or a distraction',
-            },
-          );
-        });
-        // Counted here rather than after the answer, so a question that was sent and never answered is still part
-        // of the spend: `answeredQuestions` is the subset that came back.
-        stats.questions += batch.length;
-
+        //
+        // One slot per *attempt*, not one per chunk. An earlier comment here claimed the slot was "acquired per
+        // chunk and reused across its retries"; the variable it named was redeclared inside the attempt loop, so
+        // the code has always taken a fresh slot per attempt - and that is the correct reading, because each
+        // attempt is a separate request the backend must admit. What the comment hid is that the acquire sat
+        // outside the block that released it (F16.3): a throw from `render(current)` or from the question
+        // rendering below leaked the slot for the life of the process, with nothing counting leaks. Every exit
+        // from here now either sends and is accounted for, or is handed back and counted.
+        let admitted = false;
+        // What the attempt did, in the two facts the gate needs: was a request sent, and was it refused. The
+        // release itself is in the `finally` below, so no exit path can skip it.
+        let sent = false;
+        let refused = false;
+        let retryDelay                    ;
         try {
-          const result = await opts.decide(
-            // The state is the current segment: one System-1 call judges how useful the listed candidates are for
-            // it, which is the direction the design asks for (h_i's reference value for s_j, not string overlap).
-            { kind: current.kind, text: render(current) },
-            questions,
-          );
-          // `undefined` is the caller saying there is no backend to ask - observation mode, or a provider that
-          // resolved to `none`. That is a state and not a failure, so it is reported once instead of per segment;
-          // and it is handled here rather than by a TypeError on `result.answers`, which is what it used to be.
-          // It is also not retried: there is no endpoint to ask again.
-          if (result === undefined) {
-            // The gate was charged for a request that was never made: `decide` answered "there is no backend",
-            // which it can do without touching the network (no client, or a provider resolved to `none`). Handing
-            // the slot back keeps the in-flight count a measure of requests rather than of calls to a thunk.
-            opts.backpressure?.recordSuccess();
-            if (!reportedNoClient) {
-              reportedNoClient = true;
-              opts.onWarn?.('[s1cap] relevance: no System-1 client is answering; windows are scored lexically');
+          if (opts.backpressure !== undefined) {
+            const admission = opts.backpressure.tryAcquire();
+            if (!admission.ok) {
+              stats.blocked += 1;
+              stats.backpressured = true;
+              if (admission.reason === 'breaker-open') stats.blockedByBreaker += 1;
+              else stats.blockedByLimit += 1;
+              // Reported once per state change rather than once per window: the gate is a mode, and a line per
+              // deferred window on a saturated backend is a log nobody reads.
+              if (stats.blocked === 1 || stats.blocked % 50 === 0) {
+                opts.onWarn?.(
+                  `[s1cap] relevance: not asking (${admission.reason}); ${stats.blocked} window(s) held back so far. ` +
+                    'Their pairs are reported as the graph\'s `deferredPairs` and are not scored lexically.',
+                );
+              }
+              deferredChunk = true;
+              break retryLoop;
             }
-            return undefined;
-          }
-          // The backend answered this request, which is what closes the breaker: not a timer, and not a guess.
-          opts.backpressure?.recordSuccess();
-          answers = result.answers;
-          stats.calls += 1;
-          stats.inputTokens += result.usage?.input_tokens ?? 0;
-          stats.outputTokens += result.usage?.output_tokens ?? 0;
-          stats.answeredQuestions += batch.length;
-          break;
-        } catch (err) {
-          stats.failures += 1;
-          // Classified, because the three are different facts about a run: a dead socket, a cancelled session, and
-          // a backend that answered something unusable. They used to arrive here as one TypeError.
-          if (err instanceof S1TimeoutError) stats.timedOut += 1;
-          else if (err instanceof S1CancelledError) stats.cancelled += 1;
-          // What the gate is told, and why it is this narrow. A *refusal* - a retryable status, which is Laya's
-          // `503 server busy` and the 429/gateway family - is the backend saying "not now", and a run of them is
-          // the saturation the breaker exists for. A transport timeout is the opposite signal at the same
-          // counter: the backend was working on the request for 30 s, so pausing would add a pause to a server
-          // that is merely slow. A cancellation is the caller's decision. Only the first is a refusal.
-          if (err instanceof S1HttpError && S1_RETRYABLE_STATUS.includes(err.status)) {
-            opts.backpressure?.recordRefusal();
-          } else {
-            opts.backpressure?.recordSuccess();
+            admitted = true;
           }
 
-          const retryable = isRetryable(err);
-          const elapsed = clock() - started;
-          if (!retryable || attempt >= S1_RETRY_ATTEMPTS || elapsed >= S1_RETRY_BUDGET_MS) {
-            const why = !retryable
-              ? 'not retryable'
-              : elapsed >= S1_RETRY_BUDGET_MS
-                ? `the window's ${S1_RETRY_BUDGET_MS}ms retry budget is spent`
-                : `all ${S1_RETRY_ATTEMPTS} attempts used`;
-            // A window abandoned *because it retried* is a different fact from one abandoned on its first failure:
-            // the first says the backend kept refusing, the second says it was never asked twice. Both end in the
-            // lexical fallback, and only this counter tells them apart afterwards.
-            if (retryable) stats.gaveUpAfterRetries += 1;
-            opts.onWarn?.(
-              `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (${why}; falling back to lexical scoring): ${String(err)}`,
+          // Question ids are local to the request (`h0..hN`), because each batch is its own request; the prose keeps
+          // the candidate's position in the window, so the model can still tell which part of the history it is
+          // being asked about.
+          // Rendered once per batch rather than once per question: it was called inside the loop, so a fourteen
+          // question batch sliced the same 1200-character string fourteen times. More to the point, its length is the
+          // number that explains a 15-second call, so it is counted and reported instead of being left to be guessed
+          // at from a latency nobody can attribute.
+          const stateText = render(current);
+          // `state` is serialized once by the System-1 protocol. Repeating it inside every question made a
+          // 20-candidate request carry 21 copies of the same current segment. Long tool traces exposed the cost:
+          // one cell spent 28.96M lane tokens while only five context deliveries fired. Keep the state in the
+          // request's state field and let each question carry only its candidate.
+          stats.promptChars += stateText.length;
+          const questions                                          = {};
+          batch.forEach((candidateIndex, slot) => {
+            const candidateText = render(candidates[candidateIndex]           );
+            stats.promptChars += candidateText.length;
+            questions[`h${slot}`] = noul(
+              `Does retrieving this candidate help answer or continue the current segment?\n\n` +
+                `Candidate h${candidateIndex}:\n${candidateText}`,
+              {
+                true: 'retrieving the candidate would help with the current segment',
+                false: 'the candidate is unrelated or a distraction',
+              },
             );
-            return undefined;
-          }
+          });
+          // Counted here rather than after the answer, so a question that was sent and never answered is still part
+          // of the spend: `answeredQuestions` is the subset that came back.
+          stats.questions += batch.length;
 
-          stats.retries += 1;
-          // Halve what was actually asked, not the window's cap: a two-question request that failed must come back
-          // as one question rather than as eight, and the floor of 1 is the smallest request the protocol can
-          // carry. The reduction sticks for the rest of the window (see `requestSize` above).
-          size = Math.max(1, Math.floor(batch.length / 2));
-          requestSize = size;
-          const delay = retryDelayMs(attempt);
-          opts.onWarn?.(
-            `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (retryable; retrying in ${delay}ms with ${size} question${size === 1 ? '' : 's'}): ${String(err)}`,
-          );
-          await wait(delay);
+          try {
+            sent = true;
+            const result = await opts.decide(
+              // The state is the current segment: one System-1 call judges how useful the listed candidates are for
+              // it, which is the direction the design asks for (h_i's reference value for s_j, not string overlap).
+              { kind: current.kind, text: stateText },
+              questions,
+            );
+            // `undefined` is the caller saying there is no backend to ask - observation mode, or a provider that
+            // resolved to `none`. That is a state and not a failure, so it is reported once instead of per segment;
+            // and it is handled here rather than by a TypeError on `result.answers`, which is what it used to be.
+            // It is also not retried: there is no endpoint to ask again.
+            if (result === undefined) {
+              // The gate was charged for a request that was never made: `decide` answered "there is no backend",
+              // which it can do without touching the network (no client, or a provider resolved to `none`). That
+              // is not an answered request, so it hands the slot back through `recordLeak`, which counts it -
+              // keeping "the effective cap walked to zero with no stated cause" a number in `/s1` rather than a
+              // silent leak.
+              sent = false;
+              if (!reportedNoClient) {
+                reportedNoClient = true;
+                opts.onWarn?.('[s1cap] relevance: no System-1 client is answering; windows are scored lexically');
+              }
+              return undefined;
+            }
+            // The backend answered this request, which is what closes the breaker: not a timer, and not a guess.
+            answers = result.answers;
+            stats.calls += 1;
+            stats.inputTokens += result.usage?.input_tokens ?? 0;
+            stats.outputTokens += result.usage?.output_tokens ?? 0;
+            stats.answeredQuestions += batch.length;
+            break retryLoop;
+          } catch (err) {
+            stats.failures += 1;
+            // Classified, because the three are different facts about a run: a dead socket, a cancelled session, and
+            // a backend that answered something unusable. They used to arrive here as one TypeError.
+            if (err instanceof S1TimeoutError) stats.timedOut += 1;
+            else if (err instanceof S1CancelledError) stats.cancelled += 1;
+            // What the gate is told, and why it is this narrow. A *refusal* - a retryable status, which is Laya's
+            // `503 server busy` and the 429/gateway family - is the backend saying "not now", and a run of them is
+            // the saturation the breaker exists for. A transport timeout is the opposite signal at the same
+            // counter: the backend was working on the request for 30 s, so pausing would add a pause to a server
+            // that is merely slow. A cancellation is the caller's decision. Only the first is a refusal. A
+            // transport failure is neither, so it counts as the request having been sent and come back.
+            refused = err instanceof S1HttpError && S1_RETRYABLE_STATUS.includes(err.status);
+
+            const retryable = isRetryable(err);
+            const elapsed = clock() - started;
+            if (!retryable || attempt >= S1_RETRY_ATTEMPTS || elapsed >= S1_RETRY_BUDGET_MS) {
+              const why = !retryable
+                ? 'not retryable'
+                : elapsed >= S1_RETRY_BUDGET_MS
+                  ? `the window's ${S1_RETRY_BUDGET_MS}ms retry budget is spent`
+                  : `all ${S1_RETRY_ATTEMPTS} attempts used`;
+              // A window abandoned *because it retried* is a different fact from one abandoned on its first failure:
+              // the first says the backend kept refusing, the second says it was never asked twice. Both end in the
+              // lexical fallback, and only this counter tells them apart afterwards.
+              if (retryable) stats.gaveUpAfterRetries += 1;
+              opts.onWarn?.(
+                `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (${why}; falling back to lexical scoring): ${String(err)}`,
+              );
+              return undefined;
+            }
+
+            stats.retries += 1;
+            // Halve what was actually asked, not the window's cap: a two-question request that failed must come back
+            // as one question rather than as eight, and the floor of 1 is the smallest request the protocol can
+            // carry. The reduction sticks for the rest of the window (see `requestSize` above).
+            size = Math.max(1, Math.floor(batch.length / 2));
+            requestSize = size;
+            retryDelay = retryDelayMs(attempt);
+            opts.onWarn?.(
+              `[s1cap] relevance call failed at candidate ${cursor}/${candidates.length} (retryable; retrying in ${retryDelay}ms with ${size} question${size === 1 ? '' : 's'}): ${String(err)}`,
+            );
+          }
+        } finally {
+          // The single release point for the slot taken above, on every exit that reaches the request: answered,
+          // refused, abandoned, thrown. `recordSuccess` on this path is not a claim that the backend answered -
+          // `recordLeak` covers the one case where no request left the cell - it is the counter that says a
+          // request in flight came back. A release that lived in the catch blocks could be skipped by a throw
+          // between the acquire and the try, and nothing would have said so (F16.3).
+          if (admitted) {
+            if (sent) {
+              if (refused) opts.backpressure?.recordRefusal();
+              else opts.backpressure?.recordSuccess();
+            } else {
+              opts.backpressure?.recordLeak();
+            }
+          }
         }
+        // The wait sits outside the `try`, so the slot a refused attempt was holding is back in the gate before
+        // the backoff: a retry that waits while still counted as in flight would let one refused window exhaust a
+        // budget meant for windows. No delay means the attempt settled this chunk - the answer arrived, the gate
+        // refused, or the attempts ran out - and the chunk is done.
+        if (retryDelay === undefined) break retryLoop;
+        await wait(retryDelay);
       }
+
+      // A chunk nobody was allowed to send is answered by the gate, and the answer is `S1_DEFERRED` whatever the
+      // attempt: the backend is saturated, nothing was asked, and the graph must hold the pairs for a later tick
+      // rather than buy them from the lexical scorer - otherwise declining work would raise the coverage ratio,
+      // which is the hazard `deferredPairs` exists to make visible. A window whose *retry* was refused comes back
+      // the same way, which is the ordering this module has always had: the refusal that prompted the retry is
+      // still evidence that the backend is busy now.
+      if (deferredChunk) return S1_DEFERRED;
+
+      batches.push({ batch, answers });
 
       // All or nothing for the segment. A batch that answered while its neighbour timed out would leave some
       // pairs judged by the backend and others by the lexical scorer, and the graph would then hold two kinds of
@@ -478,16 +531,22 @@ export function createS1Relevance(opts                    )              {
       // exists to prevent. A segment whose backend did not answer is scored lexically, in full, and says so. The
       // retry above does not soften this: it either gets the whole window judged by the backend or hands the whole
       // window to the fallback, because half a window of backend weights is a window whose `source` record lies.
-      for (let slot = 0; slot < batch.length; slot += 1) {
-        const weight = readWeight(answers[`h${slot}`]                                   );
+      //
+      // Read back in chunk order so `out` is aligned by candidate index: a chunk that answered after a later one
+      // failed still lands where the graph expects it.
+      cursor += batch.length;
+    }
+
+    for (const chunk of batches) {
+      for (let slot = 0; slot < chunk.batch.length; slot += 1) {
+        const weight = readWeight(chunk.answers?.[`h${slot}`]                                   );
         if (weight === undefined) {
           stats.failures += 1;
-          opts.onWarn?.(`[s1cap] relevance: no usable weight for candidate h${batch[slot]}; the whole batch falls back`);
+          opts.onWarn?.(`[s1cap] relevance: no usable weight for candidate h${chunk.batch[slot]}; the whole batch falls back`);
           return undefined;
         }
-        out[batch[slot]          ] = weight;
+        out[chunk.batch[slot]          ] = weight;
       }
-      cursor += batch.length;
     }
 
     stats.lastMs = Math.max(0, clock() - started);

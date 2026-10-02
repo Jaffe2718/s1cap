@@ -74,8 +74,15 @@ export interface StepObserverOptions {
   onObserved?(summary: string): void;
   /** diagnostic sink; the plugin writes it to the tape file */
   onProbe?(line: Record<string, unknown>): void;
-  /** M1 N3: record one tape line per call (opt-in; a tape contains session content) */
-  onTape?(step: number, messages: readonly unknown[], systemPrompt: string | undefined): void;
+  /**
+   * M1 N3: record one tape line per call (opt-in; a tape contains session content).
+   *
+   * `sessionId` is passed in rather than read back. The plugin used to read it from `stats().sessionId`, which is
+   * assigned after `emit` - further down this same function than the call above - so every tape line carried the
+   * *previous* step's session id and the first line of a session carried `unassigned`. The handler has the id in
+   * hand here, so the id it writes is the id of the step it is writing about (F16.1).
+   */
+  onTape?(step: number, messages: readonly unknown[], systemPrompt: string | undefined, sessionId: string): void;
   /**
    * The session-content stream (`telemetry.sessionJsonl`): one line per adapted RawEvent. Declared in config but
    * written by nothing was a real gap - a named sink that stays empty reads as a broken feature, and this is the
@@ -666,7 +673,7 @@ export function createStepObserver(opts: StepObserverOptions): StepObserver {
         // The tape is written first, on purpose: it records what the harness actually sent, and that is worth
         // most exactly when the adapter could make no sense of it. Skipping it for empty steps would delete the
         // only evidence of the shape we do not understand yet.
-        opts.onTape?.(readStep(payload), messages, systemPrompt);
+        opts.onTape?.(readStep(payload), messages, systemPrompt, sessionId);
         // Read, and deliberately not assembled: the caller said this step cannot receive context. Reported once
         // per step through `ingestOnly` and never as an error - a skip is the lane working as designed, and the
         // only thing that would make it a defect is the caller getting the condition wrong.

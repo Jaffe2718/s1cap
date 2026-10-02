@@ -83,6 +83,59 @@ test('a run of refusals opens the breaker, one probe is admitted after the coold
   assert.deepEqual(bp.tryAcquire(), { ok: true }, 'and the cell resumes');
 });
 
+test('every state change of the breaker is reported as it happens, with the counters standing at the time', () => {
+  // F4. `stats().state` is a gauge: a session that opened the breaker three times and recovered before it ended
+  // reads `closed`, exactly like one that never paused - so "the run stopped asking because the backend refused"
+  // and "because our own cap was full" are the same zero in the artifacts. The transitions are what the plugin
+  // writes onto the tape, and they are the only record that separates the two.
+  const c = clock();
+  const seen: { state: string; from: string; reason: string; deferredByLimit: number; deferredByBreaker: number }[] = [];
+  const bp = createBackpressure({
+    maxInFlight: 1,
+    openAfterRefusals: 2,
+    cooldownMs: 5_000,
+    now: c.now,
+    onTransition: (t) => seen.push(t),
+  });
+
+  bp.tryAcquire();
+  bp.recordRefusal();
+  assert.equal(seen.length, 0, 'one refusal is not a state change');
+  bp.tryAcquire();
+  bp.recordRefusal();
+  assert.equal(seen.length, 1, 'the second refusal opens the breaker and is reported');
+  assert.deepEqual(
+    { state: seen[0]?.state, from: seen[0]?.from, reason: seen[0]?.reason },
+    { state: 'open', from: 'closed', reason: '2 refusal(s) within 15000ms' },
+  );
+
+  // While it is open, windows are deferred by the breaker - and the count is on the transition that follows.
+  assert.deepEqual(bp.tryAcquire(), { ok: false, reason: 'breaker-open' });
+  c.advance(5_000);
+  assert.deepEqual(bp.tryAcquire(), { ok: true }, 'the cooldown admits one probe');
+  assert.equal(seen.length, 2, 'and the probe is a state change');
+  assert.equal(seen[1]?.state, 'probing');
+  assert.equal(seen[1]?.from, 'open');
+  assert.equal(seen[1]?.deferredByBreaker, 1, 'carrying how many windows the open breaker held back');
+
+  bp.recordSuccess();
+  assert.equal(seen.length, 3, 'the answer closes it');
+  assert.equal(seen[2]?.state, 'closed');
+  assert.equal(seen[2]?.from, 'probing');
+  assert.equal(bp.stats().state, 'closed', 'which is all the gauge would ever have said');
+  assert.equal(bp.stats().opened, 1, 'and the count of opens is the summary, not the sequence');
+});
+
+test('the gate reports the thresholds it actually resolved, defaults included', () => {
+  // The values that govern a run have to be readable from the run. A gate built with no thresholds named still ran
+  // with some, and "which knobs governed this" cannot be answered by re-reading this file later.
+  assert.deepEqual(createBackpressure().policy(), { maxInFlight: 8, openAfterRefusals: 5, windowMs: 15_000, cooldownMs: 15_000 });
+  assert.deepEqual(createBackpressure({ maxInFlight: 3, openAfterRefusals: 2 }).policy(), {
+    maxInFlight: 3, openAfterRefusals: 2, windowMs: 15_000, cooldownMs: 15_000,
+  });
+  assert.equal(createBackpressure().stats().maxInFlight, 8, 'and the stats agree with the policy');
+});
+
 test('a refused probe restarts the cooldown in full instead of degrading into a poll', () => {
   const c = clock();
   const bp = createBackpressure({ maxInFlight: 1, openAfterRefusals: 1, cooldownMs: 5_000, now: c.now });
@@ -275,4 +328,54 @@ test('the retry policy still governs one refusal, and the gate does not replace 
   assert.equal(bp.stats().state, 'closed', 'and the breaker never opened for a single refusal');
   assert.equal(bp.stats().refused, 1);
   assert.equal(bp.stats().ok, 2);
+});
+
+test('a slot is never leaked: the acquire sits inside the block that releases it, and a leak is counted', async () => {
+  // F16.3. `tryAcquire()` used to be called *outside* the block that released the slot, so a throw between the two
+  // - `render()` throwing on a malformed segment is the one named in the audit - leaked the slot for the life of
+  // the process. Nothing counted leaks, and the symptom is the worst kind: over a long run the effective cap walks
+  // to zero, every window is deferred, and `deferredPairs` rises with no stated cause. The leak could not be
+  // triggered by a real input, which is why what is pinned here is the *structure* - a throw and an un-sent request
+  // both leave `inFlight` at zero and are both counted - rather than a specific bad payload.
+  const bp = createBackpressure({ maxInFlight: 1 });
+  const relevance = createS1Relevance({
+    decide: async () => {
+      throw new Error('the request should never be composed: rendering throws first');
+    },
+    questionsPerCall: 2,
+    backpressure: bp,
+  });
+
+  // A candidate whose text is not a string: `render()` reads `.length` off it and throws before the request is
+  // composed, which is exactly the window between the acquire and the old release point.
+  const broken = { id: 'x', sessionId: 's', seq: 1, kind: 'user', tokens: 1, text: undefined } as unknown as Segment;
+  await assert.rejects(() => relevance(segment('c', 3), [broken]), /length|undefined/i);
+
+  const after = bp.stats();
+  assert.equal(after.inFlight, 0, 'the slot came back even though the attempt threw');
+  assert.equal(after.slotsLeaked, 1, 'and the leak is counted rather than silent');
+  assert.equal(after.ok, 0, 'a slot returned without a send is not an answered request');
+  // The gate is usable again: this is the property the leak destroyed.
+  assert.deepEqual(bp.tryAcquire(), { ok: true }, 'the cap is not permanently reduced');
+  bp.recordSuccess();
+});
+
+test('a request that is never sent hands its slot back through recordLeak, not through recordSuccess', async () => {
+  // The other half of the same accounting: `decide` answering `undefined` means "there is no backend", which the
+  // gate can be told without touching the network. Reporting that as an answered request would overstate `ok` and
+  // hide the path; doing nothing would leak. It is the third exit from a slot and it has its own counter.
+  const bp = createBackpressure({ maxInFlight: 1 });
+  const relevance = createS1Relevance({
+    decide: async () => undefined,
+    questionsPerCall: 2,
+    backpressure: bp,
+  });
+  const weights = await relevance(segment('c', 3), [segment('a', 1), segment('b', 2)]);
+  assert.equal(weights, undefined, 'no backend means the caller scores lexically');
+  const stats = bp.stats();
+  assert.equal(stats.ok, 0, 'nothing answered');
+  assert.equal(stats.refused, 0, 'and nothing refused');
+  assert.equal(stats.slotsLeaked, 1, 'the slot came back and said why');
+  assert.equal(stats.inFlight, 0, 'so the cap is intact');
+  assert.equal(bp.tryAcquire().ok, true, 'and the next window can be admitted');
 });

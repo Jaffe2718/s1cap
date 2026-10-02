@@ -48,6 +48,19 @@
  * Time is injected, so the whole state machine is testable without sleeping.
  */
 
+/**
+ * The thresholds a gate uses when the caller names none.
+ *
+ * Exported because they are *governance*: a round that did not state `openAfterRefusals` still ran with
+ * a number, and "which knobs actually governed this run" has to be answerable from the round's own
+ * artifacts rather than from reading this file at the time (F4 in `s1cap-audit-lane.md`).
+ */
+export const BACKPRESSURE_DEFAULTS = {
+  openAfterRefusals: 5,
+  windowMs: 15_000,
+  cooldownMs: 15_000,
+}         ;
+
 /** Configured facts about the backend, and the thresholds at which it is treated as saturated. */
                                       
      
@@ -65,6 +78,33 @@
                            
                  
                                  
+     
+                                                      
+    
+                                                                                                     
+                                                                                                  
+                                                                                                   
+                                                                                                      
+                                                          
+     
+                                                     
+ 
+
+/** One state change of the breaker, with the counters that were standing when it happened. */
+                                    
+                                          
+             
+                      
+                                                                    
+                 
+                                                                                            
+                     
+                   
+                          
+                            
+                        
+                                                                                        
+                   
  
 
                                                          
@@ -96,6 +136,16 @@
                       
                                                                                 
                    
+     
+                                                                            
+    
+                                                                                                         
+                                                                                                           
+                                                                                                          
+                                                                                                      
+            
+     
+                      
  
 
                                
@@ -108,16 +158,27 @@
                         
                                                                                    
                         
+     
+                                                                         
+    
+                                                                                                         
+                                                                                                        
+                                                                                                         
+                                              
+     
+                     
                              
+                                                                       
+                                                                                                     
                                                                      
                        
  
 
 export function createBackpressure(opts                      = {})               {
   const maxInFlight = Math.max(1, Math.trunc(opts.maxInFlight ?? 8));
-  const openAfterRefusals = Math.max(1, Math.trunc(opts.openAfterRefusals ?? 5));
-  const windowMs = Math.max(0, opts.windowMs ?? 15_000);
-  const cooldownMs = Math.max(0, opts.cooldownMs ?? 15_000);
+  const openAfterRefusals = Math.max(1, Math.trunc(opts.openAfterRefusals ?? BACKPRESSURE_DEFAULTS.openAfterRefusals));
+  const windowMs = Math.max(0, opts.windowMs ?? BACKPRESSURE_DEFAULTS.windowMs);
+  const cooldownMs = Math.max(0, opts.cooldownMs ?? BACKPRESSURE_DEFAULTS.cooldownMs);
   const clock = opts.now ?? Date.now;
 
   const refusals           = [];
@@ -138,6 +199,7 @@ export function createBackpressure(opts                      = {})              
     inFlight: 0,
     maxInFlight,
     openedAt: 0,
+    slotsLeaked: 0,
   };
 
   /** Refusals inside the window, oldest first. Pruned on every read, so the streak is a real measure. */
@@ -146,12 +208,41 @@ export function createBackpressure(opts                      = {})              
     return refusals.length;
   };
 
+  /**
+   * Move the breaker and report it.
+   *
+   * Every assignment to `state` goes through here, so a new branch cannot change the state without the
+   * transition being reported: the single exit is what makes "no `s1-gate` line for a run that opened the
+   * breaker" impossible rather than merely unlikely.
+   */
+  const move = (to              , from              , at        , reason        )       => {
+    state = to;
+    stats.state = to;
+    if (to === 'open') {
+      openedAt = at;
+      stats.openedAt = at;
+    } else {
+      // The gauge follows the state machine: `openedAt` is "when the breaker was last opened" and it is
+      // zero again once the breaker is not open. `stats()` copies the object, so the reset reaches `/s1`.
+      stats.openedAt = 0;
+    }
+    opts.onTransition?.({
+      at,
+      state: to,
+      from,
+      reason,
+      inFlight,
+      deferredByLimit: stats.deferredByLimit,
+      deferredByBreaker: stats.deferredByBreaker,
+      refusalStreak: stats.refusalStreak,
+      openedAt,
+    });
+  };
+
   const open = (at        , why        )       => {
-    state = 'open';
-    openedAt = at;
+    const from = state;
     stats.opened += 1;
-    stats.state = 'open';
-    stats.openedAt = at;
+    move('open', from, at, why);
     opts.onWarn?.(
       `[s1cap] System-1 backend is refusing (${why}): pausing asks for ${cooldownMs}ms, then one probe. ` +
         'Pairs that are not asked about are deferred, not scored lexically, and are reported as `deferredPairs`.',
@@ -165,8 +256,8 @@ export function createBackpressure(opts                      = {})              
       if (state !== 'closed') {
         // `open` waits out the cooldown; `probing` is the single in-flight probe and admits nobody else.
         if (state === 'open' && at - openedAt >= cooldownMs) {
-          state = 'probing';
-          stats.state = 'probing';
+          stats.refusalStreak = recentRefusals(at);
+          move('probing', 'open', at, `the ${cooldownMs}ms cooldown elapsed; admitting one probe`);
         } else {
           stats.deferredByBreaker += 1;
           return { ok: false, reason: 'breaker-open' };
@@ -190,10 +281,12 @@ export function createBackpressure(opts                      = {})              
       stats.refusalStreak = 0;
       if (state !== 'closed') {
         stats.recovered += 1;
+        move('closed', state, clock(), 'the backend answered; resuming at the configured rate');
         opts.onWarn?.('[s1cap] the System-1 backend is answering again: resuming at the configured rate');
+      } else {
+        state = 'closed';
+        stats.state = 'closed';
       }
-      state = 'closed';
-      stats.state = 'closed';
     },
 
     recordRefusal()       {
@@ -215,8 +308,21 @@ export function createBackpressure(opts                      = {})              
       }
     },
 
+    recordLeak()       {
+      // Named for what it is: a slot came back without a request having been sent for it. It is not a
+      // refusal (the backend said nothing) and not a success (nothing answered), so it gets its own
+      // counter rather than being folded into either.
+      inFlight = Math.max(0, inFlight - 1);
+      stats.inFlight = inFlight;
+      stats.slotsLeaked += 1;
+    },
+
     stats()                    {
       return { ...stats };
+    },
+
+    policy() {
+      return { maxInFlight, openAfterRefusals, windowMs, cooldownMs };
     },
 
     isBlocked()          {

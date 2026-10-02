@@ -74,8 +74,15 @@ import { isS1capInjected } from '@s1cap/core';
                                      
                                                                
                                                 
-                                                                                       
-                                                                                              
+     
+                                                                                    
+    
+                                                                                                                  
+                                                                                                                 
+                                                                                                                 
+                                                                                      
+     
+                                                                                                                 
      
                                                                                                                  
                                                                                                                  
@@ -666,7 +673,7 @@ export function createStepObserver(opts                     )               {
         // The tape is written first, on purpose: it records what the harness actually sent, and that is worth
         // most exactly when the adapter could make no sense of it. Skipping it for empty steps would delete the
         // only evidence of the shape we do not understand yet.
-        opts.onTape?.(readStep(payload), messages, systemPrompt);
+        opts.onTape?.(readStep(payload), messages, systemPrompt, sessionId);
         // Read, and deliberately not assembled: the caller said this step cannot receive context. Reported once
         // per step through `ingestOnly` and never as an error - a skip is the lane working as designed, and the
         // only thing that would make it a defect is the caller getting the condition wrong.

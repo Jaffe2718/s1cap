@@ -463,8 +463,75 @@ test('apply() registers the hooks and commands, and a conflict degrades to obser
   assert.ok(!everything.includes('SUPERSECRET'), 'no log line may contain key material');
 });
 
-test('apply() reports the resolved backend without leaking the key, and ping is honest', async () => {
+test('the wiring record makes a demoted lane distinguishable from a cell with no lane, and carries the governance', () => {
+  // Two defects, one artifact (`s1cap-audit-lane.md` F3 and F4).
+  //
+  // F3: a configuration conflict demotes the session to `provider: "none"` (`buildBackend`), so the wiring record
+  // said `s1: "none"` - the same string a deliberate no-System-1 control writes. `cell-report.mjs` reads exactly
+  // that string to decide a cell had no lane, so a C2 demoted by a conflict printed "undefined - no S1 lane" and
+  // its zeroes read as by construction. The distinguishing fields (`configuredProvider`, the conflict text) existed
+  // only on the live `/s1` route, and the run's log file carries zero `[s1cap]` lines, so the warning was durable
+  // nowhere. This reads the tape the round keeps.
+  //
+  // F4: `admissionLimit`, the per-sweep pair budget and the breaker's thresholds appeared in no persisted record
+  // at all, so "which knobs actually governed this run" was unanswerable from a later round's evidence. They are
+  // asserted *resolved* here - the breaker's defaults included - because the question is what ran, not what was
+  // configured.
   const h = harness();
+  const tape = withEmptyHome(() => {
+    apply(h.ctx, {
+      enabled: true,
+      observation: 'tape',
+      s1: { provider: 'jev', apiKey: 'sk-live-SECRET-0123456789' },
+      laya: layaIdle,
+    });
+    return readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tape.jsonl'), 'utf8');
+  });
+
+  const records = tape.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as Record<string, unknown>);
+  const wiring = records.find((r) => r['kind'] === 'wiring');
+  assert.ok(wiring, `the tape must hold a wiring record; it held ${JSON.stringify(records.map((r) => r['kind']))}`);
+
+  // F3: the two readings the report exists to keep apart.
+  assert.equal(wiring['s1'], 'none', 'a conflict drops the resolved backend to none');
+  assert.equal(wiring['configuredProvider'], 'jev', 'while the record still names what the recipe asked for');
+  const conflicts = wiring['conflicts'] as string[];
+  assert.equal(Array.isArray(conflicts) && conflicts.length, 1, 'and carries the reason, not just the fact');
+  assert.match(conflicts[0] ?? '', /only one S1 backend/);
+
+  // The deliberate no-lane control, for contrast: same `s1`, different `configuredProvider`, no conflict. A reader
+  // that only compares `s1` cannot tell these two apart, which is the defect.
+  const none = harness();
+  const tapeNone = withEmptyHome(() => {
+    apply(none.ctx, { enabled: true, observation: 'tape', s1: { provider: 'none' } });
+    return readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tape.jsonl'), 'utf8');
+  });
+  const wiringNone = tapeNone.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as Record<string, unknown>)
+    .find((r) => r['kind'] === 'wiring') as Record<string, unknown>;
+  assert.equal(wiringNone['s1'], 'none', 'the control arm also resolves to none');
+  assert.equal(wiringNone['configuredProvider'], 'none', 'but it was configured that way');
+  assert.deepEqual(wiringNone['conflicts'], [], 'and nothing was demoted');
+
+  // F4: the governance block, resolved.
+  const g = wiring['governance'] as Record<string, unknown>;
+  assert.ok(g, 'the wiring record must state the governance that ran');
+  assert.equal(g['admissionLimit'], 8, 'C2 policy default admission limit');
+  assert.equal(g['maxPairsPerSweep'], 2048, 'the per-sweep pair budget, which was a literal in a call');
+  assert.deepEqual(g['breaker'], { maxInFlight: 8, openAfterRefusals: 5, windowMs: 15_000, cooldownMs: 15_000 },
+    'the breaker thresholds actually in force, defaults included');
+  assert.equal(g['contextWindow'], 128_000);
+  assert.equal(g['reserveOutputTokens'], 8_000);
+  const recall = g['recall'] as Record<string, number>;
+  assert.equal(recall['minRecalledShare'], 0, 'the fill floor the documents state is off by default');
+  assert.equal(recall['minRecalledSegments'], 1, 'and the count floor is the guard that actually fires');
+
+  // The record is the authority for the *wiring*, so it must not claim a component the policy does not have.
+  assert.equal('planGate' in wiring, false, 'no wiring record may announce the removed plan gate');
+  // And it must not carry key material: this file is kept with the round.
+  assert.ok(!tape.includes('SECRET'), 'the wiring record never carries a credential');
+});
+
+test('apply() reports the resolved backend without leaking the key, and ping is honest', async () => {  const h = harness();
   apply(h.ctx, { enabled: true, s1: { provider: 'jev', apiKey: 'sk-live-SUPERSECRET-0123456789' }, laya: { enabled: false } });
 
   const info = h.logs.join('\n');

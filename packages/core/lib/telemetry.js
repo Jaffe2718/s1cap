@@ -25,6 +25,36 @@ export const PRICES = {
 /** Jev: $0.042 per 1M input tokens, output free. */
 export const S1_PRICE_PER_M_INPUT = 0.042;
 
+/**
+ * One LLM call, priced.
+ *
+ * THERE IS NO `flags` FIELD HERE, AND THERE IS NO `planGate` ANYWHERE (2026-10-02, revised after the audit).
+ *
+ * This interface carried `flags: { tas, sel, planGate, degraded }` as a **required** field. Nothing in
+ * `packages/*&#47;src` ever assigned it, no round's artifacts carry it, and one of the four names described a
+ * component the policy no longer has: a required field that is never populated is a lie in the type, and the
+ * build is pure type erasure (`scripts/build-packages.mjs` strips types; `typescript` is not installed), so
+ * nothing would ever have reported it. `packages/dsh-plugin/test/observer.test.ts` records the same lesson for a
+ * runtime property that did not exist on its declared type.
+ *
+ * The audit names this field as `S1CallEvent.flags` (`s1cap-audit-lane.md`, F13); it is `LlmCallEvent`'s, and
+ * `S1CallEvent` has never had one. The substance is stronger than the finding says: nothing emits an `llm_call`
+ * record at all — round `20261002-2037`'s control planes hold only `assembly`, `context_delivery` and `s1_call` —
+ * so the bucket had no producer anywhere, and `core.test.ts` now pins its absence because the type checker that
+ * would otherwise notice cannot run.
+ *
+ * The field was described to the reader as "which interventions were active for this call". Two of the three
+ * survivors could not answer that either: `tas` is true whenever TAS assembled a layout, whether or not the
+ * layout was delivered, and `deliver` is the switch that decides whether the model saw it (see the C1 finding in
+ * `s1cap-audit-lane.md`). A flag that is set from the policy rather than from the delivery would repeat exactly
+ * the defect it was meant to record.
+ *
+ * What replaces it, if this type is ever emitted: derive the flags from the *outcome* the lane already records -
+ * `assembly.layoutOrder` contains the state proxy, `context_delivery.delivered` says whether it reached the model,
+ * and `s1_call.judgedPairs` covers selection - so a reader can check them against a record instead of trusting a
+ * policy read. Nothing emits an `llm_call` record today; the cells' own token account is read from
+ * `assistant/message.usage` by `scripts/cell-report.mjs`, which is why this removal changes no artifact.
+ */
                                
                    
                                           
@@ -46,7 +76,6 @@ export const S1_PRICE_PER_M_INPUT = 0.042;
                                                                                      
                        
                                                           
-                                                                              
  
 
                               

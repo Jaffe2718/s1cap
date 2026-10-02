@@ -150,11 +150,21 @@ pre-flight instance (own `DSH_HOME`, `cell: C2`, port 19494):*
 - **The surfaces this section names are present, and both telemetry streams are written.** The status route
   serves the plugin's own HTTP surface with the full status object (policy, resolved backend, Laya state, sink
   counters); `observation: tape` is writing `<run>/home/PROBE/.s1cap/tape.jsonl` (a `kind:"wiring"` record naming
-  `s1 {provider: laya-serve, mode: local}`, `relevance: true`, `planGate: true`, `xFirst: true`, plus live
+  `s1 {provider: laya-serve, mode: local}`, `relevance: true`, `xFirst: true`; plus live
   `session-event` records); the association graph is persisted at
   `<run>/home/PROBE/.s1cap/rg/rg-session-*.json`; and the pre-flight's own telemetry paths — pointed into the
   round's `evidence/PROBE/` — received **both** streams: `control.jsonl` with `assembly` ×4,
-  `context_delivery` ×4 and `s1_call` ×14, and `session.jsonl` with 15 parseable lines. The lane is therefore
+  `context_delivery` ×4 and `s1_call` ×14, and `session.jsonl` with 15 parseable lines.
+
+  > **The wiring record's key set, corrected (2026-10-02, then again after the audit).** This passage quoted a live
+  > record as carrying `planGate: true`. The plugin deliberately writes no such key now — a record announcing a
+  > component the policy does not have is the exact artifact the removal exists to stop producing — so a reader who
+  > went looking for it found nothing and could not tell a stale quote from a broken build. The record's keys are
+  > `s1`, `configuredProvider`, `conflicts`, `relevance`, `xFirst`, `recall`, `tas` and `governance`; the last three
+  > of those were added by this pass, `governance` carrying `admissionLimit`, `maxPairsPerSweep`, the resolved
+  > `breaker` thresholds, the context accounting and the two recall floors. `verify-wiring.mjs` asserts them all
+  > against each cell's recipe. The older quotations of the record elsewhere in this file that predate 2026-10-02 are
+  > historical and say so. The lane is therefore
   **called**, not merely constructed: every one of those 14 calls answered `ok: true` from
   `provider: laya-serve`, `routedModel: laya-rl-agent`, `endpoint: http://127.0.0.1:8008`, `attempts: 1`
   (87–1290 ms), and the assembly records report `scoredPairs == judgedPairs` (0 / 21 / 28 / 55) with
@@ -302,7 +312,9 @@ interface AssemblyPolicy {
   cell: 'C0' | 'C1' | 'C2';                               // §9.1: C0 baseline, C1 TAS alone, C2 full
   tas: { on: boolean; tMaxChars: number; updatePolicy: 'perTask' | 'perTurn' };
   recall: { threshold: number; depth: number; fanout: number; tier1: 'embed' | 's1' | 'off';
-            embedModel?: string; budgetRatio: number; minRecalledShare: number };
+            embedModel?: string; budgetRatio: number;
+            minRecalledShare: number;                       // token-share floor under the recall block; DEFAULT 0 = OFF
+            minRecalledSegments: number };                  // segment-count floor; DEFAULT 1 - the guard that fires the fallback
   tail: { k: number };                                    // verbatim recent turns always kept
   // no `planGate` field: removed 2026-10-02. It was `{ on, maxPlans, attemptCap, abstainConfidence }`, it was `on`
   // for C2, and it could not fire: round `20261002-2037` wrote zero `plan_gate` records because the model produced
@@ -377,7 +389,15 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 
 - Factor TAS off (cell C0): `[pinned | (selected or full) history chronological | x]`, no T block.
 - **T and the position of x are two switches, not one**: `tas.on` is whether the T block exists at all and `xFirst` is whether x sits before or after the recalled block, so the diagram above is paper T's arrangement (state first, question last) rather than the only TAS-on order — cells C1/C2 carry `xFirst` on, which places x before the recalled block (`[pinned | T | x | recalled | tail]`).
-- **Fallback:** if recalled mass < `minRecalledShare` (25%), degrade to chronological last-N window; log event.
+- **Fallback — and the rule that actually fires it (corrected 2026-10-02).** This line used to state the token-share
+  floor alone: "if recalled mass < `minRecalledShare` (25%), degrade to chronological last-N window". That is not the
+  rule in force. `recall.minRecalledShare` defaults to **0 — off** (`packages/core/src/types.ts`,
+  `defaultPolicy()`), because at 0.25 it fired on 9 of 9 steps of a live run and discarded every System-1 selection
+  before delivery could see it (`packages/core/src/assembler.ts`, beside the guard). The guard that runs is the
+  **segment-count** floor `recall.minRecalledSegments: 1` (`packages/core/src/config.ts`): fewer than one selected
+  segment is not a selection, so the block degrades to the chronological last-N window and logs the event. Either
+  floor writes `fallback` on the assembly record; both are recorded on the wiring record under `governance.recall`,
+  and `docs/FORMULAS.md` §3.5 states both as formulas with the same correction.
 - **Cache-awareness:** the pinned prefix is never reordered; T grows append-only; `updatePolicy: perTask` keeps T byte-stable within a task so the cache invalidation of `[T | recalled | tail | x]` happens at task boundaries, not per turn. The residual cache penalty is *measured*, not assumed (H3).
 - **DSH realization:** model-only rewrite via `surfaceOp {op:'replace'}` — the user-facing transcript is never touched. Non-DSH: the proxy rewrites the messages array before forwarding.
 
@@ -443,15 +463,27 @@ One new segment, 100 candidates, ~150 tokens each ≈ 15k input tokens per assem
 ```
 llm_call    { ts, sessionId, taskId?, cell, model, seq, promptTokens, cacheHitTokens,
               cacheMissTokens, outputTokens, reasoningTokens?, tReqOut, tFirstTok?, tEnd,
-              netLatencyMs, approvalWaitMs, s1Assist: {calls, tokens, ms},
-              flags: { tas, sel, planGate, degraded } }
+              netLatencyMs, approvalWaitMs, s1Assist: {calls, tokens, ms} }
 s1_call     { ts, provider, role: assoc|decide, kind: noul|choice|score, questions,
               inputTokens, outputTokens, ms, turnId?, scoredSegmentIds?, routedModel? }
 tool_call   { ts, tool, ms, ok, approvalWaitMs }
 assembly    { ts, seq, candidates, selected, bfsDepth, budgetUsed, blocks: {pinned,T,recalled,tail,x},
-              cacheStability: {prefixTokensStable}, fallback? }
-plan_gate   { ts, plans[], probs[], confidence[], order, executed, verified, savedTokensEst }
+              cacheStability: {prefixTokensStable}, deferredPairs, recallTree, unknownAdmitted?, fallback? }
+plan_gate   { ts, plans[], probs[], confidence[], order, executed, verified, savedTokensEst }   // design only; no run writes one
 ```
+
+> **`llm_call`'s `flags` bucket is gone (2026-10-02, after the audit).** The schema above used to end with
+> `flags: { tas, sel, planGate, degraded }` as a **required** field. Nothing in `packages/*/src` ever assigned it,
+> no round's artifacts carry it, and one of the four names described a component the policy no longer has: a
+> required field that is never populated is a lie in the type, and the build is pure type erasure
+> (`scripts/build-packages.mjs` strips types; `typescript` is not installed), so nothing would have reported it.
+> The field is deleted rather than made optional, for the reason the type's own comment now records: two of its
+> three survivors could not answer the question they were meant to ("which interventions were active for this
+> call") — `tas` is true whenever TAS *assembled* a layout, whether or not it was delivered, and `deliver` is the
+> switch that decides whether the model saw it. A flag set from the policy rather than from the delivery would
+> repeat the defect it was meant to record. If the type is ever emitted, its flags must be derived from the outcome
+> the lane already records — `assembly.layoutOrder`, `context_delivery.delivered`, `s1_call.judgedPairs` — so a
+> reader can check them against a record instead of trusting a policy read.
 
 **Two sinks, never one.** The records above are the **control-plane log** (`control.jsonl`); the
 harness's own events — the only source of segments — are the **session log** (`session.jsonl`).

@@ -768,7 +768,6 @@ test('cost model: llm call, s1 call, task aggregate', () => {
     approvalWaitMs: 1500,
     netLatencyMs: 3500,
     s1Assist: { calls: 2, tokens: 30_000, ms: 40 },
-    flags: { tas: true, sel: true, planGate: true, degraded: false },
   };
   assert.ok(Math.abs(llmCallCost(llm, prices) - (0.006 + 0.3 + 1.2)) < 1e-9);
   assert.ok(Math.abs(s1CallCost(1_000_000) - 0.042) < 1e-12);
@@ -792,4 +791,27 @@ test('cost model: llm call, s1 call, task aggregate', () => {
   assert.equal(sum.cacheHitRate, 0.5);
   assert.equal(sum.llmCalls, 1);
   assert.equal(sum.s1Calls, 1);
+});
+
+test('a telemetry type carries no field a run cannot populate, and `planGate` exists nowhere in it', () => {
+  // The type system cannot report this: the build is pure type erasure (`scripts/build-packages.mjs`,
+  // `stripTypeScriptTypes(source, { mode: 'strip' })`) and `typescript` is not installed, so a required field with
+  // no assignment site ships silently - which is what `S1CallEvent.flags`/`LlmCallEvent.flags` were: a required
+  // `{ tas, sel, planGate, degraded }` that 0 of the round's 5 992 `s1_call` records carried, naming a component
+  // the policy no longer has. This is the runtime half of the check the typechecker would have done.
+  const llm: LlmCallEvent = {
+    type: 'llm_call', schema: 1, ts: 1000, sessionId: SESSION, cell: 'C2', model: 'deepseek-flash', seq: 1,
+    promptTokens: 1, cacheHitTokens: 0, cacheMissTokens: 1, outputTokens: 1,
+    wallMs: 1, approvalWaitMs: 0, netLatencyMs: 1,
+    s1Assist: { calls: 0, tokens: 0, ms: 0 },
+  };
+  assert.equal('flags' in llm, false, 'no `flags` bucket: it described interventions nothing recorded');
+  assert.equal('planGate' in llm, false, 'and the removed plan gate names no field of a telemetry event');
+  const s1: S1CallEvent = {
+    type: 's1_call', schema: 1, ts: 1100, provider: 'jev', role: 'assoc', kind: 'noul',
+    questions: 1, inputTokens: 1, outputTokens: 0, ms: 1,
+  };
+  assert.equal('flags' in s1, false, '`s1_call` never had one, and must not gain one by accident');
+  assert.equal(Object.keys(llm).some((k) => k.includes('planGate')), false);
+  assert.equal(Object.keys(s1).some((k) => k.includes('planGate')), false);
 });

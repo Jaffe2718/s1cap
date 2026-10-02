@@ -48,7 +48,7 @@ import type { Tuning } from './credentials.ts';
 import { createStepObserver } from './step-observer.ts';
 import type { StepObserver } from './step-observer.ts';
 import { createS1Relevance } from './s1-relevance.ts';
-import { createBackpressure } from './s1-backpressure.ts';
+import { createBackpressure, BACKPRESSURE_DEFAULTS } from './s1-backpressure.ts';
 import type { Backpressure } from './s1-backpressure.ts';
 
 export interface S1CapPluginConfig extends AssemblyPolicy {
@@ -105,6 +105,14 @@ const CONTEXT_WINDOW_DEFAULT = 128_000;
 const RESERVE_OUTPUT_DEFAULT = 8_000;
 const FIXED_OVERHEAD_DEFAULT = 1_200;
 const DECAY_LAMBDA_MS = 36 * 60 * 60 * 1000;
+/**
+ * The most pairs one upkeep tick may offer, across every segment it folds in.
+ *
+ * Hoisted out of the observer options so the wiring record can state it (F4). It is a *governance* number - it
+ * decides how much work one tick is allowed to ask for, and `deferredPairs` is where a run that hit it shows up -
+ * and it appeared in no persisted artifact while it was a literal inside a call.
+ */
+const MAX_PAIRS_PER_SWEEP = 2048;
 
 /**
  * Validate and normalise the whole plugin config. Fail-safe: invalid values are reported and
@@ -1107,6 +1115,21 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     backpressure = createBackpressure({
       maxInFlight: config.s1.admissionLimit,
       onWarn: (message) => ctx.logger?.warn?.(message),
+      // Every state change of the breaker, written the moment it happens.
+      //
+      // The wiring record alone cannot answer the question this exists for. It is written once, at activation, and
+      // the breaker may open three times and close again before the run ends - at which point `stats().state` reads
+      // `closed` and the run looks identical to one that never paused. "The run stopped asking because the backend
+      // refused" and "because our own cap was full" are different diagnoses of the same zero, so the transitions go
+      // on the tape as they happen rather than being reconstructed from a gauge at the end (F4).
+      onTransition: (transition) => {
+        try {
+          probeSink?.write(`${JSON.stringify({ schema: 0, kind: 's1-gate', ...transition })}\n`);
+        } catch {
+          // A tape line that cannot be written costs a line, never a scoring loop: the same contract the control
+          // log carries (`control-log.ts`). The gauges stay readable on `/s1` either way.
+        }
+      },
     });
     relevance = createS1Relevance({
       decide: async (state, questions) => {
@@ -1181,8 +1204,10 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
        * upkeep (one new segment, a window of `w`) is never cut short, small enough that a cold start or a burst
        * cannot become the burst the admission limit punishes. A pair the budget holds back is **deferred**, not
        * scored lexically: the graph does not advance its cursor over it, so the next tick offers it again.
+       *
+       * The value lives in `MAX_PAIRS_PER_SWEEP` so the wiring record can carry it.
        */
-      maxPairsPerSweep: 2048,
+      maxPairsPerSweep: MAX_PAIRS_PER_SWEEP,
       emit: (event) => {
         try {
           controlLog.emit(event);
@@ -1224,14 +1249,19 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
       onProbe: (line) => probeSink?.write(JSON.stringify(line) + '\n'),
       ...(resolved.observation === 'tape'
         ? {
-            onTape: (step: number, messages: readonly unknown[], systemPrompt: string | undefined) => {
+            onTape: (step: number, messages: readonly unknown[], systemPrompt: string | undefined, sessionId: string) => {
               tapeSink?.write(
                 `${JSON.stringify({
                   schema: 1,
-                  // The id of the session this step belongs to, read back from the observer that just saw it.
-                  // It used to be the literal 'live', which made a tape from two conversations indistinguishable
-                  // from one long one - and separating them after the fact is not possible from a constant.
-                  sessionId: observer?.stats().sessionId ?? 'unassigned',
+                  // The id of the session this step belongs to, handed in by the observer that just read it. It used
+                  // to be the literal 'live', which made a tape from two conversations indistinguishable from one
+                  // long one - and separating them after the fact is not possible from a constant.
+                  //
+                  // It was then read back from `observer?.stats().sessionId`, which is assigned *after* `emit` and
+                  // therefore after this callback: every line carried the previous step's id and the first line of
+                  // a session carried `unassigned`. Reading a value the caller already has is the fix; there is no
+                  // ordering left to get wrong.
+                  sessionId,
                   step,
                   ...(systemPrompt !== undefined ? { systemPrompt } : {}),
                   messages,
@@ -1246,20 +1276,65 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
     // hitting is a component that is configured, constructed and never called, and from the control plane alone
     // that is invisible: a pair scored by System-1 and a pair scored lexically produce the same record. So the
     // wiring is stated once, at activation, on the same diagnostic tape as `service-probe` and `tuning-file`.
+    //
+    // Two additions after the audit (`s1cap-audit-lane.md`, F3/F4), both for the same reason: the fields a *later
+    // round* needs to read a run it did not watch.
+    //
+    //   - `configuredProvider` and `conflicts`. A conflict demotes the session to `provider: "none"`
+    //     (`buildBackend` above), so `s1` reads `"none"` - the exact string a deliberate no-System-1 control
+    //     writes. `cell-report.mjs` reads that string to decide a cell had no lane, which means a C2 whose backend
+    //     was demoted by a conflict and a C0 that was configured with no lane printed the same row. The two fields
+    //     that tell them apart used to exist only on the live `/s1` route, and `logs/*.log` was found to contain
+    //     zero `[s1cap]` lines, so the warning at `:823` was durable nowhere.
+    //   - `governance`. `admissionLimit`, the per-sweep pair budget and the breaker's thresholds are the knobs
+    //     this pass added, and none of them appeared in any persisted record: "which knobs actually governed this
+    //     run" was unanswerable from a future round's evidence. They are recorded resolved - the breaker's
+    //     defaults included - so the record is the authority and not a copy of a default read from a source file
+    //     that has since changed.
+    const governance = {
+      admissionLimit: config.s1.admissionLimit,
+      maxPairsPerSweep: MAX_PAIRS_PER_SWEEP,
+      // The values actually in force, not the ones the caller happened to name: a gate built with no
+      // `openAfterRefusals` still ran with one.
+      breaker: {
+        ...(backpressure?.policy() ?? {
+          maxInFlight: config.s1.admissionLimit,
+          ...BACKPRESSURE_DEFAULTS,
+        }),
+      },
+      contextWindow: CONTEXT_WINDOW_DEFAULT,
+      reserveOutputTokens: RESERVE_OUTPUT_DEFAULT,
+      fixedOverheadTokens: FIXED_OVERHEAD_DEFAULT,
+      // The recall knobs whose *effective* values decide when the recency fallback fires. `minRecalledShare` is
+      // documented in three places as the in-force floor and defaults to 0 (off); `minRecalledSegments` is the
+      // guard that actually runs and appeared in no document at all (F17). Recorded here so the two cannot be
+      // confused again by a reader who only has the run.
+      recall: {
+        d: config.recall.depth,
+        r: config.recall.threshold,
+        w: config.recall.window,
+        wait: config.recall.anchorWaitMs,
+        minRecalledShare: config.recall.minRecalledShare,
+        minRecalledSegments: config.recall.minRecalledSegments,
+      },
+    };
     probeSink?.write(
       JSON.stringify({
         schema: 0,
         kind: 'wiring',
         s1: backend.mode === 'none' ? 'none' : { provider: backend.provider, mode: backend.mode, baseUrl: backend.baseUrl },
-        // Whether the scorers will actually reach a backend, not whether the objects exist. They are built
-        // unconditionally now so that a late-arriving client is picked up, which makes "the object is there" a
-        // statement about nothing and "there is a client to call" the fact worth writing down.
+        // What the configuration asked for, beside what the session resolved to. Equal means "this cell runs what
+        // its recipe says"; different means a conflict demoted it, and `conflicts` carries the reason. A reader who
+        // sees `s1: "none"` must be able to tell which of the two they are looking at without a live instance.
+        configuredProvider: config.s1.provider,
+        conflicts: resolved.conflicts,
         relevance: client !== undefined,
         // No `planGate` key: the policy field is gone, and a wiring record that still announced one would be the
         // exact artifact this removal exists to stop producing - a run stating a component it does not have.
         xFirst: config.xFirst,
         recall: { d: config.recall.depth, r: config.recall.threshold, w: config.recall.window, wait: config.recall.anchorWaitMs },
         tas: config.tas,
+        governance,
       }) + '\n',
     );
 

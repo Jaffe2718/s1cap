@@ -48,6 +48,19 @@
  * Time is injected, so the whole state machine is testable without sleeping.
  */
 
+/**
+ * The thresholds a gate uses when the caller names none.
+ *
+ * Exported because they are *governance*: a round that did not state `openAfterRefusals` still ran with
+ * a number, and "which knobs actually governed this run" has to be answerable from the round's own
+ * artifacts rather than from reading this file at the time (F4 in `s1cap-audit-lane.md`).
+ */
+export const BACKPRESSURE_DEFAULTS = {
+  openAfterRefusals: 5,
+  windowMs: 15_000,
+  cooldownMs: 15_000,
+} as const;
+
 /** Configured facts about the backend, and the thresholds at which it is treated as saturated. */
 export interface BackpressureOptions {
   /**
@@ -65,6 +78,33 @@ export interface BackpressureOptions {
   /** injected for tests */
   now?(): number;
   onWarn?(message: string): void;
+  /**
+   * Every state change of the breaker, as it happens.
+   *
+   * The end state alone is not enough. `stats().state` is a gauge: a session that opened the breaker
+   * three times and recovered before the run ended is indistinguishable in it from one that never
+   * paused, and "the run stopped asking because the backend refused" is exactly the diagnosis this
+   * module exists to make separable from "because our own cap was full" (F4). The plugin writes these
+   * onto the tape so the transitions survive the process.
+   */
+  onTransition?(transition: BreakerTransition): void;
+}
+
+/** One state change of the breaker, with the counters that were standing when it happened. */
+export interface BreakerTransition {
+  /** epoch ms, from the injected clock */
+  at: number;
+  state: BreakerState;
+  /** why the breaker moved - the same sentence `onWarn` receives */
+  reason: string;
+  /** what the transition was from, so a reader does not have to reconstruct the sequence */
+  from: BreakerState;
+  inFlight: number;
+  deferredByLimit: number;
+  deferredByBreaker: number;
+  refusalStreak: number;
+  /** when the breaker was opened, carried on every transition while it is not closed */
+  openedAt: number;
 }
 
 export type BreakerState = 'closed' | 'open' | 'probing';
@@ -96,6 +136,16 @@ export interface BackpressureStats {
   maxInFlight: number;
   /** when the breaker was last opened, epoch ms (0 when it has never opened) */
   openedAt: number;
+  /**
+   * Slots that were handed back without a request ever being sent for them.
+   *
+   * A slot is the right to have one request in flight. `tryAcquire()` takes it and *something* must give
+   * it back - a success, a refusal, or this. Without a counter, a path that acquires and never releases is
+   * invisible until the effective cap is zero and every window is deferred with no stated cause (F16.3 in
+   * `s1cap-audit-lane.md`). It is a number in the artifacts rather than a comment promising it cannot
+   * happen.
+   */
+  slotsLeaked: number;
 }
 
 export interface Backpressure {
@@ -108,16 +158,27 @@ export interface Backpressure {
   recordSuccess(): void;
   /** The request was refused (or could not be delivered). May open the breaker. */
   recordRefusal(): void;
+  /**
+   * Give a slot back when no request was ever sent for it, and count it.
+   *
+   * The path this exists for: a caller acquires, then throws or answers "there is no backend" before the
+   * request leaves. `recordSuccess()` would report that as an answered request, which it was not; doing
+   * nothing leaks the slot for the life of the process. This is the third exit, and `slotsLeaked` is the
+   * number that says how often it was needed.
+   */
+  recordLeak(): void;
   stats(): BackpressureStats;
+  /** The thresholds this gate actually resolved, defaults included. */
+  policy(): { maxInFlight: number; openAfterRefusals: number; windowMs: number; cooldownMs: number };
   /** `open` and `probing` both mean "not sending at this instant" */
   isBlocked(): boolean;
 }
 
 export function createBackpressure(opts: BackpressureOptions = {}): Backpressure {
   const maxInFlight = Math.max(1, Math.trunc(opts.maxInFlight ?? 8));
-  const openAfterRefusals = Math.max(1, Math.trunc(opts.openAfterRefusals ?? 5));
-  const windowMs = Math.max(0, opts.windowMs ?? 15_000);
-  const cooldownMs = Math.max(0, opts.cooldownMs ?? 15_000);
+  const openAfterRefusals = Math.max(1, Math.trunc(opts.openAfterRefusals ?? BACKPRESSURE_DEFAULTS.openAfterRefusals));
+  const windowMs = Math.max(0, opts.windowMs ?? BACKPRESSURE_DEFAULTS.windowMs);
+  const cooldownMs = Math.max(0, opts.cooldownMs ?? BACKPRESSURE_DEFAULTS.cooldownMs);
   const clock = opts.now ?? Date.now;
 
   const refusals: number[] = [];
@@ -138,6 +199,7 @@ export function createBackpressure(opts: BackpressureOptions = {}): Backpressure
     inFlight: 0,
     maxInFlight,
     openedAt: 0,
+    slotsLeaked: 0,
   };
 
   /** Refusals inside the window, oldest first. Pruned on every read, so the streak is a real measure. */
@@ -146,12 +208,41 @@ export function createBackpressure(opts: BackpressureOptions = {}): Backpressure
     return refusals.length;
   };
 
+  /**
+   * Move the breaker and report it.
+   *
+   * Every assignment to `state` goes through here, so a new branch cannot change the state without the
+   * transition being reported: the single exit is what makes "no `s1-gate` line for a run that opened the
+   * breaker" impossible rather than merely unlikely.
+   */
+  const move = (to: BreakerState, from: BreakerState, at: number, reason: string): void => {
+    state = to;
+    stats.state = to;
+    if (to === 'open') {
+      openedAt = at;
+      stats.openedAt = at;
+    } else {
+      // The gauge follows the state machine: `openedAt` is "when the breaker was last opened" and it is
+      // zero again once the breaker is not open. `stats()` copies the object, so the reset reaches `/s1`.
+      stats.openedAt = 0;
+    }
+    opts.onTransition?.({
+      at,
+      state: to,
+      from,
+      reason,
+      inFlight,
+      deferredByLimit: stats.deferredByLimit,
+      deferredByBreaker: stats.deferredByBreaker,
+      refusalStreak: stats.refusalStreak,
+      openedAt,
+    });
+  };
+
   const open = (at: number, why: string): void => {
-    state = 'open';
-    openedAt = at;
+    const from = state;
     stats.opened += 1;
-    stats.state = 'open';
-    stats.openedAt = at;
+    move('open', from, at, why);
     opts.onWarn?.(
       `[s1cap] System-1 backend is refusing (${why}): pausing asks for ${cooldownMs}ms, then one probe. ` +
         'Pairs that are not asked about are deferred, not scored lexically, and are reported as `deferredPairs`.',
@@ -165,8 +256,8 @@ export function createBackpressure(opts: BackpressureOptions = {}): Backpressure
       if (state !== 'closed') {
         // `open` waits out the cooldown; `probing` is the single in-flight probe and admits nobody else.
         if (state === 'open' && at - openedAt >= cooldownMs) {
-          state = 'probing';
-          stats.state = 'probing';
+          stats.refusalStreak = recentRefusals(at);
+          move('probing', 'open', at, `the ${cooldownMs}ms cooldown elapsed; admitting one probe`);
         } else {
           stats.deferredByBreaker += 1;
           return { ok: false, reason: 'breaker-open' };
@@ -190,10 +281,12 @@ export function createBackpressure(opts: BackpressureOptions = {}): Backpressure
       stats.refusalStreak = 0;
       if (state !== 'closed') {
         stats.recovered += 1;
+        move('closed', state, clock(), 'the backend answered; resuming at the configured rate');
         opts.onWarn?.('[s1cap] the System-1 backend is answering again: resuming at the configured rate');
+      } else {
+        state = 'closed';
+        stats.state = 'closed';
       }
-      state = 'closed';
-      stats.state = 'closed';
     },
 
     recordRefusal(): void {
@@ -215,8 +308,21 @@ export function createBackpressure(opts: BackpressureOptions = {}): Backpressure
       }
     },
 
+    recordLeak(): void {
+      // Named for what it is: a slot came back without a request having been sent for it. It is not a
+      // refusal (the backend said nothing) and not a success (nothing answered), so it gets its own
+      // counter rather than being folded into either.
+      inFlight = Math.max(0, inFlight - 1);
+      stats.inFlight = inFlight;
+      stats.slotsLeaked += 1;
+    },
+
     stats(): BackpressureStats {
       return { ...stats };
+    },
+
+    policy() {
+      return { maxInFlight, openAfterRefusals, windowMs, cooldownMs };
     },
 
     isBlocked(): boolean {
