@@ -681,7 +681,8 @@ Two checks, one answer each:
 - **The documented mechanism exists in this DSH build.** `configForms` appears in the shipped client packages
   (`dsh-client-ui-chat`, `dsh-client-ui-agent-preset`, `dsh-client-locale`) and `loader/volatile-update` in
   `cordis-plugin-loader` plus several plugins (`dsh-llm-deepseek`, `dsh-experimental-speech-to-text`). So the Plugins
-  page form and volatile HMR are real surfaces in 0.1.7-rc.2, not documentation for a newer release.
+  page form and volatile HMR are real surfaces in 0.1.7-rc.2, not documentation for a newer release. (That is
+  the release the check ran on, and it is stated so the sentence is not read as a claim about the release in use.)
 - **Internal packages are not resolvable from the profile directory.** `require.resolve('@deepseek-ai/schemastery')`
   and `require.resolve('@deepseek-ai/dsh-credentials')` both answer `MODULE_NOT_FOUND` when run with the profile as
   the working directory. They live inside the application archive, so a plugin installed under the profile cannot
@@ -962,8 +963,10 @@ listed there as a requirement for this machine.
 
 ### D5. Plugin shell (`packages/dsh-plugin`)
 
-Loads and activates in a real DSH 0.1.7-rc.2 profile. Three facts were learned the hard way and are now
-enforced in code and tests — read `docs/AGENT_BRIEF.md` §1.8 for the full post-mortem:
+Loads and activates in a real DSH profile — originally recorded on **0.1.7-rc.2** (2026-09-28), and re-checked on
+**0.2.0-rc.2** on 2026-10-02, where the plugin loads, activates and registers its four commands in a live profile
+(`docs/AGENT_BRIEF.md` §1.8 carries the check for each fact and the release it belongs to). Three facts were learned
+the hard way and are now enforced in code and tests — read §1.8 for the full post-mortem:
 
 1. a bundle installed into a profile's `node_modules` cannot be TypeScript → ship `lib/*.js`
    (`scripts/build-packages.mjs`, zero dependencies);
@@ -997,6 +1000,15 @@ Three findings from that round, all reflected in code: an absent state proxy was
 `assemble()` now charges 0 for an empty `T`); `AssemblyEvent` gained an optional `sessionId` (without it,
 records from several sessions in one file cannot be attributed); and `blocks.pinned` was 0, which is **N1**.
 
+**N1's symptom is gone on 0.2.0-rc.2, seen in the pre-flight of 2026-10-02** (live instance, its telemetry paths
+pointed into the round's `evidence/PROBE/`): its four `assembly` records carry `blocks.pinned` 700 → 1499 with
+`prefixTokensStable` equal to it, and `scoredPairs == judgedPairs` (0 / 21 / 28 / 55). The record has grown
+additively beside the sample above — `windowN`, `layoutOrder`, `xFirst`, `layoutStableTokens`,
+`cutAfterBlock`/`tokensAfterCut`, `recallTree` — and `docs/CONTROL_PLANE_LOGGING.md` §6 keeps both releases'
+records, because which fields a record has is part of which release produced it. Both of the pre-flight's streams
+were written: `control.jsonl` (`assembly` ×4, `context_delivery` ×4, `s1_call` ×14, every call `ok: true` from
+`laya-serve`/`laya-rl-agent` at `attempts: 1`) and `session.jsonl` (15 lines).
+
 ---
 
 ## 3. Next — agent-ready detail
@@ -1027,7 +1039,10 @@ test, and the traps. Do them in order; N1–N3 are all gating for N6.
      activates.
   4. Add a unit test with an injected prompt; update `docs/CONTROL_PLANE_LOGGING.md` §6.
 - **Acceptance:** unit test green; a real headless round shows `pinned > 0`, `prefixTokensStable === pinned`,
-  and `budgetUsed` grown by roughly the prompt's token count.
+  and `budgetUsed` grown by roughly the prompt's token count. **Met on 0.2.0-rc.2** by the pre-flight of
+  2026-10-02 (see D6): `pinned` 700 → 1499, `prefixTokensStable` equal to it, `budgetUsed` 858 → 2537. What is
+  left is the *unit* half of the acceptance test and a driven three-cell round on that release, not the
+  observable.
 - **Traps:** keep the record schema unchanged (no new required fields); never reorder the pinned block
   (cache alignment depends on byte stability); if the harness renders the prompt per call, hash it and log a
   warning when it changes mid-task.
@@ -1825,7 +1840,7 @@ measured per step rather than inferred, 175–212 tokens per block. Fresh conten
 LLM as uncached input; the lane's consumption does not appear on the LLM's bill, and the LLM's uncached input is not
 the lane's consumption.
 
-### The DSH version: resolved per round, recorded with the round, and not yet re-verified
+### The DSH version: resolved per round, recorded with the round, and re-verified on 0.2.0-rc.2
 
 **The version a round runs on is not fixed in advance and is not written into this repository.** It is resolved at
 the start of a round — the latest release available at that moment — written into the round's own record beside its
@@ -1836,21 +1851,36 @@ a figure belongs to. It is not a gate on any release — nothing in the procedur
 validated by a round. "Latest at run time" is the owner's decision, so neither file hardcodes a version: the round's
 record carries the value (`docs/CELLS-RUN.md`, prerequisites).
 
-**What is known.** The project was built, and its DSH runtime facts were observed, on **0.1.7-rc.2**:
-`docs/AGENT_BRIEF.md` §1.8 is dated to it, §1.5's local-install facts come from that line, and the plugin's own
-manifest declares exactly one supported release — `packages/dsh-plugin/package.json` →
-`dsh.compatibility.dshReleases: { "0.1.7-rc.2": "supported" }`. The machine now answers **`0.2.0-rc.2`** to
-`dsh --version`, one minor release past the only release the plugin declares.
+**The release in use is `0.2.0-rc.2`, and it is now the declared one.** The machine answers `0.2.0-rc.2` to
+`dsh --version`, and `packages/dsh-plugin/package.json` →
+`dsh.compatibility.dshReleases: { "0.2.0-rc.2": "supported" }` states it as the release this project supports. That
+entry is a claim with evidence behind it, which is the only way this field is ever extended: on 2026-10-02 the
+plugin's load, activation, commands, composed config and own surfaces were re-checked on `0.2.0-rc.2` in a real
+profile, and `docs/AGENT_BRIEF.md` §1.8 states per fact which release it is evidence about and which check settled
+it.
 
-**Nothing has been re-verified on `0.2.0-rc.2`.** Not §1.8's plugin-loading facts, not the version-specific claims
-scattered through this file's dated records (the plugin-manager page form, volatile HMR, the `surfaceOp` shape, the
-credential and settings surfaces), and not the plugin's own load path. Those statements are evidence about
-`0.1.7-rc.2`; on the release that runs now they are **inherited, not re-confirmed**, and a reader on `0.2.0-rc.2`
-should read them that way. Nothing here says `0.2.0-rc.2` works — nothing has established that.
+**What that re-verification covers, and what it does not.** It covers the plugin's *load path and wiring*: the
+bundle registers and activates in a real profile, `/s1`, `/s1-ping`, `/s1-laya` and `/s1-tune` register, the
+composed config resolves to the cell's recipe, the plugin's status route and client half are live, and the
+System-1 lane is called rather than merely constructed (§1.8's checks). It does **not** cover the rest of the
+project's DSH facts: §1.5's session model and hook contracts, the version-specific claims scattered through this
+file's dated records (the plugin-manager page form, volatile HMR, the `surfaceOp` shape, the settings shell and the
+credential/settings surfaces), and the waterfall contract in §1.8 are still **evidence about `0.1.7-rc.2`** —
+inherited, not re-confirmed, and a reader on `0.2.0-rc.2` should read them that way. No three-cell round has been
+driven on `0.2.0-rc.2` yet, so no *measurement* exists on it either: what has been established is that the plugin
+loads, activates and runs its wiring there, not that any figure ranks the same way on it.
 
-**No round record has carried a version, `20261001-1414` included.** It ran before any round record carried one, so
-its DSH version is **unknown** and must not be guessed — not from this file, not from the manifest, and not from the
-fact that it ran on this machine. Every earlier round is in the same position, `20261001-1300` among them.
+**The round record now carries a version — and one round still cannot.** `20261002-2037` was provisioned under the
+rule: `manifest.json` → `_dsh.version = "0.2.0-rc.2"`, with the executable, the probe time and the raw
+`dsh --version` output in `logs/dsh-version.txt`, so its numbers are comparable with any other round that states
+`0.2.0-rc.2`. `20261001-1414` ran before any round record carried one: its DSH version is **unknown** and must not
+be guessed — not from this file, not from the manifest, and not from the fact that it ran on this machine. Every
+earlier round is in the same position, `20261001-1300` among them.
+
+**One artifact is older than the declaration it reports.** `20261002-2037`'s manifest was written at
+`2026-10-02T12:37:10.444Z`, so its `_dsh.plugin.declaredDshReleases` still reads `{ "0.1.7-rc.2": "supported" }` —
+that is what `setup.mjs` read from the plugin at that moment, before the field named `0.2.0-rc.2`. It is the round's
+record of a state, not a live claim, and re-running `setup.mjs` over the directory is what would refresh it.
 
 **The compatibility manifest is a claim, not an intention.** `dshReleases` is extended only when there is evidence
 on the release — the plugin exercised on it and the facts observed there — and never optimistically: a matrix entry

@@ -9,7 +9,7 @@
 
 ## 0. Ground rules for the implementing agent
 
-1. Everything in §1 was verified against live URLs on **2026-09-27/28** (three verification passes: paper/API/docs, related work, benchmarks/pricing). Do not re-verify; do not contradict. If a live API behaves differently from §1, **stop and report** — do not silently adapt.
+1. Everything in §1 was verified against live URLs on **2026-09-27/28** (three verification passes: paper/API/docs, related work, benchmarks/pricing). Do not re-verify; do not contradict. If a live API behaves differently from §1, **stop and report** — do not silently adapt. One exception, and it is re-verified rather than contradicted: **§1.8 was re-checked on 2026-10-02 against a live `0.2.0-rc.2` profile**, and it now states per fact which release it is evidence about and which check settled it.
 2. Items marked `[VERIFY]` are deliberately unverified: verifying them is the first task of the milestone that names them.
 3. Never invent benchmark numbers, API fields, or library names. If you need one not present here, ask the human.
 4. The human owns the research decisions listed in §12. All other implementation decisions within this spec are yours.
@@ -66,14 +66,17 @@
 ### 1.5 DSH plugin architecture (verified from local install + community plugin analysis)
 
 **Release scope.** The local-install observations in this section were taken while **0.1.7-rc.2** was the installed
-release — the one §1.8 documents and the one the plugin's `dshReleases` manifest names — so they are evidence about
-that release; the text labels the facts that come from other releases (`0.1.2` for the old `surfaceOp` shape,
-`0.1.5+` for `system/message` as node 0). Nothing here has been re-verified on the release the machine runs now
+release — the release §1.8 originally documented — so they are evidence about that release; the text labels the
+facts that come from other releases (`0.1.2` for the old `surfaceOp` shape, `0.1.5+` for `system/message` as node
+0). The release in use is now **0.2.0-rc.2**: the plugin's load path, its activation in a real profile, its
+commands and the composed config were re-checked there (§1.8, which states per fact which release it is evidence
+about, and which check settled it). The rest of this section — the profile layout, the session model, the hook
+points, the overflow flow — is still 0.1.7-rc.2 evidence and has **not** been re-confirmed on 0.2.0-rc.2
 (`docs/STATUS.md` §8).
 
 - DSH = DeepSeek Harness, open source (<https://github.com/deepseek-ai/deepseek-harness>), Electron app + agent runtime. Profiles live at `~/.dsh/profiles/<name>/` with `package.json` (field `dsh.profile.bundles`) and `cordis.patch.yml` (loader patch entries: `id` / `name` / `config`); `patchReload: live` enables hot reload.
 - **Plugin = npm package** declaring `dsh.bundle.patch: "./cordis.patch.yml"` (+ optional `dsh.client` for web-UI injection, `dsh.compatibility.dshReleases`). Install: `dsh plugin --profile web add <pkg|file:path>` — auto-registers in bundles and composes insert lines.
-- Official peer contracts (from `dsh-command-context-trim@0.3.2`, npm registry): `@deepseek-ai/cordis ^4.0.2`, `@deepseek-ai/dsh-llm`, `dsh-session`, `dsh-commands`, `dsh-compaction`, `dsh-invariants`, `dsh-token-meter`, `@deepseek-ai/schemastery` (0.1.2-rc.1 line; compatibility declared for 0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.5-rc.3 / 0.1.7-rc.2).
+- Official peer contracts (from `dsh-command-context-trim@0.3.2`, npm registry, read then): `@deepseek-ai/cordis ^4.0.2`, `@deepseek-ai/dsh-llm`, `dsh-session`, `dsh-commands`, `dsh-compaction`, `dsh-invariants`, `dsh-token-meter`, `@deepseek-ai/schemastery` (0.1.2-rc.1 line). That package's own compatibility declaration — `0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.5-rc.3 / 0.1.7-rc.2` — is a dated record of the copy read, and says nothing about this project's releases: `dsh-s1cap` declares its own (§6), and it names `0.2.0-rc.2`.
 - **Session model — the load-bearing fact:** a persistent **append-only event log** (the human record, never rewritten) is separate from the **surface** (the model view). Model-only rewrites happen via `surfaceOp {op:'replace', startSeq, endSeq}` on `user/message` events (0.1.2 shape used `start`/`end`; probe which shape the host accepts — context-trim does a one-shot probe). `system/message` is node 0 (0.1.5+) and a **barrier**: never trimmed, never crossed. **The transcript shown to the user stays strictly chronological — this natively satisfies the project's "user sees chronology, model sees assembled context" requirement.**
 - Hook points: `agent/pre-step` (before each LLM call — where compaction registers its pressure path), `agent/request-error` (Cordis **waterfall**; `{prepend: true}` unshifts ahead of compaction's recovery), `agent.runMaintenance()` (idle-time ops), `ctx.tokenMeter` (shadow-price token accounting, O(1) projection), `compaction/prune` + `toolResultPruner` (tool-result slimming with `toolPairingBalancedBefore/After`), `model/selection` intent.
 - Overflow flow today: request fails `CONTEXT_WINDOW_EXCEEDED` → (prepend) model-free trim / in-place slim → retry → else compaction (prune + LLM summarize).
@@ -107,28 +110,94 @@ Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai
 
 ---
 
-### 1.8 DSH 0.1.7-rc.2 plugin-loading facts (verified by booting real profiles, 2026-09-28)
+### 1.8 DSH plugin-loading facts (release in use: 0.2.0-rc.2; 0.1.7-rc.2 line kept as history)
+
+**How to read this section.** Every fact below states the release it is evidence about and the check that settled
+it. Facts re-checked today on **0.2.0-rc.2** are marked *verified on 0.2.0-rc.2* and carry their check; the older
+observations, taken while **0.1.7-rc.2** was the installed release (2026-09-28), are kept in a clearly separated
+block at the end and are **not** re-confirmed on the current release.
+
+*Verified on 0.2.0-rc.2 (2026-10-02), from the round `.s1cap-ablation/round-20261002-2037` and its live `PROBE`
+pre-flight instance (own `DSH_HOME`, `cell: C2`, port 19494):*
+
+- **The release.** `dsh --version` → `0.2.0-rc.2`; the same answer is written into the round's record
+  (`<run>/manifest.json` → `_dsh.version`, `probe time 2026-10-02T12:37:10.444Z`) and kept raw in
+  `<run>/logs/dsh-version.txt`. *Check:* re-read both files.
+- **A bundle registers and activates in a real profile.** The isolated `PROBEtest` profile lists `dsh-s1cap` in
+  `dsh.profile.bundles` and carries the plugin as a dependency; the running instance's own status route answers
+  `GET /s1cap-7340?token=…` with `ok: true`, `status.cell = "C2"` and `configIssues.errors = []`, `warnings = []`,
+  `conflicts = []`. *Check:* query the live status route with the UI token from
+  `<run>/logs/PROBE.log` (the token is a query parameter, so it never appears as a path segment), and read
+  `<run>/home/PROBE/profiles/PROBEtest/package.json`.
+- **The composed config resolves as this section's design says.** With `DSH_HOME=<run>/home/PROBE`,
+  `dsh --profile PROBEtest --dump-config` (a read-only compose-and-exit; it does not touch the running instance)
+  resolves `- id: s1cap` → `enabled: true`, `cell: C2`, `assemblyDeadlineMs: 250`, `s1.provider: laya-serve`,
+  `s1.baseUrl: http://127.0.0.1:8008`, `s1.retryAttempts: 2`, `laya.enabled: true`, `laya.autoStart: false`. It
+  agrees, field for field, with the profile patch `setup.mjs` wrote and with the running process's own report
+  (`provider = configuredProvider = laya-serve`, `mode = local`, `baseUrl = http://127.0.0.1:8008`). *Check:* run
+  the dump and compare all three.
+- **The commands exist, under the no-space names.** The plugin registers four — `s1`, `s1-ping`, `s1-laya`,
+  `s1-tune` (`registerCommands()` in `packages/dsh-plugin/src/index.ts`), and the built entry that the profile
+  actually loads (`packages/dsh-plugin/lib/index.js`) carries those four names. They all match
+  `/^[a-z][a-z0-9_-]*$/u` — the hyphen form the rule demands — and three things say the registration went through
+  on this release: the live process's tape carries a `kind:"service-probe"` record of the `commands` service with
+  its methods, so the service is mounted and callable; the plugin's other failure mode — `[s1cap] command service
+  unavailable in this profile` — does not appear; and `<run>/logs/PROBE.log` (9 lines: the launcher URL and a
+  deprecation warning) carries **no** `dsh: warning: … did not activate` line, which the bullet below names as the
+  pass/fail signal. A *live palette read* is not part of this check: the running instance is the pre-flight and
+  must not be driven with a slash command. *Check:* the status route's clean `configIssues`, the tape's
+  service-probe record, the log, and the two source names above.
+- **The surfaces this section names are present, and both telemetry streams are written.** The status route
+  serves the plugin's own HTTP surface with the full status object (policy, resolved backend, Laya state, sink
+  counters); `observation: tape` is writing `<run>/home/PROBE/.s1cap/tape.jsonl` (a `kind:"wiring"` record naming
+  `s1 {provider: laya-serve, mode: local}`, `relevance: true`, `planGate: true`, `xFirst: true`, plus live
+  `session-event` records); the association graph is persisted at
+  `<run>/home/PROBE/.s1cap/rg/rg-session-*.json`; and the pre-flight's own telemetry paths — pointed into the
+  round's `evidence/PROBE/` — received **both** streams: `control.jsonl` with `assembly` ×4,
+  `context_delivery` ×4 and `s1_call` ×14, and `session.jsonl` with 15 parseable lines. The lane is therefore
+  **called**, not merely constructed: every one of those 14 calls answered `ok: true` from
+  `provider: laya-serve`, `routedModel: laya-rl-agent`, `endpoint: http://127.0.0.1:8008`, `attempts: 1`
+  (87–1290 ms), and the assembly records report `scoredPairs == judgedPairs` (0 / 21 / 28 / 55) with
+  `blocks.pinned: 700 → 1499` and `prefixTokensStable` equal to it — N1's symptom is gone on this release, and
+  `docs/CONTROL_PLANE_LOGGING.md` §6 keeps both records side by side. The client half is registered too: the
+  instance's boot manifest (`window.__DSH_BOOT__`) carries an entry `id: "dsh-s1cap"` →
+  `plugins/??dsh-s1cap/client.js` with
+  `inject: ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-connection"]`, exactly the
+  `dsh.client.inject` list `packages/dsh-plugin/package.json` declares. *Check:* the status route, the tape, the
+  `rg/` directory, the two evidence files, and the boot manifest in the running page.
+- **Cheap verification without touching a live profile** (re-confirmed on this release):
+  `dsh --profile <p> --dump-config` composes the whole stack and exits, and
+  `dsh --profile <p> --port <n> --no-open` boots an isolated instance — the mode the pre-flight runs in. *Check:*
+  both were used above; the second is how the live instance was launched.
+- **What this does not establish.** The checks above are the plugin's **load, activation and wiring** on
+  `0.2.0-rc.2`. They do not re-verify the middleware contract below, and they are not a benchmark result: no cell
+  of a three-cell round has run on this release yet (the round of 2026-10-02 is provisioned, not driven).
+
+*Inherited from the 0.1.7-rc.2 line (observed 2026-09-28) — records of that release, not re-confirmed on
+0.2.0-rc.2:*
 
 - **A bundle must expose a compiled JS entry.** `dsh plugin --profile <p> add file:<dir>` hard-links the
   package into the profile's `node_modules`, and Node refuses to strip TypeScript types there
   (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). `main`/`exports` therefore point at `lib/index.js`,
-  produced by `scripts/build-packages.mjs` (zero-dependency: Node's own `stripTypeScriptTypes`).
+  produced by `scripts/build-packages.mjs` (zero-dependency: Node's own `stripTypeScriptTypes`). The *requirement*
+  still holds — the 0.2.0-rc.2 profile loads `lib/index.js` — but the failure mode was measured on 0.1.7-rc.2.
 - **`link:` is the better development wiring** (`dsh plugin --profile <p> add link:<dir>` → junction → Node
-  resolves the real path outside `node_modules`, so `lib/` updates apply without reinstalling).
+  resolves the real path outside `node_modules`, so `lib/` updates apply without reinstalling). Not re-measured:
+  the round's `setup.mjs` copies the built plugin into `node_modules` rather than linking it.
 - **The app-managed `desktop` profile cannot be touched by the CLI:**
   `dsh plugin --profile desktop …` → *"profile "desktop" is managed exclusively by the Electron application"*.
   Register it through the app, or edit `~/.dsh/profiles/desktop/{package.json,cordis.patch.yml}` directly.
+  Not re-litigated here: the policy that keeps `desktop` clean (§11) means no check touches it.
 - **Service injection is the array form:** `export const inject = ['commands']`. An object form such as
   `{ optional: [...] }` makes Cordis wait for a service literally named `optional`
-  (*"pending (waiting for service: optional)"*).
-- **Commands:** `ctx.effect(() => ctx.commands.register({ name, description, input: { hint }, handler }))`.
-  The service is **`commands`** (plural) and does not need a `command` property to be pre-declared.
-  Command names must match `/^[a-z][a-z0-9_-]*$/u` — **no spaces**: `name: 's1 ping'` throws at registration,
-  hence `s1`, `s1-ping`, `s1-laya`.
+  (*"pending (waiting for service: optional)"*). The array form is what the plugin ships and it works on
+  0.2.0-rc.2 (the commands registered); the object form's failure is a 0.1.7-rc.2 observation.
+- **Command-name grammar.** Command names must match `/^[a-z][a-z0-9_-]*$/u` — **no spaces**: `name: 's1 ping'`
+  throws at registration, hence `s1`, `s1-ping`, `s1-laya`. Read from the `dsh-commands` contract on the
+  0.1.2-rc.1 line; on 0.2.0-rc.2 the four hyphenated names register and answer, which is consistent with it.
 - `ctx.logger?.info?.(...)`: the logger needs no injection, and both it and its methods are optional.
-- Cheap verification without touching a live profile: `dsh --profile <p> --dump-config` composes the whole
-  stack (including `--patch` overlays) and exits; `dsh --profile <p> --port <n> --no-open` boots an isolated
-  instance for an end-to-end load test, and its `dsh: warning: … did not activate` line is the pass/fail signal.
+  (The plugin still calls it that way — its activation path logs `command registered: /s1-…` per command — but no
+  host log line was captured on 0.2.0-rc.2, so the optionality itself is not re-proved there.)
 - **`agent/pre-step` is a waterfall middleware — verified by reading `dsh-agent`'s packaged source**
   (through Electron-as-Node, because the code lives in `app.asar`; `scripts/scan-dsh-asar.cjs`):
 
@@ -144,6 +213,12 @@ Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai
   `decision.kind` and `decision.messages` on the result. `agent/request-error` also exists, but its contract
   has not been read yet, so it stays unregistered.
 
+  *On 0.2.0-rc.2 the contract itself was not re-read from the archive, so the sentence above is still
+  0.1.7-rc.2 evidence.* What the live instance does show is that the hook the plugin registers on this release
+  is being driven: the process observes every step (`observed = steps`, `skipped = 0`, `errors = 0`), it scores
+  association pairs (`upkeepScoredPairs = upkeepJudgedPairs = 105`) and it writes its graph and tape. That is
+  consistent with the waterfall contract; it is not a reading of it, and it does not prove the `next()` rule.
+
 - **Post-mortem (2026-09-28).** An earlier revision registered `ctx.on('agent/pre-step', () => undefined)`:
   a stub that ignored `next` and returned `undefined`. In the desktop app that killed the round with
   `Cannot read properties of undefined (reading 'kind')`. Three rules follow, enforced in code and tests:
@@ -154,6 +229,8 @@ Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai
      row ships `disabled: true`, so registering the bundle provably changes nothing.
   Corollary for this repo: after any operation in a DSH profile, re-run `pnpm install` in the repository —
   a profile install can drop the workspace junctions that the plugin's tests resolve `@s1cap/*` through.
+  (The three rules are code and tests, not release facts, and all three are still enforced; the corollary is a
+  0.1.7-rc.2 observation, not re-measured on 0.2.0-rc.2.)
 
 ---
 
@@ -319,14 +396,14 @@ All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `re
 
 ## 6. DSH plugin (`dsh-s1cap`)
 
-- `package.json`: name `dsh-s1cap`; `dsh.bundle.patch`; peerDeps mirror `dsh-command-context-trim` (§1.5); dev-pin harness contracts as devDependencies; `dsh.compatibility.dshReleases` for 0.1.2-rc.1 / 0.1.5-rc.x / 0.1.7-rc.2.
+- `package.json`: name `dsh-s1cap`; `dsh.bundle.patch`; peerDeps mirror `dsh-command-context-trim` (§1.5); dev-pin harness contracts as devDependencies; `dsh.compatibility.dshReleases` — the declaration of support. As shipped the field is `{ "0.2.0-rc.2": "supported" }`: that is the release in use, and it is declared on the evidence §1.8 records (load, activation, commands, composed config, surfaces, re-checked there on 2026-10-02). The earlier single entry, `0.1.7-rc.2`, was the same kind of statement for the release the project was built on; it is history now, kept in §1.8's inherited block. `peerDependencies` is not declared at all, so DSH's compatibility preflight has nothing to refuse on (that absence is why a round on a release the manifest did not name still ran).
 - `cordis.patch.yml` insert: `id: s1cap`, config surface = §4 `AssemblyPolicy` defaults.
 - Registrations:
   - message-append events → SEGMENTER + tier-1 RECALL incrementally (background, awaitable);
   - `agent/pre-step` listener → ASSEMBLER → surface replace ops (non-S1 path < 50 ms);
   - token-meter integration → budget + fixed overhead; own usage events from response `usage`;
   - plan gate → assistant tool-call batch hook (ordering-only intervention, never alters semantics).
-- Commands: `/s1 status`, `/s1 config`, `/s1 graph` (RG stats), `/s1 why <seq>` (provenance: which question/answer pulled a segment in — doubles as paper case-study material).
+- Commands, as shipped: `/s1` (status — policy, resolved System-1 backend, Laya state, sinks), `/s1-ping` (probe the resolved backend's `/health`), `/s1-laya` (`discover | start | stop | status`), `/s1-tune` (the knobs: BFS depth `d`, relevance threshold `r`, S1 window `w`, anchor wait, `xFirst`, `provider=`, the Laya interpreter/weights fields). All four exist on 0.2.0-rc.2 (§1.8). The earlier sketch in this section — `/s1 status`, `/s1 config`, `/s1 graph`, `/s1 why <seq>` — was a design note, not the surface that shipped: what shipped takes its arguments on `/s1-tune`, and the RG/provenance readbacks described there are not separate commands.
 - Settings UI (`dsh.client` inject): the three cell presets (C0–C2), τ/d/fanout/K sliders, S1 provider picker (cloud Jev | local EdgeJev | laya-serve | none), telemetry export.
 - Tests: `DSH_HOME` isolated profile; `dsh --dump-config` assertion; `node --test` units for SEGMENTER/RG/ASSEMBLER on synthetic sessions; **replay correctness** — rewrite a persisted session log, replay, totals must match tokenMeter exactly (the context-trim test pattern).
 
@@ -511,14 +588,17 @@ draw; (d) the loop has no budget cap or iteration count, while §9.6 prices the 
   - Collision check 2026-09-28: no AI/ML/agent-space collision for "S1CAP" (web-search hits are biomedical false positives — "severe community-acquired pneumonia" literature). npm `s1cap` and `dsh-s1cap` both unregistered (404) — reserved for this project.
   - Related work to keep citing in §2 (no longer a name collision): Xiao et al., EMNLP 2023 token-level compression (github.com/liyucheng09/Selective_Context) — distinguish token-level pruning for input compression from segment-level association-graph recall for the agent context lifecycle.
   - Repo/package naming (decided 2026-09-28): repo `s1cap`, npm proxy `s1cap`, DSH plugin `dsh-s1cap` — paper, repo and plugin names aligned. Repository: github.com/Jaffe2718/s1cap
-- **System-1 credential handling (user decision 2026-09-28): the Jev API key is entered by the user in a settings panel, never read from a file we author and never baked into a profile patch.** Verified surfaces in DSH 0.1.7-rc.2: `dsh-credentials` + `dsh-credentials-local` (credential service with a local store), `dsh-client-ui-settings*` (settings shell with general/models/plugins/plugin-inventory sections) and `dsh-llm-deepseek-api-key` (the shipped precedent for "fill an API key in settings"). Implementation path: declare `s1.apiKey` as a secret config field, contribute a settings section from the plugin's client half, persist through the credential service; the value must never reach a log, a control-plane record or the transcript (only `redactKey()` output). `s1.apiKey`/`TYPESAFE_API_KEY`/`S1CAP_API_KEY` stay as fallbacks for headless runs.
+- **System-1 credential handling (user decision 2026-09-28): the Jev API key is entered by the user in a settings panel, never read from a file we author and never baked into a profile patch.** Surfaces observed in DSH **0.1.7-rc.2** (that line, not re-confirmed on the release in use): `dsh-credentials` + `dsh-credentials-local` (credential service with a local store), `dsh-client-ui-settings*` (settings shell with general/models/plugins/plugin-inventory sections) and `dsh-llm-deepseek-api-key` (the shipped precedent for "fill an API key in settings"). One of them has since been re-checked on **0.2.0-rc.2**: the credential service answers a plugin under the profile — the live pre-flight's tape carries `kind:"credential"`, `result:"not found"`, `ref:"s1cap/jev"` with the service's own method list (`resolve`, `readRecord`, `describeRecord`, `set`, …), which is the credential path being *called* rather than declared. The settings shell, the section list and the deepseek precedent are still 0.1.7-rc.2 evidence. Implementation path: declare `s1.apiKey` as a secret config field, contribute a settings section from the plugin's client half, persist through the credential service; the value must never reach a log, a control-plane record or the transcript (only `redactKey()` output). `s1.apiKey`/`TYPESAFE_API_KEY`/`S1CAP_API_KEY` stay as fallbacks for headless runs.
 - **Installation policy (user decision 2026-09-28): the `desktop` profile is off limits — it carries other plugins and skills and must stay a clean environment.** S1CAP is exercised only in its own dedicated, clean profile (dsh-base + web app + this plugin, nothing else). Never register the bundle, a junction or a patch row in `desktop`; never run `dsh plugin --profile desktop` (the CLI refuses it anyway). Any instruction to install into `desktop` is obsolete.
 - **M1 block 2 — observation mode: done 2026-09-28.** `agent/pre-step` runs SEGMENTER → RECALL → ASSEMBLER on
   every LLM call (`observation: log`, the default whenever the plugin is enabled) and appends one `assembly`
   record to the control-plane log; the harness decision is returned untouched, and `observe()` never throws.
-  Verified end-to-end in a real DSH round on the 0.1.7-rc.2 line (§1.8) inside a clean CLI profile
+  Verified end-to-end in a real DSH round on the **0.1.7-rc.2** line (§1.8) inside a clean CLI profile
   (`dsh --profile s1capobs "…"`), not only
-  in unit tests — the record above is from that round. Adapter shapes are read from `dsh-llm`'s packaged
+  in unit tests — the record above is from that round; the same pipeline runs on 0.2.0-rc.2 in `observation: tape`
+  mode, where the live pre-flight wrote both streams (`control.jsonl`: `assembly` ×4, `context_delivery` ×4,
+  `s1_call` ×14; `session.jsonl`: 15 lines) with `blocks.pinned` 700 → 1499 — but that is today's round, not this
+  2026-09-28 handover. Adapter shapes are read from `dsh-llm`'s packaged
   source (`role: user|developer|assistant|system|tool`, parts tagged `type`, `source.kind`), and every shape
   without a rule is reported (`AdapterReport`) instead of being dropped. Next sub-steps: source the system
   prompt for the pinned block, drive the RG upkeep from session events (the asynchronous lane), then the

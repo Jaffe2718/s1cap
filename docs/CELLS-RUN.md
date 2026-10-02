@@ -155,7 +155,23 @@ profile with three changes:
   the recorded version travels with the numbers, and **every quotation of a round's numbers carries the DSH version
   that produced them**, so two rounds can be told apart and a reader can see which release a figure belongs to.
   "Latest at run time" is the owner's decision, and it is also why no version number is written into this document:
-  the value lives in the round's record, and a number hardcoded here would be stale within days.
+  the value lives in the round's record, and a number hardcoded here would be stale within days. **That record is no
+  longer prospective.** Round `20261002-2037` carries one — `manifest.json` → `_dsh.version = "0.2.0-rc.2"`, the
+  executable, the probe time `2026-10-02T12:37:10.444Z` and the raw `dsh --version` output in
+  `logs/dsh-version.txt` — and it was provisioned on `0.2.0-rc.2`, the release in use
+  (`docs/AGENT_BRIEF.md` §1.8). Round `20261001-1414` **predates the rule**: it carried no version, so its release
+  is unknown and must not be guessed. One field of that same manifest is deliberately *not* refreshed:
+  `_dsh.plugin.declaredDshReleases` holds what `setup.mjs` read from the plugin when the profiles were generated
+  (`{ "0.1.7-rc.2": "supported" }`), which is older than the declaration in force now — the live claim is the
+  plugin's `package.json`, and `docs/STATUS.md` §8 says so beside the round's own record.
+- **A release is declared supported once there is evidence on it, and the declaration is the claim.** The plugin's
+  `dsh.compatibility.dshReleases` (`packages/dsh-plugin/package.json`) is that statement, and it is extended only
+  when the plugin has been exercised on the release and the facts observed there — never because the release
+  exists. It names `0.2.0-rc.2` now, on the evidence §1.8 records (load, activation, the four commands, the
+  composed config, the plugin's own surfaces, re-checked 2026-10-02). `setup.mjs` reads that field and prints
+  `release <version> is declared <value> by dsh-s1cap` when the round's release is in it; when it is not, it
+  prints a warning that the round's numbers are comparable only with other rounds on the same release. That
+  warning is about what the record means, never a gate: a round pins whatever release is current.
 
 Ports: **19491, 19492, 19493** (one per instance; a repeat uses the same port as its cell, since the instances do
 not overlap in time). Each instance is a managed background job, never `Start-Process`; the UI token comes from

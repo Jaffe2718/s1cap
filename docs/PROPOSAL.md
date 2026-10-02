@@ -62,8 +62,11 @@ The cheap decision model runs as the **control layer** (the S1CAP control plane)
 
 ### 3.3 Native DSH Advantages (verified from the local installation and community plugins)
 
-**Release scope:** these observations are from the DSH **0.1.7-rc.2** line (`docs/AGENT_BRIEF.md` §1.8); they have
-not been re-verified on the release the machine runs now (`docs/STATUS.md` §8).
+**Release scope:** the observations in this subsection are from the DSH **0.1.7-rc.2** line (`docs/AGENT_BRIEF.md`
+§1.8): the session model, the `surfaceOp` rewrite and the interception points listed below are evidence about that
+release, and they have **not** been re-confirmed on the release the machine runs now (`docs/STATUS.md` §8). The
+plugin's *activation* on that newer release — bundle load, commands, composed config, the surfaces the plugin
+itself serves — has since been re-checked on **0.2.0-rc.2** and is recorded per fact in §1.8.
 
 DSH's session model separates a **persistent append-only event log (the human record, never rewritten) from the surface (the model's view)**, and `surfaceOp {op:'replace'}` allows changing only the context the model sees — **natively satisfying "present strictly in chronological order to the user, reorganize internally for the model"**. Interception points: `agent/pre-step` (assembly before the LLM call), `agent/request-error` (waterfall + prepend), `ctx.tokenMeter` (shadow-price accounting), `@deepseek-ai/dsh-compaction` (tool pairing integrity). The existing plugin `dsh-command-context-trim` (model-free oldest-first trimming) is precisely the spiritual prototype of the C0 baseline and the engineering template for the plugin mechanism.
 
