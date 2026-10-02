@@ -14,9 +14,9 @@
 2. **A new decision model category is born**: TypeSafe AI's Jev (2026-09-15, $0.042/M input, free output, parallel query evaluation) and the open-source Laya (2026-09-18, Apache-2.0, 322M/421M, 15.6ms/decision locally) — the cost of a "System-1 call" drops from "one LLM call" to "noise level";
 3. **Cache economics becomes a hard constraint**: DeepSeek `deepseek-flash` cache hit price $0.006/M vs. miss $0.30/M (**50x**) — how context is assembled, what may be reordered and what may not, directly determines cost.
 
-**Core hypotheses**: H2, plan pre-ranking can eliminate wasted execution attempts; H3 (selection, stabiliser and cache — one contrast, two-sided risk), Trace-as-State reordering will change the cache hit rate and the net effect must be measured rather than assumed, and association-graph selection plus the plan gate reduce context tokens at a non-inferior solve rate; H4, the gains transfer across harnesses. **H1 is retired, folded into H3**: with the recall-only arm dropped, `C2` is the only arm that runs System-1 governance, so the selection claim can only be observed as `C0` vs `C2` — the registered contrast (`C1` is a second control arm that delivers nothing, so a `C1`-vs-`C2` difference would be the instrument rather than the method, and what `C0`-vs-`C2` measures today is the recall lane, not TAS) — and two hypotheses riding one contrast cannot be separated afterwards (`docs/AGENT_BRIEF.md` §9.3, which keeps the round's numbers; `docs/CELLS-RUN.md` carries the registration).
+**Core hypotheses**: H2, plan pre-ranking can eliminate wasted execution attempts; H3 (selection, stabiliser and cache — one contrast, two-sided risk), Trace-as-State reordering will change the cache hit rate and the net effect must be measured rather than assumed, and association-graph selection plus the plan gate reduce context tokens at a non-inferior solve rate; H4, the gains transfer across harnesses. **H1 is retired, folded into H3**: with the recall-only arm dropped, `C2` is the only arm that runs System-1 governance, so the selection claim can only be observed as `C0` vs `C2` — the registered contrast (`C1` is a second control arm that delivers nothing, so a `C1`-vs-`C2` difference would be the instrument rather than the method, and what `C0`-vs-`C2` measures today is the recall lane, not TAS) — and two hypotheses riding one contrast cannot be separated afterwards (`docs/AGENT_BRIEF.md` §6, which keeps the round's numbers; `docs/CELLS-RUN.md` carries the registration).
 
-**Success rule (revised, see §5.3)**: the solve rate is **non-inferior** to the baseline (paired McNemar, one-sided α=0.05, tolerance −2pp) **and** cost or time improves by ≥10% (paired bootstrap 95% CI excluding 0). The earlier "any one of the three counts as success" rule is no longer used.
+**Success rule (revised, see §4.3)**: the solve rate is **non-inferior** to the baseline (paired McNemar, one-sided α=0.05, tolerance −2pp) **and** cost or time improves by ≥10% (paired bootstrap 95% CI excluding 0). The earlier "any one of the three counts as success" rule is no longer used.
 
 **Verdict preview**: the review returned **Accept with Revisions** (worth doing, pending the validation experiment; every revision point has been absorbed into this proposal and AGENT_BRIEF).
 
@@ -62,11 +62,11 @@ The cheap decision model runs as the **control layer** (the S1CAP control plane)
 
 ### 3.3 Native DSH Advantages (verified from the local installation and community plugins)
 
-**Release scope:** the observations in this subsection are from the DSH **0.1.7-rc.2** line (`docs/AGENT_BRIEF.md`
-§1.8): the session model, the `surfaceOp` rewrite and the interception points listed below are evidence about that
+**Release scope:** the observations in this subsection are from the DSH **0.1.7-rc.2** line (`docs/STATUS.md` §8's
+DSH record and the dated records there): the session model, the `surfaceOp` rewrite and the interception points listed below are evidence about that
 release, and they have **not** been re-confirmed on the release the machine runs now (`docs/STATUS.md` §8). The
 plugin's *activation* on that newer release — bundle load, commands, composed config, the surfaces the plugin
-itself serves — has since been re-checked on **0.2.0-rc.2** and is recorded per fact in §1.8.
+itself serves — has since been re-checked on **0.2.0-rc.2** and is recorded per fact in `docs/STATUS.md` §8.
 
 DSH's session model separates a **persistent append-only event log (the human record, never rewritten) from the surface (the model's view)**, and `surfaceOp {op:'replace'}` allows changing only the context the model sees — **the harness capability behind "present strictly in chronological order to the user, reorganize internally for the model"**; this project does not write through it yet: the model-view write-back is the 🔜 row of `docs/ARCHITECTURE.md` §3 and `packages/proxy` is not written, so a DSH *capability* is not a delivered assembly. Interception points: `agent/pre-step` (assembly before the LLM call), `agent/request-error` (waterfall + prepend), `ctx.tokenMeter` (shadow-price accounting), `@deepseek-ai/dsh-compaction` (tool pairing integrity). The existing plugin `dsh-command-context-trim` (model-free oldest-first trimming) is precisely the spiritual prototype of the C0 baseline and the engineering template for the plugin mechanism.
 
@@ -74,11 +74,10 @@ DSH's session model separates a **persistent append-only event log (the human re
 
 ### 4.1 2×2 Factorial, three arms run (within-task pairing)
 
-| Cell | A: TAS ordering | B: S1 governance (recall selection) | Model-visible input |
-|---|---|---|---|
-| C0 baseline | off (chronological appending) | off (harness-native compaction only) | the harness's own history |
-| C1 | **on** — recorded configuration | off | `C0`'s: nothing is delivered |
-| C2 full | **on** — recorded configuration | **on** | `C0`'s history plus the delivered `recalled` block |
+Three cells: **`C0`** baseline, **`C1`** second control, **`C2`** full configuration (the arm under test). **The
+switches each arm carries are not restated here** — the arm definitions are the presets plus the policy:
+`bench/cells/C0.json`–`C2.json` and `cellPolicy()` (`packages/core/src/types.ts`), and a disagreement with this
+proposal is a reason to read those. What this proposal fixes is how the three arms are read:
 
 **Factor A reaches the model through no cell.** `tas.on`/`xFirst` are recorded configuration in every arm — the
 delivery channel inserts one `recalled` block and never the assembled order — so the ordering becomes measurable
@@ -89,13 +88,14 @@ is `C0`'s. Factor B is recall selection alone — the plan gate is designed, imp
 into no cell, and has been removed from the policy and the presets (`docs/FORMULAS.md` §4).
 
 Same tasks, same model, same harness version, same tool allowlist, randomized order. The runs pin
-`reasoningEffort` on `deepseek-v4.1-flash` and claim no sampling parameter, because DSH exposes none
-(`docs/CELLS-RUN.md` §Setup carries the run prerequisites).
+`reasoningEffort` on `deepseek-flash` (DeepSeek-V4.1-Flash) and claim no sampling parameter, because DSH exposes
+none (the run's procedure and prerequisites are `.s1cap-ablation/RUNBOOK.md`'s).
 
 The fourth quadrant of the 2×2 — recall selection with TAS off — is **dropped from the run set and has no
 successor**: per step it moved more uncached input and more output than the baseline at a lower cache hit rate, and
-its System-1 coverage was below the 0.5 floor that makes a cell a measurement of System-1 at all (`docs/CELLS-RUN.md`
-carries the numbers and the mapping table). Round `20261001-1300` ran under an earlier labelling: `C1` (baseline) is
+its System-1 coverage was below the 0.5 floor that makes a cell a measurement of System-1 at all (`bench/README.md`
+carries the per-step comparison, `docs/FORMULAS.md` §5.1 states the floor, and `docs/AGENT_BRIEF.md` §5 maps the
+round's labels). Round `20261001-1300` ran under an earlier labelling: `C1` (baseline) is
 today's **`C0`**, `C2` (read as TAS alone then — its state proxy and x-first ordering were recorded configuration
 and **nothing was delivered**, so it is a second control arm today, not a "TAS alone" arm) is today's **`C1`**, `C3`
 (recall selection with `tas.on: false`) is **dropped,
@@ -103,11 +103,14 @@ no successor**, and `C4` (the full configuration) is today's **`C2`**.
 
 ### 4.2 Benchmark Suite (all automatically scored, no GUI, no LLM judging)
 
-| Benchmark | Scale/cell | Role | Status |
-|---|---|---|---|
-| SWE-bench Verified | 100 (stratified sample) | the classic issue→patch coding signal | MIT, verified |
-| Terminal-Bench 4.0 | all 66 | long-horizon terminal tasks — DSH's home turf | Apache-2.0, Harbor framework |
-| τ²-bench (tau2) | full base set (about 280, M0 verification) | the multi-turn tool + user interaction axis | MIT, pure Python |
+| Benchmark | Role | Status |
+|---|---|---|
+| SWE-bench Verified | the classic issue→patch coding signal | MIT, verified |
+| Terminal-Bench 4.0 | long-horizon terminal tasks — DSH's home turf | Apache-2.0, Harbor framework |
+| τ²-bench (tau2) | the multi-turn tool + user interaction axis | MIT, pure Python |
+
+**The pools and their sizes are the brief's, not this proposal's** (`docs/AGENT_BRIEF.md` §5; the per-round run set is
+`docs/CELLS-RUN.md`).
 
 **Run a 10-task TB pilot first to calibrate cost** (TB is the main cost driver and the largest uncertainty: the lean assumption is 5M in/task vs. 20–65M/task at frontier scale). Excluded: GAIA (browsing + multimodal noise), TheAgentCompany (30GB+ infrastructure + LLM-judging confound), OSWorld/WebArena (GUI).
 
@@ -119,9 +122,13 @@ no successor**, and `C4` (the full configuration) is today's **`C2`**.
 - Report all cells + a quality-cost **Pareto plot** + a cache hit rate waterfall chart (H3);
 - The analysis scripts are **frozen and committed before** the first full run (pre-registration style); three repeats of a 10% subsample estimate the variance — no sampling seed exists to vary, because DSH exposes no sampling parameters (only the model and its `reasoningEffort` are pinned).
 
-### 4.4 Telemetry (versioned JSONL, fields in AGENT_BRIEF §8)
+### 4.4 Telemetry (versioned JSONL)
 
-Each LLM call records prompt/cacheHit/cacheMiss/output tokens, net latency, and S1 auxiliary statistics; each S1 call records type/cost/latency; each assembly records the number of candidates, the number selected, BFS depth, budget usage, layout blocks, and the length of the cache-stable prefix; a plan-gate record would carry each plan's probability/confidence/execution/verification/estimated tokens saved — **the gate is wired into no cell, so no run writes that record** (`docs/FORMULAS.md` §4).
+Two streams and one rule: session content goes to the session log, metadata to the control plane, and neither feeds the
+other ([`CONTROL_PLANE_LOGGING.md`](./CONTROL_PLANE_LOGGING.md)). **The field lists belong to the code, not to this
+proposal:** the versioned event union is declared in `packages/core/src/telemetry.ts` under an *add, never rename* rule,
+and `docs/AGENT_BRIEF.md` §4 is the implementation brief for it. One event is declared and written by no run — a
+plan-gate record, because **the gate is wired into no cell** (`docs/FORMULAS.md` §4).
 
 ### 4.5 Generalization (defusing the "result engineering for DSH" concern)
 
@@ -131,7 +138,7 @@ Each LLM call records prompt/cacheHit/cacheMiss/output tokens, net latency, and 
 
 ### 4.6 Budget (`deepseek-flash`, peak-hour prices)
 
-**Three arms run** (~446 episodes per arm, so ~1,340 where the 2×2 grid budgeted ~1,780) ≈ **$360 (peak) / $180 (off-peak)** — the same per-arm density as the four-arm $480/$240, scaled by three quarters and shown so it can be checked: SWE-V ≈ $16 + τ² ≈ $17 + TB ≈ $330, so ≈ $363 (lean assumption, **revised after the pilot**). Off-peak = 50% off everywhere outside UTC weekdays 01:00–04:00 and 06:00–10:00 — schedule accordingly. Optional: a `deepseek-v4-pro` control arm on SWE-V, +$57 (was $76); GLM model-swap check, +$30 (was $40). S1 (cloud Jev) is about $0.04 per session, negligible. This is an estimate at the same density, not a ceiling: the cap is open question 3 below.
+**Three arms run** (~446 episodes per arm, so ~1,340 where the 2×2 grid budgeted ~1,780) ≈ **$360 (peak) / $180 (off-peak)** — the same per-arm density as the four-arm $480/$240, scaled by three quarters and shown so it can be checked: SWE-V ≈ $16 + τ² ≈ $17 + TB ≈ $330, so ≈ $363 (lean assumption, **revised after the pilot**). The grid and its estimate are `docs/AGENT_BRIEF.md` §6; this section is the three-arm scaling of them, stated here because the budget is the decision §9 asks the supervisor for. Off-peak = 50% off everywhere outside UTC weekdays 01:00–04:00 and 06:00–10:00 — schedule accordingly. Optional: a `deepseek-v4-pro` control arm on SWE-V, +$57 (was $76); GLM model-swap check, +$30 (was $40). S1 (cloud Jev) is about $0.04 per session, negligible. This is an estimate at the same density, not a ceiling: the cap is open question 3 below.
 
 ## 5. Milestones (10 Weeks) and Suggested Division of Labor
 

@@ -21,7 +21,7 @@ S1CAP puts a cheap **System-1 decision model** (Jev / Laya / Kev class, speaking
 1. **Context Awareness** *(what the model sees, per LLM call)* — every session segment (user turn, assistant message, reasoning trace, tool call/result) is a node in a growing **association graph** scored by the System-1 model. Each turn, bounded BFS + relevance threshold + token budget decide which segments make it in, assembled in Trace-as-State order: `[pinned prefix | state proxy T | recalled blocks | recent tail | current input]`. Which half of that reaches the model today is stated in **Evaluation design** below: the *selection* does, the *assembled order* does not yet.
 2. **Plan Ordering** *(the context-aware part of planning)* — the LLM's candidate plans go directly to a second System-1 backend that scores them as a **choice question**; **PLAN GATE** normalizes those scores, orders the plans and caps attempts, and execution follows that order under a verification oracle, with unexecuted alternatives discarded on first success. *Designed and implemented, but not wired into any ablation cell as of 2026-10-02:* round `20261002-2037` recorded no `plan_gate` event at all, because the model wrote no numbered plan and emitted no `todo/write`, so the knob was removed from the policy, the presets and the report rather than left `on` and inert (`packages/core/src/types.ts`).
 
-Everything is **measured, not assumed**: solve rate, token cost split by prompt-cache **hit/miss** (the dominant cost lever — cache-hit tokens are ~50× cheaper than misses on DeepSeek), and wall time excluding approval waits.
+Everything is **measured, not assumed**: solve rate, token cost split by prompt-cache **hit/miss** (the dominant cost lever — cache-hit tokens are ~50× cheaper than misses on DeepSeek), and wall time excluding approval waits. The definitions are [`docs/FORMULAS.md`](docs/FORMULAS.md), and [`scripts/cell-report.mjs`](scripts/cell-report.mjs) is their one implementation.
 
 ## Why now (September 2026)
 
@@ -43,32 +43,40 @@ The user-facing transcript stays **strictly chronological**; only the model view
 
 Three cells are run: two controls and one arm under test (the 2×2 crossing's fourth combination — governance without
 ordering — measured worse than the baseline per step and has been dropped; `bench/README.md` records the quantities).
-Factor B is recall selection alone: the plan gate is designed and unit-tested but **wired into no cell**, so it is no
-part of any factor here:
+**Which switches an arm carries is owned by the presets and the policy, not by this page:** the arm definitions are
+[`bench/cells/C0.json`](bench/cells/C0.json)–[`C2.json`](bench/cells/C2.json) plus `cellPolicy()`
+(`packages/core/src/types.ts`), and a disagreement with this page is a reason to read those. What the three arms mean
+is the rule this page keeps:
 
-| Cell | A: TAS ordering | B: S1 governance | Model-visible input |
-|---|---|---|---|
-| C0 baseline | off (native compaction only) | off | the harness's own history |
-| C1 | **on** — recorded configuration | off | `C0`'s: nothing is delivered |
-| C2 full | **on** — recorded configuration | **on** | `C0`'s history plus the delivered `recalled` block |
+- **`C0`** is the baseline and **`C2`** the full configuration; **`C1`** is a **second control arm** — delivery has one
+  channel and its `tier1: off` leaves that channel empty by construction, so its model-visible input is `C0`'s.
+- `tas.on`/`xFirst` are *recorded* in every arm and reach the model in none: delivery inserts one `recalled` block and
+  never the assembled order, so the ordering becomes measurable only with the model-view write-back, which does not
+  exist ([`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5; `packages/proxy` is not written).
+- The registered contrast is therefore **`C0` vs `C2`**, and what it measures today is recall selection and its
+  insertion — the recall lane, not TAS.
+- Factor B is recall selection alone: the plan gate is designed and unit-tested but **wired into no cell**, so it is no
+  part of any factor here.
 
-`tas.on`/`xFirst` are *recorded* in every arm and reach the model in none — delivery inserts one `recalled` block and
-never the assembled order — so what separates the arms on the model's side today is recall selection and its
-insertion, and the registered contrast is **`C0` vs `C2`** ([`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5).
+Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified** · **Terminal-Bench 4.0** ·
+**τ²-bench**. The pools and their sizes are
+[`docs/AGENT_BRIEF.md`](docs/AGENT_BRIEF.md) §"Experiment design (three arms: two controls, one arm under test)",
+and the per-round run set is [`docs/CELLS-RUN.md`](docs/CELLS-RUN.md). Model: `deepseek-flash`
+(DeepSeek-V4.1-Flash) with `reasoningEffort` pinned; **no sampling parameter is claimed** — not a temperature and not a seed — because DSH exposes none.
 
-Benchmarks (all automated scoring, no GUI, no LLM judges): **SWE-bench Verified** (100/cell) · **Terminal-Bench 4.0** (66/cell) · **τ²-bench** (full base split). Model: `deepseek-flash` (DeepSeek-V4.1-Flash) with `reasoningEffort` pinned; **no sampling parameter is claimed** — not a temperature and not a seed — because DSH exposes none.
-
-**Success rule:** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp) **AND** ≥10% improvement in cost/task or time/task (paired bootstrap 95% CI excluding 0, Holm-corrected). Winning cost while losing >2 pp solve rate is not a win.
+**Success rule:** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp) **AND** ≥10% improvement in cost/task or time/task (paired bootstrap 95% CI excluding 0, Holm-corrected). Winning cost while losing >2 pp solve rate is not a win. The frozen rule is
+[`docs/AGENT_BRIEF.md`](docs/AGENT_BRIEF.md) §"Metrics, hypotheses, success rule"; its pools, grid and budget are
+[`docs/AGENT_BRIEF.md`](docs/AGENT_BRIEF.md) §"Experiment design (three arms: two controls, one arm under test)".
 
 ## Status & roadmap
 
-Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `@s1cap/laya-runtime` (Python discovery + `laya-serve` launcher), `dsh-s1cap` skeleton, three-cell presets (C0–C2); `node --test` **34/34 offline**, and a real `laya-serve` round trip verified (`/health` readiness + a `noul` decision over `/v1/systemone`). Remaining M0: live-backend smoke against Jev. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md) §10.
+Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · association graph · assembler · plan gate · telemetry v1), `@s1cap/s1-client`, `@s1cap/laya-runtime` (Python discovery + `laya-serve` launcher), `dsh-s1cap` skeleton, three-cell presets (C0–C2); the offline suite is green (`node --test`, below), and a real `laya-serve` round trip verified (`/health` readiness + a `noul` decision over `/v1/systemone`). Remaining M0: live-backend smoke against Jev. Full spec: [docs/AGENT_BRIEF.md](docs/AGENT_BRIEF.md).
 
 | M | Scope |
 |---|---|
 | M0 | monorepo scaffold, core + `s1-client`, telemetry v1, DSH plugin skeleton — **scaffold done**, live-backend smoke pending |
 | M1 | assembler/recall replay-correctness tests, proxy MVP, DSH hook wiring (`agent/pre-step`, surface ops) |
-| M2 | plan gate wiring, degradation paths, settings UI, Terminal-Bench 10-task cost pilot |
+| M2 | plan gate wiring (a cell can only fire the gate once its model writes a plan the gate can read — none does today), degradation paths, settings UI, Terminal-Bench 10-task cost pilot |
 | M3 | three-cell ablation on SWE-bench Verified + τ²-bench (+ TB), optional Laya fine-tune |
 | M4 | Terminal-Bench cells, opencode transfer check, GLM model-swap check |
 | M5 | paper: Pareto + cache-waterfall figures, case studies, LaTeX draft |
@@ -76,8 +84,9 @@ Pre-alpha — **M0 scaffolding landed**: monorepo, `@s1cap/core` (segmenter · a
 ## Development
 
 ```bash
-node --test --experimental-strip-types "packages/*/test/*.test.ts"   # 51 tests, zero deps, offline
+node --test --experimental-strip-types "packages/*/test/*.test.ts"   # zero dependencies, offline
 node scripts/check-diagram.mjs   # every node box inside its lane band, no overlapping nodes
+node scripts/check-doc-pointers.mjs   # dead file/section pointers and stale value claims
 ```
 
 The second command guards the hand-authored route diagram: it is drawn by hand, so nothing but this

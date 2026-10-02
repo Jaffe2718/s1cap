@@ -1,733 +1,339 @@
 # S1CAP — Agent Implementation Brief
 
-**Version** 0.1 · 2026-09-28 · Pre-implementation
-**Purpose:** complete, self-contained instructions for an AI coding agent (DSH / Claude Code / opencode / pi) to build this project's software stack: the System-1-governed context-lifecycle middleware, the DSH plugin, the benchmark/ablation harness for the 2×2 crossing (three arms run), and the paper's experimental artifacts.
+**Version** 0.2 · 2026-10-02 · protocol and hypotheses
+**What this file is:** the project's **protocol** — the rules an implementing agent may not break, and the claims the
+experiment will make. It is deliberately short: everything else is owned by a file or by the code, and is named below.
+**Deliverable in one line:** a cheap System-1 *decision model* (Jev / Laya / Kev class, `/v1/systemone`) as the
+**governance layer** over a System-2 agent's context lifecycle — association graph over session segments,
+Trace-as-State assembly, plan pre-ranking — measured on solve rate, cache hit/miss tokens and wall time.
 
-**Project one-liner:** a cheap System-1 *decision model* (Jev / Laya / Kev class, `/v1/systemone` protocol) acts as the **governance layer** over a System-2 LLM agent's context lifecycle — maintaining an association graph over session segments, assembling per-turn context with Trace-as-State ordering, and pre-ranking candidate plans — measured end-to-end on solve rate, token cost (cache hit/miss), and wall time.
+| If you need | Read |
+|---|---|
+| the ablation scheme: the three cells, why one is the arm under test | `bench/README.md`, `docs/CELLS-RUN.md` §"The arms, and what the contrast is" |
+|---|---|
+| what is done, what is next, how to take over | `docs/STATUS.md` (§2–§3 done/next, §3b unenforced knobs, §5 commands, §8 the current phase) |
+| modules, lanes, code paths, status per module | `docs/ARCHITECTURE.md` (§3 module table, §5 arm ↔ module mapping, §6 loop/authority) |
+| formulas, metric definitions, layout algebra, statistical test | `docs/FORMULAS.md` |
+| arms, switches, knob names and defaults | `bench/cells/*.json` + `cellPolicy()` / `defaultPolicy()` (`packages/core/src/types.ts`) |
+| the running procedure and prerequisites | `docs/CELLS-RUN.md` · `.s1cap-ablation/RUNBOOK.md` |
+| a given run's own configuration | that run's `kind:"wiring"` tape record |
+| verdicts on defects | `.s1cap-ablation/DEFECT-GATE.md` |
+| document rules (what a document may own) | `docs/DOC-CONTRACT.md` |
 
 ---
 
 ## 0. Ground rules for the implementing agent
 
-1. Everything in §1 was verified against live URLs on **2026-09-27/28** (three verification passes: paper/API/docs, related work, benchmarks/pricing). Do not re-verify; do not contradict. If a live API behaves differently from §1, **stop and report** — do not silently adapt. One exception, and it is re-verified rather than contradicted: **§1.8 was re-checked on 2026-10-02 against a live `0.2.0-rc.2` profile**, and it now states per fact which release it is evidence about and which check settled it.
-2. Items marked `[VERIFY]` are deliberately unverified: verifying them is the first task of the milestone that names them.
-3. Never invent benchmark numbers, API fields, or library names. If you need one not present here, ask the human.
-4. The human owns the research decisions listed in §12. All other implementation decisions within this spec are yours.
-5. Telemetry schemas (§8) are **versioned contracts**: after the first benchmark run starts, changing a field name breaks comparability — add fields, never rename.
-6. **Control-plane isolation is a hard architectural rule** (docs/CONTROL_PLANE_LOGGING.md): System-1 calls, their telemetry and the backend's server logs go to a log stream that is *independent of the session event log*. No control-plane record may become a segment, enter the association graph, or appear in any LLM context or System-1 `state` — otherwise System-1 would end up scoring its own output and call count would compound per turn. Enforced in `packages/core/src/provenance.ts` (type families + runtime guards); do not relax it for convenience.
-7. **The agent loop is model-owned and S1CAP is only a hook** (docs/ARCHITECTURE.md §6). One user turn is *many* LLM steps (think → act → tool → …), so the flow is a loop, not a chain: S1CAP assembles context before **every** LLM call under a hard deadline (on expiry the call proceeds unmodified), and maintains the association graph **asynchronously, off the critical path** (the graph may lag the session). Nothing in S1CAP may keep the loop alive: the harness stops when the model stops, the plan gate only reorders the plans the model already produced, and any S1CAP failure or timeout degrades to passthrough. `termination: 'model-owned'` and `rgMaintenance.mode: 'async'` are literal types in `AssemblyPolicy` — not toggles.
-8. **The route diagram has exactly one geometry source: the hand-authored HTML** (`docs/figures/s1cap-technical-route.html`), which carries the arrow-level topology of rule 7 — the inner-loop self-edge on *Run + Verify*, the asynchronous tap into the RG-upkeep lane, and the advisory edge back into the loop. The README, ARCHITECTURE §1 and §2 here embed the committed SVGs (`docs/figures/s1cap-technical-route.{light,dark}.svg`), which `scripts/build-route-svg.mjs` generates from that HTML; never hand-edit an SVG, and keep every copy in sync by re-running the script. **Mermaid is retired for this figure** (a flowchart cannot equalise lane widths, and a lane-only view loses the loop), so do not re-introduce a Mermaid copy. A serial chain picture of this design is *wrong*, not merely stylised — an auto-laid-out serial version was produced earlier in this project and deleted for exactly that reason.
-9. **Exactly one System-1 backend is active at a time.** `s1.provider` selects it (`jev | laya-serve | edgejev | kev | none`); enabling the local Laya runtime while selecting a cloud provider is a *configuration error*, never a silent priority decision — a session that quietly switches governors makes its own measurements meaningless. Enforced by `singleBackendIssues()` in `packages/s1-client/src/resolve.ts`; on conflict the plugin logs the conflict and runs the session with `provider=none` (observation only).
-10. **Config is validated fail-safe, and credentials never reach a log or the transcript.** `validatePolicy()` (packages/core/src/config.ts), `validateLayaConfig()` (packages/laya-runtime/src/config.ts) and the plugin's telemetry check report every problem as a warning and keep the default — a typo in a profile patch must never break a live session. The API key comes from `s1.apiKey` or the provider's environment variable (`TYPESAFE_API_KEY`, generic fallback `S1CAP_API_KEY`), is passed straight to the client, and is only ever printed through `redactKey()`; session and control JSONL sinks must differ, because merging them would let control-plane records become segments (rule 6).
+1. Verified facts are dated and sourced (§1, §2 of this file and `docs/RELATED_WORK.md`). Do not contradict them
+   without new evidence; if a live API behaves differently, **stop and report** rather than silently adapt. One
+   exception: the DSH loading facts were re-checked on the release in use and now state per fact which release they are
+   evidence about and which check settled it (`docs/STATUS.md` §8).
+2. Items marked `[VERIFY]` are deliberately unverified: verifying one is the first task of the milestone that names it.
+3. Never invent a benchmark number, an API field or a library name. If you need one that is not recorded, ask the human.
+4. The human owns the research decisions in §9. Every other implementation decision inside this protocol is yours.
+5. **Telemetry field names are versioned contracts: add fields, never rename.**
+6. **Control-plane isolation is a hard architectural rule:** System-1 calls, their telemetry and the backend's logs live
+   in a stream independent of the session event log. No control-plane record may become a segment, enter the association
+   graph, or appear in any LLM context or System-1 `state` — otherwise System-1 scores its own output and the call count
+   compounds per turn. Full statement and the four enforced invariants: `docs/CONTROL_PLANE_LOGGING.md`
+   (`packages/core/src/provenance.ts`). Do not relax it for convenience.
+7. **The agent loop is model-owned; S1CAP is only a hook.** One user turn is many LLM steps, so S1CAP assembles before
+   **every** LLM call and maintains the graph **asynchronously, off the critical path**. Nothing in S1CAP may keep the
+   loop alive: the harness stops when the model stops, the assembly path is bounded and on expiry the call proceeds
+   unmodified, and any S1CAP failure or timeout degrades to passthrough. Termination and RG-upkeep mode are literal types
+   in `AssemblyPolicy` — not toggles. *(The bound that actually fires per call is the anchor wait, not the declared
+   deadline; `docs/STATUS.md` §3b registers the declared knobs no code path enforces.)*
+8. **The route diagram has exactly one geometry source: the hand-authored HTML** (`docs/figures/s1cap-technical-route.html`);
+   the committed SVGs are generated from it by `scripts/build-route-svg.mjs`, are embedded by the README and
+   `ARCHITECTURE.md`, and are never hand-edited. Mermaid is retired for this figure. A serial chain picture of this
+   design is **wrong**, not stylised: the loop and the async lane are the design.
+9. **Exactly one System-1 backend is active at a time.** `s1.provider` selects it; a local runtime enabled beside a
+   cloud provider is a *configuration error*, never a silent priority decision — a session that quietly switches
+   governors makes its own measurements meaningless. On conflict the conflict is logged and the session runs
+   observation-only (`packages/s1-client/src/resolve.ts`).
+10. **Config is validated fail-safe, and credentials never reach a log or the transcript.** A bad profile patch warns
+    and keeps the default; a profile patch must never break a live session. The API key comes from config or the
+    provider's environment variable, goes straight to the client, and is only ever printed redacted. Session and control
+    sinks must differ — merging them would let control-plane records become segments (rule 6).
+11. **The measurement is not a single number.** Report the token triple separately and the cache-hit rate as a
+    mechanism diagnostic, never as a cost column, and never form a scalar from the triple (`docs/FORMULAS.md` §5.1).
+12. **A versioned claim is never a copy.** Do not restate a value the code or a run owns; name the owner (`docs/DOC-CONTRACT.md`).
 
 ---
 
-> **Where the work stands:** [`STATUS.md`](./STATUS.md) carries the done/next checklist and, for every open
-> item, the goal, the files, the verified facts, the steps, the acceptance test and the traps. This file is the
-> facts base it assumes; work the checklist in order.
-## 1. Verified facts base
+## 1. Facts the protocol depends on
 
-### 1.1 Paper T — Trace as State (arXiv:2609.02702)
+Everything below was verified against live sources on 2026-09-27/28 unless stated; the sources are in §10. This section
+keeps **only** the facts a reader needs in order to trust the protocol. Full detail — API shapes, limits, per-model
+benchmarks, variant sizes, pricing tables — is in the sources themselves and in `docs/RELATED_WORK.md`.
 
-- Exists. Xu Zou (Z.ai), Jie Tang (Tsinghua), submitted 2026-09-02, cs.CL, CC BY 4.0. <https://arxiv.org/abs/2609.02702>
-- **Method (no training — inference-time pass restructuring only):** run the model on the long-context problem, serialize its reasoning traces into a textual state proxy `T = π(r_1..r_ntr)` (fixed serializer, delimiters, truncated to the first 50,000 chars), then issue a **fresh pass** with the order `[T, x, q]` — trace **before** the long context `x`, question `q` **last** — versus the matched control `[x, T, q]`.
-- **Results:** `[T,x,q]` beats `[x,T,q]` in 26 of 27 model×task×metric combos. GraphWalks Parents exact match: DeepSeek V4 Pro Preview 29.2% (single pass) → 43.0% (append) → **81.8%** (as-state); GLM-5.2 66.4/83.2 → **100.0%**. Models: DeepSeek V4 Pro Preview, GLM-5.2, Qwen 3.7 Max; datasets: GraphWalks 256K, MRCRv2 8-needle, NUB-1M.
-- **Theory:** conditional state update tasks — condition-first needs `b` bits of working memory, condition-last can need `b·2^b` (exponential separation) for causal processors.
-- **Practical caveat we must respect:** the paper places the **question last** in both conditions because "models may not behave as intended unless the question appears at the end".
-- **Transplant principle for us:** task-state information discovered late (in reasoning traces) should be available **before** the history on the next pass; the current instruction stays **last**.
+| Fact | Why the protocol depends on it |
+|---|---|
+| Paper T (arXiv:2609.02702, "Trace as State"): a fresh pass ordered `[T, x, q]` — trace **before** the context, question **last** — beats the matched control in 26 of 27 model×task×metric combinations, and the paper places the question last in *both* conditions because models drift otherwise. **Transplant principle: task state discovered late (in reasoning traces) must be available *before* the history on the next pass, and the current instruction stays last.** | the layout rule and the reason `x` stays last (§3.3, §4 of this file); the TAS factor in §5 |
+| Jev: cloud `/v1/systemone`, three answer types (`noul` yes/no, `choice` probabilities + confidence, `score` ordered levels), input-priced with free output | the two System-1 roles (association, decision) and the batching shape (§3.2, §3.4) |
+| Jev's documented weaknesses: literal reading, unusable math/dates, **context rot on large state**, **steerable by adversarial content**, and **no guarantee that probabilities sum to 1** | the pre-filter before any segment becomes `state`, and normalization server-side (§3.5, §3.4) |
+| Laya: open weights, honest limits — the base checkpoint is **near-chance zero-shot** on typed decisions and fails above ~20 options at defaults | the rule that zero-shot local Laya is never the relevance scorer: use cloud Jev or a fine-tune (§5) |
+| Local runtimes: EdgeJev (INT8 ONNX, offline, small CPU footprint), laya-mlx (Apple Silicon), Kev; no llama.cpp/Ollama/vLLM path | the local lane is a real option with a documented cost, not a fallback of last resort |
+| Harness portability: opencode (`baseURL` override, OpenAI-compatible providers), Claude Code (gateway base URL), pi (`system_one` as a *tool* — agent-in-the-loop, orthogonal to our infrastructure-in-the-loop), DSH (`--dump-config`, isolated `DSH_HOME`) | the transfer claim (H4) and the fact that the adapter — not the design — is what changes |
+| Price anchors: `deepseek-flash` cache-hit vs cache-miss, Jev input-only | the economic claim: cache-hit tokens are ~50× cheaper than miss at peak, so **cache-hit rate is the biggest cost lever** and reordering has a *measurable cache penalty* (H3) |
+| The user's model id is `deepseek-flash` (there is no `deepseek-v4.1-flash` id) | the model row of every cell |
 
-### 1.2 Jev — cloud System-1 decision model (TypeSafe AI)
-
-- Endpoint: `POST https://api.typesafe.ai/v1/systemone`, `Authorization: Bearer <key>`; `GET /v1/models`. SDKs: Python `typesafe_sdk`, JS `@typesafe-ai/sdk`. Docs: <https://docs.typesafe.ai/api>
-- Request: `{ state: string|object|array, model, questions: {<id>: {type, instructions, criteria}} }`. Response: `{ model, answers: {<id>: Answer}, usage: {input_tokens, output_tokens} }`.
-- Question types:
-  - `noul` (Bernoulli yes/no) → `{noul: 0..1}` (P(true); no confidence field)
-  - `choice` (max **255** options) → `{choice, probabilities, confidence}`
-  - `score` (2–10 ordered levels) → `{score, legend, probabilities, confidence}` (score can land between levels)
-- Pricing (verified on site): **$0.042 per 1M input tokens, output free**. Limits: 250k tok/s, 1200 req/min, 64k tokens per request (state + all questions), 32k for state + longest question. Model `jev-1.13.0` (aliases `jev-latest`, `jev-preview`). <https://docs.typesafe.ai/models>
-- **Parallel questions:** state ingested once, all questions evaluated in parallel — 13 questions in one call measured **12.2× cheaper, 10.0× faster** than separate calls, no answer change. <https://docs.typesafe.ai/cookbooks/parallel_questions>
-- Documented weaknesses (jaggedness, jev-1.13, reviewed 2026-09-17) <https://docs.typesafe.ai/model-jaggedness/jev-1.13>: literal reading; unreliable math/counting/dates; indirection; **context rot on large irrelevant state**; adversarial content can steer answers (segments are untrusted input — see §5.5); contradictory instructions confuse; **structural invariants not guaranteed (probabilities may not sum to 1 — normalize server-side)**; no text generation; English best, CJK weaker.
-
-### 1.3 Laya — open-source System-1 (Convai Innovations)
-
-- Canonical repo <https://github.com/NandhaKishorM/laya>, HF `convaiinnovations/laya`, **Apache-2.0**, released 2026-09-18. Variants: `laya` 421M (ModernBERT-large, 512-ctx, English); `laya-multilingual` 322M (mmBERT-base, 1024-ctx, 100+ langs); `laya-typed-decisions` 421M (1024-ctx).
-- Serving: `pip install "laya[serve]"` → `POST /v1/systemone`, **Jev wire-compatible** (TypeSafe clients work by changing `baseUrl`). Env: `LAYA_DEVICE`, `LAYA_THREADS`, `LAYA_MODELS`, `LAYA_API_KEY`. Free hosted endpoint: impossibl.com.
-- **Honest limits (README):** base checkpoints are **near-chance zero-shot on typed decisions** (0.362 vs 0.318 random, 0.461 majority; 0.766 after fine-tuning; ECE 0.466 → 0.081 after temperature refit). Choices with **>20 options fail at default `head_max_len`**. Known bugs: noul label-following (#156), multilingual score position bias (#131), English checkpoint collapses on non-Latin scripts.
-- **Design consequence:** never use zero-shot local Laya as the relevance scorer. Either (a) cloud Jev (cost ≈ negligible, §7.4), or (b) fine-tune `laya-typed-decisions` on our relevance/plan-rank tasks (M3) and serve locally.
-- JevBench (MIT harness, 534 public + 308 sealed decisions, 4 axes Intelligence/Calibration/Speed/Cost; <https://www.benchmarkheaven.com/jev-models>): Jev 1.13.0 **#4** (63.3, $0.040/1k decisions, 0.65 s p50, 86.6% public / 36.7% sealed); Laya #43; kev-4B #30.
-
-### 1.4 Local S1 runtimes (weak-CPU path)
-
-- **EdgeJev** <https://github.com/yzfly/edgejev> (Apache-2.0): converts Laya/Kev to ONNX **INT8**, no torch at runtime, fully offline, serves `/v1/systemone`. Laya mmBERT-base 322M INT8 = **324 MB, 15.6 ms/decision on 4 vCPU** Xeon (AVX512-VNNI); INT8 costs ~3–4 accuracy points. Platforms: Linux/Windows x86 (AVX2/AVX512), macOS (CoreML), Linux ARM (SDOT). `[VERIFY]` behavior on pre-AVX2 CPUs at M0; cloud Jev is the documented fallback.
-- **laya-mlx** <https://github.com/mizorewww/laya-mlx> (Apple Silicon): 13.42 ms P50 (421M), peak 943.6 MiB.
-- **No llama.cpp/Ollama/vLLM serving for Laya/Kev** (encoder/pointer-head architectures, not GGUF).
-- **Kev** <https://github.com/jaredpalmer/kev> (Apache-2.0): Qwen3.5-Base 0.8B/4B/9B + Qwen3.8 27B, LoRA + pointer head, `kev.serve` speaks `/v1/systemone`, CUDA/ROCm/MLX, Modal one-command deploy. 27B new-sources accuracy 0.848 vs Jev 0.857 (dev).
-
-### 1.5 DSH plugin architecture (verified from local install + community plugin analysis)
-
-**Release scope.** The local-install observations in this section were taken while **0.1.7-rc.2** was the installed
-release — the release §1.8 originally documented — so they are evidence about that release; the text labels the
-facts that come from other releases (`0.1.2` for the old `surfaceOp` shape, `0.1.5+` for `system/message` as node
-0). The release in use is now **0.2.0-rc.2**: the plugin's load path, its activation in a real profile, its
-commands and the composed config were re-checked there (§1.8, which states per fact which release it is evidence
-about, and which check settled it). The rest of this section — the profile layout, the session model, the hook
-points, the overflow flow — is still 0.1.7-rc.2 evidence and has **not** been re-confirmed on 0.2.0-rc.2
-(`docs/STATUS.md` §8).
-
-- DSH = DeepSeek Harness, open source (<https://github.com/deepseek-ai/deepseek-harness>), Electron app + agent runtime. Profiles live at `~/.dsh/profiles/<name>/` with `package.json` (field `dsh.profile.bundles`) and `cordis.patch.yml` (loader patch entries: `id` / `name` / `config`); `patchReload: live` enables hot reload.
-- **Plugin = npm package** declaring `dsh.bundle.patch: "./cordis.patch.yml"` (+ optional `dsh.client` for web-UI injection, `dsh.compatibility.dshReleases`). Install: `dsh plugin --profile web add <pkg|file:path>` — auto-registers in bundles and composes insert lines.
-- Official peer contracts (from `dsh-command-context-trim@0.3.2`, npm registry, read then): `@deepseek-ai/cordis ^4.0.2`, `@deepseek-ai/dsh-llm`, `dsh-session`, `dsh-commands`, `dsh-compaction`, `dsh-invariants`, `dsh-token-meter`, `@deepseek-ai/schemastery` (0.1.2-rc.1 line). That package's own compatibility declaration — `0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.5-rc.3 / 0.1.7-rc.2` — is a dated record of the copy read, and says nothing about this project's releases: `dsh-s1cap` declares its own (§6), and it names `0.2.0-rc.2`.
-- **Session model — the load-bearing fact:** a persistent **append-only event log** (the human record, never rewritten) is separate from the **surface** (the model view). Model-only rewrites happen via `surfaceOp {op:'replace', startSeq, endSeq}` on `user/message` events (0.1.2 shape used `start`/`end`; probe which shape the host accepts — context-trim does a one-shot probe). `system/message` is node 0 (0.1.5+) and a **barrier**: never trimmed, never crossed. **The transcript shown to the user stays strictly chronological — the capability behind the project's "user sees chronology, model sees assembled context" requirement.** The capability is the host's, not a delivered assembly: S1CAP's own write-back into this surface is the 🔜 row of `docs/ARCHITECTURE.md` §3, and until it exists the assembled *order* reaches the model through no cell.
-- Hook points: `agent/pre-step` (before each LLM call — where compaction registers its pressure path), `agent/request-error` (Cordis **waterfall**; `{prepend: true}` unshifts ahead of compaction's recovery), `agent.runMaintenance()` (idle-time ops), `ctx.tokenMeter` (shadow-price token accounting, O(1) projection), `compaction/prune` + `toolResultPruner` (tool-result slimming with `toolPairingBalancedBefore/After`), `model/selection` intent.
-- Overflow flow today: request fails `CONTEXT_WINDOW_EXCEEDED` → (prepend) model-free trim / in-place slim → retry → else compaction (prune + LLM summarize).
-- Dev/verify commands: `dsh --dump-config`, isolated installs via `DSH_HOME`, `npm run link:harness` pattern, `node --test` suites, session-log replay tests ("replay rewritten log → identical token totals").
-
-### 1.6 Harness portability facts
-
-- **opencode:** `provider.<id>.options.baseURL` override; custom OpenAI-compatible providers via `@ai-sdk/openai-compatible`; plugin system. <https://opencode.ai/docs/providers/>
-- **Claude Code:** `ANTHROPIC_BASE_URL` gateway/proxy is an established community pattern; hooks + plugins exist. `[VERIFY]` current hook event names at M4.
-- **pi** (badlogic `pi-mono`, `@earendil-works/pi-coding-agent`): **pi-system-one** (npm, MIT) registers a `system_one` **tool** the agent may call — *System One as a tool (agent-in-the-loop)*. Our layer is orthogonal: *System One as governance (infrastructure-in-the-loop; the agent never calls it — it shapes what the agent sees)*. Cite as related work, not a competitor. Also reuse `system-one-core` (npm) as `/v1/systemone` client if its surface fits. `[VERIFY]` at M1.
-- **DSH custom provider:** `@deepseek-ai/dsh-llm-pi-ai` bundle with `providers` config (`id/name/contextWindow/maxTokens/input/apiKeyEnv`). `[VERIFY]` its `baseUrl` config key at M0 (read the bundle's schemastery schema in the local install).
-- Anthropic-format endpoint on DeepSeek: `https://api.deepseek.com/anthropic` (per DeepSeek docs) — lets Claude-Code-style harnesses talk to DeepSeek directly.
-
-### 1.7 Pricing anchors (fetched 2026-09-27/28; all per 1M tokens)
-
-| Provider / model | input cache-hit | input cache-miss | output | notes |
-|---|---|---|---|---|
-| DeepSeek `deepseek-flash` (V4.1-Flash) | $0.006 ($0.003 off-peak) | $0.30 ($0.15) | $1.20 ($0.60) | 1M ctx / 384K max out; peak = 01:00–04:00 & 06:00–10:00 UTC weekdays |
-| DeepSeek `deepseek-v4-pro` | $0.044 ($0.022) | $1.32 ($0.66) | $3.96 ($1.98) | 1M ctx |
-| GLM-5.3 | $0.26 | $1.40 | $4.40 | docs.z.ai |
-| GLM-5.3-Flash | $0.03 | $0.15 | $0.50 | docs.z.ai |
-| Jev (cloud) | — $0.042 input-only, output free — | | | docs.typesafe.ai/models |
-| Anthropic (reference) | 0.1× base (read) | 1.25× base (5-min write) | — | 1,024-token minimum prefix |
-| OpenAI (reference, mirror-sourced) | 10% of input | GPT-5.6+ write 1.25× | — | automatic after 1,024-token repeat |
-
-Sources: <https://api-docs.deepseek.com/quick_start/pricing>, <https://docs.z.ai/guides/overview/pricing>, <https://docs.typesafe.ai/models>, <https://code.claude.com/docs/en/prompt-caching.md>.
-
-**The user's model ID is corrected:** there is no `deepseek-v4.1-flash` API id — the id is **`deepseek-flash`**, which serves model version DeepSeek-V4.1-Flash (legacy `deepseek-v4-flash` alias still accepted). `deepseek-chat`/`deepseek-reasoner` no longer appear in the docs.
-
-**Economic headline:** DeepSeek cache-hit tokens are **~50× cheaper** than cache-miss at peak. Cache-hit rate is the single biggest cost lever in the entire ablation — and reordering context (Trace-as-State) has a *measurable cache penalty* that our telemetry must isolate as a first-class hypothesis (**H3**, §9.3).
+**DSH plugin facts are pointers, not prose here.** The release in use, the profile layout, the session/surface model,
+the hook contracts, the command grammar and what was re-checked when live are in `docs/STATUS.md` §8; the round-by-round
+dated records of that work are in `docs/STATUS-ARCHIVE.md` (frozen), and this file's own fact rows are §"Facts the
+protocol depends on". The two rules a reader needs before coding against DSH are rule 7 above and **never register a
+lifecycle hook whose contract has not been read from the packaged source** (read it with `scripts/scan-dsh-asar.cjs`).
 
 ---
 
-### 1.8 DSH plugin-loading facts (release in use: 0.2.0-rc.2; 0.1.7-rc.2 line kept as history)
+## 2. Core interfaces
 
-**How to read this section.** Every fact below states the release it is evidence about and the check that settled
-it. Facts re-checked today on **0.2.0-rc.2** are marked *verified on 0.2.0-rc.2* and carry their check; the older
-observations, taken while **0.1.7-rc.2** was the installed release (2026-09-28), are kept in a clearly separated
-block at the end and are **not** re-confirmed on the current release.
+One line, one owner: **the types are `packages/core/src/types.ts`** — `AssemblyPolicy` with `defaultPolicy()` and
+`cellPolicy()`, `Segment`/`SegmentKind`, `EdgeSource`, `AssemblyLayout.order`, `AssemblyResult`, and the cell union. The
+telemetry records are `packages/core/src/telemetry.ts`. The S1 client is `packages/s1-client/src/index.ts`.
 
-*Verified on 0.2.0-rc.2 (2026-10-02), from the round `.s1cap-ablation/round-20261002-2037` and its live `PROBE`
-pre-flight instance (own `DSH_HOME`, `cell: C2`, port 19494):*
-
-- **The release.** `dsh --version` → `0.2.0-rc.2`; the same answer is written into the round's record
-  (`<run>/manifest.json` → `_dsh.version`, `probe time 2026-10-02T12:37:10.444Z`) and kept raw in
-  `<run>/logs/dsh-version.txt`. *Check:* re-read both files.
-- **A bundle registers and activates in a real profile.** The isolated `PROBEtest` profile lists `dsh-s1cap` in
-  `dsh.profile.bundles` and carries the plugin as a dependency; the running instance's own status route answers
-  `GET /s1cap-7340?token=…` with `ok: true`, `status.cell = "C2"` and `configIssues.errors = []`, `warnings = []`,
-  `conflicts = []`. *Check:* query the live status route with the UI token from
-  `<run>/logs/PROBE.log` (the token is a query parameter, so it never appears as a path segment), and read
-  `<run>/home/PROBE/profiles/PROBEtest/package.json`.
-- **The composed config resolves as this section's design says.** With `DSH_HOME=<run>/home/PROBE`,
-  `dsh --profile PROBEtest --dump-config` (a read-only compose-and-exit; it does not touch the running instance)
-  resolves `- id: s1cap` → `enabled: true`, `cell: C2`, `assemblyDeadlineMs: 250`, `s1.provider: laya-serve`,
-  `s1.baseUrl: http://127.0.0.1:8008`, `s1.retryAttempts: 2`, `laya.enabled: true`, `laya.autoStart: false`. It
-  agrees, field for field, with the profile patch `setup.mjs` wrote and with the running process's own report
-  (`provider = configuredProvider = laya-serve`, `mode = local`, `baseUrl = http://127.0.0.1:8008`). *Check:* run
-  the dump and compare all three.
-- **The commands exist, under the no-space names.** The plugin registers four — `s1`, `s1-ping`, `s1-laya`,
-  `s1-tune` (`registerCommands()` in `packages/dsh-plugin/src/index.ts`), and the built entry that the profile
-  actually loads (`packages/dsh-plugin/lib/index.js`) carries those four names. They all match
-  `/^[a-z][a-z0-9_-]*$/u` — the hyphen form the rule demands — and three things say the registration went through
-  on this release: the live process's tape carries a `kind:"service-probe"` record of the `commands` service with
-  its methods, so the service is mounted and callable; the plugin's other failure mode — `[s1cap] command service
-  unavailable in this profile` — does not appear; and `<run>/logs/PROBE.log` (9 lines: the launcher URL and a
-  deprecation warning) carries **no** `dsh: warning: … did not activate` line, which the bullet below names as the
-  pass/fail signal. A *live palette read* is not part of this check: the running instance is the pre-flight and
-  must not be driven with a slash command. *Check:* the status route's clean `configIssues`, the tape's
-  service-probe record, the log, and the two source names above.
-- **The surfaces this section names are present, and both telemetry streams are written.** The status route
-  serves the plugin's own HTTP surface with the full status object (policy, resolved backend, Laya state, sink
-  counters); `observation: tape` is writing `<run>/home/PROBE/.s1cap/tape.jsonl` (a `kind:"wiring"` record naming
-  `s1 {provider: laya-serve, mode: local}`, `relevance: true`, `xFirst: true`; plus live
-  `session-event` records); the association graph is persisted at
-  `<run>/home/PROBE/.s1cap/rg/rg-session-*.json`; and the pre-flight's own telemetry paths — pointed into the
-  round's `evidence/PROBE/` — received **both** streams: `control.jsonl` with `assembly` ×4,
-  `context_delivery` ×4 and `s1_call` ×14, and `session.jsonl` with 15 parseable lines.
-
-  > **The wiring record's key set, corrected (2026-10-02, then again after the audit).** This passage quoted a live
-  > record as carrying `planGate: true`. The plugin deliberately writes no such key now — a record announcing a
-  > component the policy does not have is the exact artifact the removal exists to stop producing — so a reader who
-  > went looking for it found nothing and could not tell a stale quote from a broken build. The record's keys are
-  > `s1`, `configuredProvider`, `conflicts`, `relevance`, `xFirst`, `deliver`, `recall`, `tas` and `governance`.
-  > `deliver` is the field that says whose assembled view reaches the model — `false` in both control arms, `true` in
-  > `C2` alone — and it, like the last three, was added by this pass, `governance` carrying `admissionLimit`,
-  > `maxPairsPerSweep`, the resolved `breaker` thresholds, the context accounting and the two recall floors.
-  > `verify-wiring.mjs` asserts `tas.on`, `xFirst`, `deliver` and the governance block against each cell's recipe.
-  > The older quotations of the record elsewhere in this file that predate 2026-10-02 are
-  > historical and say so. The lane is therefore
-  **called**, not merely constructed: every one of those 14 calls answered `ok: true` from
-  `provider: laya-serve`, `routedModel: laya-rl-agent`, `endpoint: http://127.0.0.1:8008`, `attempts: 1`
-  (87–1290 ms), and the assembly records report `scoredPairs == judgedPairs` (0 / 21 / 28 / 55) with
-  `blocks.pinned: 700 → 1499` and `prefixTokensStable` equal to it — N1's symptom is gone on this release, and
-  `docs/CONTROL_PLANE_LOGGING.md` §6 keeps both records side by side. The client half is registered too: the
-  instance's boot manifest (`window.__DSH_BOOT__`) carries an entry `id: "dsh-s1cap"` →
-  `plugins/??dsh-s1cap/client.js` with
-  `inject: ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-connection"]`, exactly the
-  `dsh.client.inject` list `packages/dsh-plugin/package.json` declares. *Check:* the status route, the tape, the
-  `rg/` directory, the two evidence files, and the boot manifest in the running page.
-- **Cheap verification without touching a live profile** (re-confirmed on this release):
-  `dsh --profile <p> --dump-config` composes the whole stack and exits, and
-  `dsh --profile <p> --port <n> --no-open` boots an isolated instance — the mode the pre-flight runs in. *Check:*
-  both were used above; the second is how the live instance was launched.
-- **What this does not establish.** The checks above are the plugin's **load, activation and wiring** on
-  `0.2.0-rc.2`. They do not re-verify the middleware contract below, and they are not a benchmark result: no cell
-  of a three-cell round has run on this release yet (the round of 2026-10-02 is provisioned, not driven).
-
-*Inherited from the 0.1.7-rc.2 line (observed 2026-09-28) — records of that release, not re-confirmed on
-0.2.0-rc.2:*
-
-- **A bundle must expose a compiled JS entry.** `dsh plugin --profile <p> add file:<dir>` hard-links the
-  package into the profile's `node_modules`, and Node refuses to strip TypeScript types there
-  (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). `main`/`exports` therefore point at `lib/index.js`,
-  produced by `scripts/build-packages.mjs` (zero-dependency: Node's own `stripTypeScriptTypes`). The *requirement*
-  still holds — the 0.2.0-rc.2 profile loads `lib/index.js` — but the failure mode was measured on 0.1.7-rc.2.
-- **`link:` is the better development wiring** (`dsh plugin --profile <p> add link:<dir>` → junction → Node
-  resolves the real path outside `node_modules`, so `lib/` updates apply without reinstalling). Not re-measured:
-  the round's `setup.mjs` copies the built plugin into `node_modules` rather than linking it.
-- **The app-managed `desktop` profile cannot be touched by the CLI:**
-  `dsh plugin --profile desktop …` → *"profile "desktop" is managed exclusively by the Electron application"*.
-  Register it through the app, or edit `~/.dsh/profiles/desktop/{package.json,cordis.patch.yml}` directly.
-  Not re-litigated here: the policy that keeps `desktop` clean (§11) means no check touches it.
-- **Service injection is the array form:** `export const inject = ['commands']`. An object form such as
-  `{ optional: [...] }` makes Cordis wait for a service literally named `optional`
-  (*"pending (waiting for service: optional)"*). The array form is what the plugin ships and it works on
-  0.2.0-rc.2 (the commands registered); the object form's failure is a 0.1.7-rc.2 observation.
-- **Command-name grammar.** Command names must match `/^[a-z][a-z0-9_-]*$/u` — **no spaces**: `name: 's1 ping'`
-  throws at registration, hence `s1`, `s1-ping`, `s1-laya`. Read from the `dsh-commands` contract on the
-  0.1.2-rc.1 line; on 0.2.0-rc.2 the four hyphenated names register and answer, which is consistent with it.
-- `ctx.logger?.info?.(...)`: the logger needs no injection, and both it and its methods are optional.
-  (The plugin still calls it that way — its activation path logs `command registered: /s1-…` per command — but no
-  host log line was captured on 0.2.0-rc.2, so the optionality itself is not re-proved there.)
-- **`agent/pre-step` is a waterfall middleware — verified by reading `dsh-agent`'s packaged source**
-  (through Electron-as-Node, because the code lives in `app.asar`; `scripts/scan-dsh-asar.cjs`):
-
-  ```js
-  agentCtx.on("agent/pre-step", async ({ agent, messages, signal, step }, next) => {
-    const decision = await next();
-    if (decision.kind === "reject" || signal.aborted) return decision;
-    return { ...decision, messages: [...] };
-  }, { prepend: true });
-  ```
-
-  A handler **must** `await next()` and return that decision (optionally modified) — the harness reads
-  `decision.kind` and `decision.messages` on the result. `agent/request-error` also exists, but its contract
-  has not been read yet, so it stays unregistered.
-
-  *On 0.2.0-rc.2 the contract itself was not re-read from the archive, so the sentence above is still
-  0.1.7-rc.2 evidence.* What the live instance does show is that the hook the plugin registers on this release
-  is being driven: the process observes every step (`observed = steps`, `skipped = 0`, `errors = 0`), it scores
-  association pairs (`upkeepScoredPairs = upkeepJudgedPairs = 105`) and it writes its graph and tape. That is
-  consistent with the waterfall contract; it is not a reading of it, and it does not prove the `next()` rule.
-
-- **Post-mortem (2026-09-28).** An earlier revision registered `ctx.on('agent/pre-step', () => undefined)`:
-  a stub that ignored `next` and returned `undefined`. In the desktop app that killed the round with
-  `Cannot read properties of undefined (reading 'kind')`. Three rules follow, enforced in code and tests:
-  1. never register a lifecycle hook whose contract has not been read from the packaged source;
-  2. `apply()` is wrapped so any throw is logged and the plugin stays inert — a half-built governor must
-     never be able to break the harness;
-  3. the plugin ships **inert** (`config.enabled !== true` → no hooks, no commands, no client) and the bundle
-     row ships `disabled: true`, so registering the bundle provably changes nothing.
-  Corollary for this repo: after any operation in a DSH profile, re-run `pnpm install` in the repository —
-  a profile install can drop the workspace junctions that the plugin's tests resolve `@s1cap/*` through.
-  (The three rules are code and tests, not release facts, and all three are still enforced; the corollary is a
-  0.1.7-rc.2 observation, not re-measured on 0.2.0-rc.2.)
+This file does not sketch them. What the protocol fixes about them: **field names are versioned contracts** (rule 5),
+and **an edge's source must record whether a System-1 model or the local lexical fallback produced it** — an edge whose
+provenance is not recorded cannot be told apart from one no model ever saw, and the paper's central comparison would be
+unmeasurable.
 
 ---
 
-## 2. System overview
+## 3. Algorithms
 
-Two planes:
+The mechanisms are specified where they live (`docs/ARCHITECTURE.md` §3, `docs/FORMULAS.md` §1–§4; knobs in
+`AssemblyPolicy`, `bench/cells/*.json`). This section keeps only **invariants** — the lines that must stay true whatever
+the values become.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./figures/s1cap-technical-route.dark.svg">
-  <img alt="S1CAP technical route - five lanes: harness session (Run + Verify with an inner-loop self-edge, Stop - the model's own call), System-2 LLM step, S1CAP control (ASSEMBLER and PLAN GATE), asynchronous RG upkeep (Association Graph, RG Upkeep), System-1 backends" src="./figures/s1cap-technical-route.light.svg">
-</picture>
-- **Event intake:** the harness adapter turns session events (user input x, tool results, reasoning traces) into `RawEvent`s and writes the assembled context back to the **model view only** (§5.1, §6).
-- **Segment / Recall:** message-level segments (never token-level, per the project's segmentation rule) + two-tier candidate generation — tier-0 metadata (free, always on) and tier-1, whose implemented mode is `s1` (one batched `noul` call, what every selecting cell runs) while the second designed mode, `embed` (a local embedding ANN), is designed and **NOT IMPLEMENTED**: `recall.tier1` is `s1` or `off` and nothing else, and a literal `embed` is rejected by `validatePolicy` (`docs/FORMULAS.md` §2).
-- **S1 association backend:** scores each new segment against history segments (batched `noul` questions, ≤ 20 per call) and returns the weights that expand the RG.
-- **Association graph (RG):** nodes = segments; edges = verified relevance weights with `w·exp(−Δt/λ)` recency decay; in-memory index at M0 (SQLite persistence lands with M1).
-- **ASSEMBLER:** bounded-BFS selection under the token budget + Trace-as-State layout + cache-aware prefix policy; the layout it assembles and the ordering switches that produced it are **recorded**, and what reaches the model today is one inserted `recalled` block — the *model view* rewrite (DSH `surfaceOp`; proxy message rewrite elsewhere) is the model-view write-back, which does not exist yet (§5.3, and the 🔜 row in `docs/ARCHITECTURE.md` §3).
-- **System-2 LLM:** the governed host model; consumes the assembled context and emits reasoning, candidate plans and tool calls.
-- **S1 decision backend:** scores the LLM's candidate plans in one `choice` call and returns probabilities + confidence.
-- **PLAN GATE:** consumes those scores — normalization, abstention, attempt cap `M=2`, execution ordering — and does **not** call System-1 itself.
-- **Run + verify:** executes plans in the gate's order against the benchmark-native verification oracle; drops the remaining plans on first success.
-- **TELEMETRY:** per-call JSONL (LLM/S1/tool), aggregates, cost model (§8).
-- **ADAPTERS:** DSH plugin (first-class) + OpenAI-compatible proxy (portable to opencode / Claude Code / pi).
+### 3.1 Segmentation
+- **Message-level, never token-level.** Long events are chunked with a head/tail preference and a chunk map for
+  reconstitution; the system node and tool schemas are **PINNED** and never enter the graph.
+- A shape with no rule is **reported, not dropped**.
 
----
+### 3.2 Association graph (three tiers)
+- **Tier 0 (metadata, free)** must work with **no** System-1 backend answering — that is what makes degradation total.
+- **Tier 1** is one batched call per scoring window, with the questions-per-call cap as the **context-rot guard**. Only
+  the implemented mode exists; a cell must name the mechanism that actually runs.
+- **Tier 2** is lazy verification, only for edges that could enter assembly, with a defined abstention fallback.
+- **The scoring window bounds pair scoring only — never what exists in the graph.** Segments outside it keep their edges
+  and stay reachable by the BFS. This distinction is the whole point of the window
+  (`docs/ARCHITECTURE.md` "Parameter: recall.window", `docs/FORMULAS.md` "Recall window w").
 
-## 3. Repository layout
+### 3.3 Assembly
+- Budget is the window minus the output reserve minus measured fixed overhead — never the raw window.
+- Selection is a bounded BFS then a greedy knapsack, deduplicated against the verbatim tail by segment id, every block
+  carrying a provenance header.
+- **Never dropped, never reordered:** the pinned prefix, the current input `x`, and the verbatim tail.
+- **`x` last is a requirement, not a preference** (§1, paper T). `T` existing at all and the position of `x` are **two
+  independent switches** — TAS is not x-first; a preset that moves them together is a preset's choice.
+- **Fallback:** the rule that fires is the *segment-count* floor — fewer than one selected segment is not a selection, so
+  the block degrades to the chronological window and the event is logged. The token-share floor is **off**, and the
+  measurement that turned it off is `docs/FORMULAS.md` §3.5. Either floor writes `fallback`; both are recorded on the
+  wiring record.
+- The pinned prefix is never reordered and `T` grows append-only, so invalidation lands at task boundaries. **The
+  residual cache penalty is measured, not assumed** (H3).
+- **The model-view write-back does not exist** (`packages/proxy`, 🔜 in `ARCHITECTURE.md` §3). Until it does, the
+  assembled *order* reaches the model through no cell, and no arm can attribute anything to the ordering switches (§5).
 
-pnpm monorepo:
+### 3.4 Plan gate
+- **No cell runs it, and the knob is gone from the policy** (measured 2026-10-02: its only two inputs never occurred in a
+  live round). The mechanism is kept and unit-tested for whichever arm next has a plan source the model actually writes
+  to; its formulas are `docs/FORMULAS.md` §4.
+- The rule that survives it: **ordering-only intervention — the gate may never invent, alter or veto a plan, and it
+  never calls System-1 itself.**
 
-```
-s1cap/
-  packages/core/        # segmenter, rg, assembler, plan-gate, config, telemetry schemas (pure TS, no IO)
-  packages/s1-client/   # /v1/systemone client + provider matrix (jev | laya-serve | edgejev | kev | none)
-  packages/proxy/       # OpenAI-compatible middleware (Hono): passthrough + request rewrite + telemetry
-  packages/dsh-plugin/  # "dsh-s1cap": cordis bundle, surface assembly, pre-step hook, /s1 commands
-  bench/
-    runners/            # swe-verified/ | terminal-bench/ | tau2/  (fetch, run cell, parse, score)
-    cells/              # the three ablation cell configs (JSON)
-    stats/              # McNemar, paired bootstrap, effect sizes, Holm; frozen analysis script
-    analysis/           # figure generation (Pareto, cache waterfall, case studies)
-  docs/                 # PROPOSAL.md, ARCHITECTURE.md, AGENT_BRIEF.md, FORMULAS.md, RELATED_WORK.md, REPO_METADATA.md
-  paper/                # LaTeX outline per §11
-```
+### 3.5 Degradation and safety
+- **No S1CAP failure may fail the session**: S1 slow or absent → the turn proceeds on the native path, mode logged per
+  call. The transport-level guard is a **non-tunable constant** in the client (`packages/s1-client/src/index.ts`).
+- Segments passed as S1 `state` are **pre-filtered** (structure stripped, role and a bounded prefix kept), so System-1
+  never sees raw untrusted tool output in full.
+- The **tool-call/result pairing invariant** holds across any context surgery, in the DSH path and the proxy path alike.
 
----
-
-## 4. Core interfaces (TypeScript sketches — finalize, don't redesign without reason)
-
-```ts
-type SegmentKind = 'user' | 'assistant' | 'trace' | 'toolCall' | 'toolResult' | 'system-pinned';
-
-interface Segment {
-  id: string; sessionId: string; seq: number;          // seq = position in append-only log
-  kind: SegmentKind; role?: string;
-  tokens: number;                                        // tokenMeter estimate
-  text: string; ts: number; taskTag?: string;            // taskTag from task lifecycle events
-  chunkOf?: string;                                       // for chunked tool results
-}
-
-interface AssociationEdge {
-  from: string; to: string;
-  w: number;                                              // tier-2 verified weight ∈ [0,1]
-  wTier1: number;                                         // pre-verification candidate weight
-  source: 'meta' | 'embed' | 's1-noul' | 's1-score';    // 'embed' is never assigned: no embedder exists (§5.2)
-  verifiedAt: number; provenance: string;                 // question id + answer for /s1 why
-}
-
-interface AssemblyPolicy {
-  cell: 'C0' | 'C1' | 'C2';                               // §9.1: C0 baseline, C1 second control (TAS switches
-                                                          // recorded, nothing delivered), C2 full — the only delivering cell
-  tas: { on: boolean; tMaxChars: number; updatePolicy: 'perTask' | 'perTurn' };
-  recall: { threshold: number; depth: number; fanout: number; tier1: 's1' | 'off';
-            embedModel?: string;                            // no reader: the embed mode is designed, not implemented
-            budgetRatio: number;
-            minRecalledShare: number;                       // token-share floor under the recall block; DEFAULT 0 = OFF
-            minRecalledSegments: number };                  // segment-count floor; DEFAULT 1 - the guard that fires the fallback
-  tail: { k: number };                                    // verbatim recent turns always kept
-  // no `planGate` field: removed 2026-10-02. It was `{ on, maxPlans, attemptCap, abstainConfidence }`, it was `on`
-  // for C2, and it could not fire: round `20261002-2037` wrote zero `plan_gate` records because the model produced
-  // no numbered plan and no `todo/write` event. The mechanism (§5.4) is kept and tested; the knob is gone from the
-  // policy, the presets, the config schema and the report. `packages/core/src/types.ts` carries the decision.
-  s1: { provider: 'jev' | 'laya-serve' | 'edgejev' | 'kev' | 'none';
-        baseUrl?: string; model?: string; questionsPerCall: number;
-        retryAttempts: number;                            // attempts for one refused call (waits `Retry-After`)
-        admissionLimit: number };                         // requests in flight at once; the backend refuses above its own limit
-        // no request deadline, deliberately: it was `timeoutMs`, and as a policy field it decided which scorer
-        // judged a pair. The transport guard is `S1_TRANSPORT_TIMEOUT_MS` in the client and is not tunable.
-}
-
-interface S1Client {                                      // thin wrapper over /v1/systemone
-  decide(req: { state: unknown; questions: Record<string, S1Question> }):
-    Promise<{ answers: Record<string, S1Answer>; usage: { inputTokens: number; outputTokens: number }; ms: number }>;
-}
-type S1Question =
-  | { type: 'noul'; instructions: string; criteria?: { true: string; false: string } }
-  | { type: 'choice'; instructions: string; criteria: Record<string, string | null> }
-  | { type: 'score'; instructions: string; criteria: string[] };
-
-interface AssemblyResult {
-  layout: { pinned: string; stateProxy?: string; recalled: Segment[]; tail: Segment[]; anchor: string };
-  budget: { total: number; used: number; byBlock: Record<string, number> };
-  fallback?: 'recency-window';                            // degradation event
-  cacheStability: { prefixTokensStable: number };         // for H3 accounting
-}
-```
-
-All knobs map 1:1 to plugin config (`cordis.patch.yml` → `/s1 config` UI): `recall.threshold` (τ), `recall.depth` (d), fanout, tail K, T max chars, attempt cap, S1 provider.
+**Rule 13 — a new value must land in every sibling parse path** (a tuning value is parsed in four places: the
+credential payload, the command line, the tuning-file reader, and the merge that applies file over payload — adding one
+to half of them produced a knob the panel accepted and a session ignored). Grep for every sibling parser, patch all in
+one pass, and make the probe print *stored* and *effective* side by side.
+**Rule 14 — edit these files line-based, never by eyeballed indentation.** Derive the indentation from the file, assert
+post-conditions in the same command that writes, and re-run the suite before committing. *(A missed exact-string anchor
+once left the suite red with an undefined symbol.)*
 
 ---
 
-## 5. Algorithms
+## 4. Telemetry and cost accounting
 
-### 5.1 Segmentation policy
-
-- `user/message` → 1 segment (chunk >512 tokens with 64-token overlap).
-- `assistant/message` → 1 segment; its reasoning trace (provider `reasoning_content`, when exposed `[VERIFY]` field name for deepseek-flash / GLM at M0) → separate `trace` segments.
-- `tool/result` → chunk to ≤512-token segments (keep head + tail; store chunk map for reconstitution).
-- `system/message` node 0 + tool schemas → **PINNED**, excluded from the graph.
-- Segment granularity is message-level — never token-level (the project's segmentation rule).
-
-### 5.2 Association-graph construction (per new segment p) — S1 association backend
-
-- **Tier 0 (metadata, free):** edges to segments sharing `taskTag`, same tool family, reply-to chain; fixed weight 0.6.
-- **Tier 1 (candidates):** mode `s1` — the implemented mode, and the only one that runs — one `/v1/systemone` call: `state = p` (≤512 tok), `questions = {"rel_<i>": noul "Does this segment discuss the same task, entity, or topic as the state?"}` over candidate ids, ≤20 questions per call (**context-rot guard**), normalized server-side. The second designed mode, `embed` (local embedding + ANN top-k (k=32) cosine), is **NOT IMPLEMENTED**: no embedder exists anywhere under `packages/`, `source: 'embed'` is never assigned to an edge, `recall.embedModel` has no reader, and a literal `embed` is rejected by `validatePolicy` (`docs/FORMULAS.md` §2).
-- **Tier 2 (verification, lazy — only for edges that could enter assembly):** `score` question per edge → `w ∈ [0,1]`; abstain (confidence < 0.5) → keep tier-1 weight × 0.8.
-- **Decay:** `w_eff = w · exp(−Δt/λ)`, λ default 30 min of active session time (tunable).
-- **Persistence:** SQLite (`segments`, `edges`, weights, verification provenance).
-- Complexity: the implemented tier-1 (`s1`) is one batched call per window; the **embed mode's** O(log n) ANN per segment is designed and **NOT IMPLEMENTED**, so no turn pays it today; tier-2 batches into ONE parallel-question call (§1.2). Total per turn stays in the tens of ms locally, sub-cent in cost.
-
-### 5.3 Context assembly (per LLM call) — the Trace-as-State transplant
-
-- Budget `B = contextWindow − reserveOutput − fixedOverhead` (token meter).
-- **Seed set:** current user input `x` + pinned + last K turns verbatim (K=3 default).
-- **BFS** from `x` over edges with `w_eff > τ` (default 0.55), depth ≤ d (default 2), per-node expansion top-`fanout` (8); greedy knapsack by `w_eff` until the recalled-block budget (`budgetRatio` of B, default 0.35) is filled; every block wrapped with a provenance header (`«memory #seq · role · tool · HH:MM»`).
-- Dedup against the verbatim tail (by segment id).
-- **Layout (factor TAS on):**
-
-```
-[pinned: system prompt + tool schemas]        ← immutable, cache-stable prefix
-[T: task-state proxy]                          ≤ tMaxChars (default 8k): serialized recent
-                                               reasoning traces + task brief; append-only;
-                                               updatePolicy perTask (cache-friendly) | perTurn
-[recalled blocks: w_eff desc, then recency]    strongest first (Lost-in-the-Middle U-shape: strong
-                                               start, strong tail)
-[verbatim tail: last K turns]
-[x + current state snapshot + instruction]     ← ALWAYS LAST (paper T: question-last required)
-```
-
-- Factor TAS off (cell C0): `[pinned | (selected or full) history chronological | x]`, no T block.
-- **T and the position of x are two switches, not one**: `tas.on` is whether the T block exists at all and `xFirst` is whether x sits before or after the recalled block, so the diagram above is paper T's arrangement (state first, question last) rather than the only TAS-on order — cells C1/C2 carry `xFirst` on, which places x before the recalled block (`[pinned | T | x | recalled | tail]`).
-- **Fallback — and the rule that actually fires it (corrected 2026-10-02).** This line used to state the token-share
-  floor alone: "if recalled mass < `minRecalledShare` (25%), degrade to chronological last-N window". That is not the
-  rule in force. `recall.minRecalledShare` defaults to **0 — off** (`packages/core/src/types.ts`,
-  `defaultPolicy()`), because at 0.25 it fired on 9 of 9 steps of a live run and discarded every System-1 selection
-  before delivery could see it (`packages/core/src/assembler.ts`, beside the guard). The guard that runs is the
-  **segment-count** floor `recall.minRecalledSegments: 1` (`packages/core/src/config.ts`): fewer than one selected
-  segment is not a selection, so the block degrades to the chronological last-N window and logs the event. Either
-  floor writes `fallback` on the assembly record; both are recorded on the wiring record under `governance.recall`,
-  and `docs/FORMULAS.md` §3.5 states both as formulas with the same correction.
-- **Cache-awareness:** the pinned prefix is never reordered; T grows append-only; `updatePolicy: perTask` keeps T byte-stable within a task so the cache invalidation of `[T | recalled | tail | x]` happens at task boundaries, not per turn. The residual cache penalty is *measured*, not assumed (H3).
-- **DSH realization:** the intended model-only rewrite via `surfaceOp {op:'replace'}` — the user-facing transcript is never touched; non-DSH, the proxy rewrites the messages array before forwarding. **Neither is the delivery that runs today:** that write-back is the 🔜 model-view row of `docs/ARCHITECTURE.md` §3 (`packages/proxy` is not written), and the one live delivery channel inserts the `recalled` block, so `tas.on`/`xFirst` decide what S1CAP *records* rather than what the model reads.
-
-### 5.4 Plan gate (factor S1G on) — S1 decision backend
-
-> **Not wired into any cell as of 2026-10-02, and this section is the design rather than the wiring.** The gate is
-> reached only by a numbered plan in an assistant message or a `todo/write` session event; round `20261002-2037` —
-> the round C2 carried `planGate: true` for — produced neither, and wrote zero `plan_gate` records into any artifact
-> across 277 steps. The knob has therefore been removed from `AssemblyPolicy`, the presets, the config schema, the
-> status route and the report, and its trigger below is written in the conditional because it was never met. The
-> mechanism in `packages/core/src/plan-gate.ts` and `packages/dsh-plugin/src/plan-gate-runtime.ts` is kept and
-> unit-tested: an arm that has a plan source the model actually writes to can wire it back, and this section
-> describes what it would then do.
-
-- Trigger: assistant emits a tool-call batch; if a plan gate is on and >1 plausible plan exists (harness prompted — system addendum asks for ≤`maxPlans` (3) alternative plans as structured JSON when ambiguity is high; default elicitation `on-demand`).
-- **Dataflow (topology frozen 2026-09-28):** the LLM's candidate plans go **directly to the S1 decision backend** for the choice scoring; the PLAN GATE consumes the returned probabilities + confidence and applies normalization, abstention, ordering and the attempt cap, then hands the ordered plan to execution. The gate does not make the System-1 call itself.
-- **One choice question per plan set:** `state = {task brief, x, T}`; options = plan summaries (≤8; Jev handles 255 natively, Laya caps ~20 at defaults — the cap protects the local path); `criteria` = "Which plan is most likely to complete the task correctly with the least wasted work?"
-- **Normalize probabilities server-side** (Jev invariants not guaranteed, §1.2).
-- **Attempt controller:** execute in probability order; verification oracle = harness-native (tests / build / exit criteria per benchmark); attempt cap **M=2** (candidate plans m ≤ 3); on success, discard remaining plans and log saved-token estimate; abstain (confidence < 0.5) → keep the LLM's own order.
-- Always log per-plan `{prob, confidence, executed, verified, tokensSpent}`.
-
-### 5.5 Degradation & safety
-
-- S1 timeout (800 ms local / 2500 ms cloud) → skip tier-2 that turn; plan gate passes through.
-- S1 hard-down → tier-0 metadata + recency only; log mode per call (never fail the session).
-- **Adversarial-content guard (Jev is steerable, §1.2):** segments passed as S1 `state` are pre-filtered — strip code blocks/URLs >N tokens, keep role + first 256 tokens + tool name. The S1 never sees raw untrusted tool output in full.
-- Never drop: pinned, `x`, verbatim tail K, and the **tool-call/result pairing invariant** (reuse `toolPairingBalancedBefore/After` from `@deepseek-ai/dsh-compaction` in the DSH path; reimplement in the proxy path).
+- **The schema is `packages/core/src/telemetry.ts`** — one interface per record, under a version constant, with the
+  price table and the cost functions beside it. Field names, optionality and the current set are read there. Rule 5
+  applies (add, never rename). **A field that is required and never populated is a defect** — delete it or derive it
+  from what the run records; a value set from the policy rather than from the outcome repeats the defect it was meant to
+  catch.
+- **Two sinks, never one:** the control-plane log (System-1/LLM/tool calls, assembly, delivery, gate) and the session
+  log (harness events — the only source of segments). Never merged, never cross-read (rule 6).
+- **Cost and time formulas are `docs/FORMULAS.md` §5–§7**; the reporting rule is rule 11. Approval waits are excluded
+  from net latency (benchmarks zero them with an auto-approve sandbox); no scalar is formed from the token triple.
 
 ---
 
-## 6. DSH plugin (`dsh-s1cap`)
+## 5. Experiment design (three arms: two controls, one arm under test)
 
-- `package.json`: name `dsh-s1cap`; `dsh.bundle.patch`; peerDeps mirror `dsh-command-context-trim` (§1.5); dev-pin harness contracts as devDependencies; `dsh.compatibility.dshReleases` — the declaration of support. As shipped the field is `{ "0.2.0-rc.2": "supported" }`: that is the release in use, and it is declared on the evidence §1.8 records (load, activation, commands, composed config, surfaces, re-checked there on 2026-10-02). The earlier single entry, `0.1.7-rc.2`, was the same kind of statement for the release the project was built on; it is history now, kept in §1.8's inherited block. `peerDependencies` is not declared at all, so DSH's compatibility preflight has nothing to refuse on (that absence is why a round on a release the manifest did not name still ran).
-- `cordis.patch.yml` insert: `id: s1cap`, config surface = §4 `AssemblyPolicy` defaults.
-- Registrations:
-  - message-append events → SEGMENTER + tier-1 RECALL incrementally (background, awaitable);
-  - `agent/pre-step` listener → ASSEMBLER → surface replace ops (non-S1 path < 50 ms);
-  - token-meter integration → budget + fixed overhead; own usage events from response `usage`;
-  - plan gate → assistant tool-call batch hook (ordering-only intervention, never alters semantics) — **designed and wired into no cell** (§5.4; the plug-in point exists, the knob and the cell that carried it do not).
-- Commands, as shipped: `/s1` (status — policy, resolved System-1 backend, Laya state, sinks), `/s1-ping` (probe the resolved backend's `/health`), `/s1-laya` (`discover | start | stop | status`), `/s1-tune` (the knobs: BFS depth `d`, relevance threshold `r`, S1 window `w`, anchor wait, `xFirst`, `provider=`, the Laya interpreter/weights fields). All four exist on 0.2.0-rc.2 (§1.8). The earlier sketch in this section — `/s1 status`, `/s1 config`, `/s1 graph`, `/s1 why <seq>` — was a design note, not the surface that shipped: what shipped takes its arguments on `/s1-tune`, and the RG/provenance readbacks described there are not separate commands.
-- Settings UI (`dsh.client` inject): the three cell presets (C0–C2), τ/d/fanout/K sliders, S1 provider picker (cloud Jev | local EdgeJev | laya-serve | none), telemetry export.
-- Tests: `DSH_HOME` isolated profile; `dsh --dump-config` assertion; `node --test` units for SEGMENTER/RG/ASSEMBLER on synthetic sessions; **replay correctness** — rewrite a persisted session log, replay, totals must match tokenMeter exactly (the context-trim test pattern).
+- **The arms are defined by the code**: `bench/cells/*.json` + `cellPolicy()`; a run's own configuration is its
+  `kind:"wiring"` tape record; the arm ↔ module mapping is `docs/ARCHITECTURE.md` §5. **This file states the design and
+  never restates the values.**
+- **The scheme is not a 2×2 and never was one in force.** `bench/README.md` states it and this file agrees: **two of the
+  three cells are controls** — the baseline `C0`, and `C1`, a second control that delivers nothing — and **`C2` is the
+  arm under test**. The registered contrast is **`C0` vs `C2`**. An earlier round ran four cells under different labels;
+  its mapping is the table below, kept because the comparison is quoted in other documents and a reader has to be able to
+  translate it (`docs/CELLS-RUN.md` §"The arms, and what the contrast is" owns the current scheme; the retired labels'
+  own text survives verbatim in `.s1cap-ablation/MOVED-OUT-DOCS-MATERIAL.md` §D.1).
+- **Three axes, one registered contrast.** The ordering pair, System-1 governance in the recall lane, and **delivery** —
+  which decides whether anything S1CAP assembled reaches the model — are separate switches, and only one cell turns the
+  third one on. The registered rule tests that cell against the baseline, and the selection claim rides the same
+  contrast.
+- **The ordering switches are a *recorded* difference in every arm.** Delivery inserts one `recalled` block and never the
+  assembled order, so those switches decide what S1CAP writes into its own record and reach the model through no cell.
+- **`C1` stays as a second control arm, and the claim that makes it worth running is that `C0` vs `C1` shows no
+  difference.** Its one delivery channel is empty by construction, so its model input is the baseline's; a difference
+  there would be the instrument rather than the method.
+- **Governance in the executed set is recall selection alone.** The plan gate is designed and unit-tested but no cell
+  runs it (§3.4), so a factor listing it would claim a difference the runs did not have.
+- **The two model-visible inputs, exactly:** the two controls are the harness's own message list and nothing else, so
+  they differ by nothing; the arm under test is that same list plus one inserted `recalled` block. **So today's contrast
+  measures the recall lane, not TAS** (§6).
+- **Round `20261001-1300` ran four cells under labels that no longer exist.** The mapping, for reading every figure
+  quoted from that round:
 
----
+  | round label | what it ran | today |
+  |---|---|---|
+  | `C1` | baseline | **`C0`** |
+  | `C2` | TAS configured; nothing delivered | **`C1`** (second control arm) |
+  | `C3` | the recall-only arm | **dropped, no successor** |
+  | `C4` | the full configuration | **`C2`** |
 
-## 7. S1 backend layer (`packages/s1-client`)
-
-- Wire: `POST {baseUrl}/v1/systemone` (§1.2 shape), `GET /v1/models`; env `SYSTEM_ONE_BASE_URL` / `SYSTEM_ONE_MODEL` / `SYSTEM_ONE_API_KEY` (de-facto standard from pi-system-one).
-- Providers: `jev` (api.typesafe.ai), `laya-serve`, `edgejev`, `kev` (local), `none`. Evaluate reusing `system-one-core` (npm) `[VERIFY]` at M1; else vendor a minimal client (it is ~100 lines).
-- Features: noul fan-out batching, probability normalization, timeout/circuit breaker, cost accounting from `usage`, per-provider calibration notes (Laya temperature refit at M3 if local path chosen).
-- Local distribution: EdgeJev INT8 ONNX artifacts (324 MB) via **download-on-demand installer script** (not bundled in the npm tarball); document AVX2 requirement; cloud Jev is the fallback for CPUs without AVX2.
-
-### 7.4 Cost sanity (cloud-Jev path, arithmetic from §1.2/§1.7 — check at M0)
-
-One new segment, 100 candidates, ~150 tokens each ≈ 15k input tokens per assembly turn ≈ **$0.0006**; a 60-segment session ≈ **$0.04** of Jev spend — versus one LLM call at 30k miss-priced input ($0.009 at peak) per turn. S1 spend is noise-level; the *LLM* savings (fewer miss tokens, fewer wasted plan attempts) are where the economics live.
-
----
-
-## 8. Telemetry & cost accounting
-
-### 8.1 Event schema (JSONL, schema `v1`)
-
-```
-llm_call    { ts, sessionId, taskId?, cell, model, seq, promptTokens, cacheHitTokens,
-              cacheMissTokens, outputTokens, reasoningTokens?, tReqOut, tFirstTok?, tEnd,
-              netLatencyMs, approvalWaitMs, s1Assist: {calls, tokens, ms} }
-s1_call     { ts, provider, role: assoc|decide, kind: noul|choice|score, questions,
-              inputTokens, outputTokens, ms, turnId?, scoredSegmentIds?, routedModel? }
-tool_call   { ts, tool, ms, ok, approvalWaitMs }
-assembly    { ts, seq, candidates, selected, bfsDepth, budgetUsed, blocks: {pinned,T,recalled,tail,x},
-              cacheStability: {prefixTokensStable}, deferredPairs, recallTree, unknownAdmitted?, fallback? }
-plan_gate   { ts, plans[], probs[], confidence[], order, executed, verified, savedTokensEst }   // design only; no run writes one
-```
-
-> **`llm_call`'s `flags` bucket is gone (2026-10-02, after the audit).** The schema above used to end with
-> `flags: { tas, sel, planGate, degraded }` as a **required** field. Nothing in `packages/*/src` ever assigned it,
-> no round's artifacts carry it, and one of the four names described a component the policy no longer has: a
-> required field that is never populated is a lie in the type, and the build is pure type erasure
-> (`scripts/build-packages.mjs` strips types; `typescript` is not installed), so nothing would have reported it.
-> The field is deleted rather than made optional, for the reason the type's own comment now records: two of its
-> three survivors could not answer the question they were meant to ("which interventions were active for this
-> call") — `tas` is true whenever TAS *assembled* a layout, whether or not it was delivered, and `deliver` is the
-> switch that decides whether the model saw it. A flag set from the policy rather than from the delivery would
-> repeat the defect it was meant to record. If the type is ever emitted, its flags must be derived from the outcome
-> the lane already records — `assembly.layoutOrder`, `context_delivery.delivered`, `s1_call.judgedPairs` — so a
-> reader can check them against a record instead of trusting a policy read.
-
-**Two sinks, never one.** The records above are the **control-plane log** (`control.jsonl`); the
-harness's own events — the only source of segments — are the **session log** (`session.jsonl`).
-The control log is never segmented, never indexed in the RG and never placed in a System-1 `state`
-(§0.6, docs/CONTROL_PLANE_LOGGING.md).
-
-### 8.2 Approval-wait exclusion (user requirement)
-
-Benchmark runs use an auto-approve sandbox (allowlisted tools, unattended), so approval waits ≈ 0 by design; for interactive runs, subtract the harness's permission-prompt gaps (recorded on tool_call events) from `netLatencyMs`. `netLatencyMs = tEnd − tReqOut − backoff − approvalWaitMs` (network RTT is included unless a per-provider RTT probe is configured; document which convention each figure uses — never mix).
-
-### 8.3 Cost model
-
-`cost_task = Σ(c_hit·hit + c_miss·miss + c_out·out) + Σ(s1 cost) + 0 (local runtime amortization = 0 for cloud)`.
-Report **cache-hit rate before/after each assembly change** per call — the TAS-reordering cache penalty is hypothesis **H3**, a first-class measured quantity, not a footnote.
+  Wherever a figure is quoted it keeps the round it came from and the label it ran under. Two labels keep the
+  comparisons apart: the **registered rule** is the pre-registered comparison against the baseline (`C2` vs `C0`); the
+  **design contrast** is `C0` vs `C2`, the comparison that decides whether the System-1 half earns its place. `C1` vs
+  `C2` is neither.
+- **Controlled:** same tasks, same model with `reasoningEffort` pinned, same harness version, same tool allowlist,
+  randomized run order. **No sampling parameter is claimed** — not a temperature, not a seed — because the harness
+  exposes none. Paired n per cell per benchmark: SWE-bench Verified 100 (stratified subset of 500), Terminal-Bench 4.0
+  all 66, tau2-bench full `base` split (`[VERIFY]` exact count at M0; ~280 expected).
+- **Benchmark pools:** SWE-bench Verified (automated FAIL_TO_PASS/PASS_TO_PASS, per-instance docker);
+  Terminal-Bench 4.0 (66 tasks, per-task suites, docker, long timeout); tau2-bench (DB end-state reward, LLM
+  user-simulator, adds the multi-turn tool-use axis). Excluded with reasons: GAIA, TheAgentCompany, Aider polyglot
+  (edit-format confound), LiveCodeBench, OSWorld/WebArena.
 
 ---
 
-## 9. Benchmark & experiment protocol
+## 6. Metrics, hypotheses, success rule
 
-### 9.1 Design — 2×2 crossing, three arms run (within-task pairing)
+**Metric definitions and their one implementation: `docs/FORMULAS.md` §5.1/§6 and `scripts/cell-report.mjs`.** What
+follows is the protocol.
 
-| Cell | `tas.on` + `xFirst` (factor A) | S1 governance (factor B: recall selection) | Delivery (`deliver`: does the assembled view reach the model?) | System-1 lane |
-|---|---|---|---|---|
-| C0 baseline | off / off (chronological, x last) | off (native compaction only) | off (nothing is delivered) | none (`s1.provider: "none"`) |
-| C1 | **on / on** — **recorded, not delivered** | off | off (its one channel is empty: `tier1: 'off'` leaves the `recalled` block empty by construction) | none (`s1.provider: "none"`) |
-| C2 full | **on / on** — **recorded, not delivered** | **on** | **on — the only delivering cell** (one inserted `recalled` block) | live provider, `retryAttempts: 2`, `admissionLimit: 8` |
-
-Factor A is a **recorded** difference in every row: the ordering switches decide what S1CAP writes into its own
-record, and `tas.on`/`xFirst` reach the model through no cell, because delivery inserts the `recalled` block and
-never the assembled order (`docs/ARCHITECTURE.md` §5). `C1` is therefore a second control arm whose model-visible
-input is `C0`'s, and the registered contrast is `C0` vs `C2`.
-
-Factor B was "selection + plan gate" and is now selection alone: the gate was configured `on` for C2 and could not
-fire (§5.4), so a table that lists it as part of the factor claims a difference between C1 and C2 that the run did
-not have. `admissionLimit` is the cell's back-pressure against a backend that refuses rather than queues — see
-`bench/cells/C2.json`'s `_meta.admissionLimit` for the measured round (5 992 requests, 64.4 % refused at 2.70/s)
-behind it.
-
-**What the two model-visible inputs are, exactly.** `C0` and `C1` are the harness's own message list and nothing
-else, so they differ by nothing; `C2` is that same list plus one inserted `recalled` block. So the ordering is not
-what a `C0`-vs-`C2` difference can be attributed to today, and the recall lane is.
-
-`tas.on` and `xFirst` are independent switches that the presets here move together — `tas.on` is whether the state
-proxy T exists at all (the trace-as-state mechanism of paper T), `xFirst` is whether the current task x sits before
-or after the recalled block — so factor A is a pair of switches and not one, and TAS is not x-first.
-
-**Cell names, and the earlier labelling.** The executed scheme is three cells, `C0`/`C1`/`C2`, with
-`Cell = 'C0' | 'C1' | 'C2'` and `defaultPolicy()` on `C2`; the settings panel, the profiles and every telemetry
-record carry those names. Round `20261001-1300` ran under an earlier four-cell labelling, and the mapping is:
-
-| round `20261001-1300` label | what it ran | today |
-| --- | --- | --- |
-| `C1` | baseline | **`C0`** |
-| `C2` | read as TAS alone then; **nothing delivered**, so a second control arm today | **`C1`** |
-| `C3` | recall selection with `tas.on: false` | **dropped, no successor** |
-| `C4` | the full configuration | **`C2`** |
-
-The three rows of the design table above are the executed set; the fourth quadrant's arm was dropped rather than
-renamed, because per step it moved more uncached input and more output than the baseline at a lower hit rate and its
-backend coverage was below the 0.5 floor (`docs/CELLS-RUN.md` carries the per-step numbers and the mapping table).
-Everything below — the hypotheses, the protocol lines and the milestones — uses today's names; where a figure is
-quoted it keeps the round it came from and the label it ran under. Two labels keep the comparisons apart:
-the **registered rule** is the pre-registered comparison against the baseline, `C2` vs `C0` (§9.3); the **design
-contrast** is `C0` vs `C2` — the comparison that decides whether the System-1 half earns its place. `C1` vs `C2` is
-not that pair: since 2026-10-02 `C1` is a second control arm that delivers nothing, so its model-visible input is
-`C0`'s and a difference there would be the instrument rather than the method (`docs/CELLS-RUN.md` states what the
-`C0`-vs-`C2` pair measures while the ordering stays unrouted).
-
-Same tasks, same model with `reasoningEffort` pinned, same harness version, same tool allowlist, randomized run
-order. No sampling parameter is claimed — not a temperature and not a seed — because DSH's model configuration
-exposes none. Paired n per cell per benchmark: SWE-bench Verified 100 (stratified subset of the 500),
-Terminal-Bench 4.0 all 66, tau2-bench full `base` split (`[VERIFY]` exact count at M0; ~280 expected).
-
-### 9.2 Benchmarks (verified)
-
-- **SWE-bench Verified** — 500 human-validated tasks, MIT, automated FAIL_TO_PASS/PASS_TO_PASS scoring, per-instance docker, no network needed. <https://www.swebench.com/verified.html>
-- **Terminal-Bench 4.0** — 66 tasks (Aug 2026; 2.0 was Nov 2025), Apache-2.0, per-task test suites, Harbor framework (`harbor run -d terminal-bench/terminal-bench@4.0.0`), docker, 8 h timeout. <https://www.tbench.ai>
-- **tau2-bench** (τ²) — MIT, automated reward from DB end-state, LLM user-simulator via LiteLLM (works with DeepSeek), pure Python no docker; adds the multi-turn tool-use + user-interaction axis. <https://github.com/sierra-research/tau2-bench>
-- Excluded, with reasons: GAIA (browsing + multimodal noise for a terminal ablation), TheAgentCompany (30+ GB infra + LLM-judge confound), Aider polyglot (edit-format confound — but its leaderboard's per-run token stats are a calibration anchor: ~12k prompt + 3.5–11.7k completion tokens/exercise), LiveCodeBench (not agentic), OSWorld/WebArena (GUI-bound).
-
-### 9.3 Metrics, hypotheses, success rule
-
-- **Primary:** solve rate per benchmark. **Secondary:** $/task, tokens/task (hit/miss/out split), wall-clock/task (net LLM + S1 + tools), cache-hit rate, S1 calls & ms, tool errors, overflow/compaction events.
-- **H2** (plan gate): `C2` spends fewer wasted-attempt tokens. **No arm can deliver this today**: the gate is
-  designed, implemented and unit-tested, but it is wired into no cell — round `20261002-2037` wrote zero `plan_gate`
-  records while C2 carried the knob `on`, because neither trigger (a numbered plan in an assistant message, a
-  `todo/write` session event) occurred, and the knob has since been removed from the policy, the presets, the config
-  schema and the report. The design is `docs/FORMULAS.md` §4, the decision and the mechanism are in
-  `packages/core/src/types.ts` and `packages/core/src/plan-gate.ts`, and `docs/ARCHITECTURE.md` §3 carries the row as
-  *kept, not wired*; an arm with a plan source the model actually writes to is what would test H2.
-- **H3** (selection, stabiliser and cache — one contrast, and it cuts both ways): the TAS layout changes the hit
-  rate and the net cost effect is measured per `updatePolicy`; the selection claim rides the same contrast and is
-  stated here rather than as a hypothesis of its own. With the recall-only arm dropped, `C2` is the only arm
-  that runs System-1 governance, and the pair the claim is observed over is the registered contrast — **`C0` vs
-  `C2`**, baseline against the full configuration — which is exactly where the cache effect is measured; two
-  hypotheses riding one contrast cannot be separated afterwards, which is why **H1 is retired, folded here, not
-  renumbered**. `C1` is not that pair and cannot be: since 2026-10-02 it is a second control arm that delivers
-  nothing, so its model-visible input is `C0`'s. **And what `C0` vs `C2` measures today is the recall lane, not
-  TAS**: `C2`'s one delivery channel inserts the `recalled` block and nothing else, the state proxy `T` is
-  deliberately never sent, and TAS's ordering reaches the model only through the model-view write-back, which does
-  not exist (`docs/ARCHITECTURE.md` carries it as a 🔜 row; `packages/proxy` is not written) and is a separate
-  project — so until it does, no arm can attribute anything to `tas.on` or `xFirst`. The round's own numbers are
-  therefore history rather than a stabiliser effect: in round `20261001-1300` the arm then read as TAS alone (round
-  `C2`, today's `C1`) delivered nothing — 13 assemblies, 13 refusals, 0 with a non-empty recalled block — and the
-  baseline (round `C1`, today's `C0`) was refused by policy on 19 of 19, so that arm's 1 783 / 11 166 / 1 493
-  uncached / cached / output tokens per step against the baseline's 2 595 / 16 936 / 1 523, at 86.2% against 86.7%,
-  compare two recordings of a layout and not two model inputs. Neither recorded round's contrast measured TAS. The
-  same round's selection figures (round `C4` vs `C2`, today's `C2` vs `C1`: 3 363 / 42 372 / 2 318 per step against
-  1 783 / 11 166 / 1 493, at 92.6% against 86.2%) are the recall lane's — the best hit rate beside the largest
-  counts on all three components, which is why the counts are the measurement and the hit rate stays a mechanism
-  diagnostic. The dropped arm's figures (round `C3`) apply to no surviving cell and are recorded in
-  `docs/CELLS-RUN.md`.
-- **H4** (transfer): `C0`→`C2` deltas persist on a second harness (opencode) at 10% subsample.
-- **Success rule (the registered rule; replaces "win any of three"):** solve-rate **non-inferiority** vs C0 (paired McNemar, one-sided α=0.05, margin −2 pp absolute) **AND** ≥10% improvement in cost/task **OR** time/task with 95% CI excluding 0 (paired bootstrap, 10k resamples; Holm correction across the secondary family). A cell that wins cost but loses >2 pp solve rate is **not** a win. Report all cells + a quality-vs-cost Pareto figure.
-- `[VERIFY]` power analysis in `bench/stats` before the grid: with paired n=100 (SWE-V) McNemar at 80% power resolves ~14–15 pp differences; n=66 (TB) ~18 pp; report the minimal detectable effect honestly.
-
-### 9.4 Validity controls
-
-Pin model versions + log call dates; repeat a 10% subsample three times for variance — no seed is available to vary, because DSH exposes no sampling parameters, so run-to-run variance is the variance there is; automated scorers only (no LLM judges); contamination caveats stated (SWE-bench Verified is known-contaminated-adjacent — cite Don't-Break-the-Cache-style measurement care and SWE-bench-Live as the contamination-free fallback for a 20-task spot-check); the analysis script is **frozen and committed before** the first full run (pre-registration).
-
-### 9.5 Generality (kills the "DSH result engineering" suspicion)
-
-Re-run C0 vs C2 on **one additional harness through the proxy** (opencode first; Claude Code/pi stretch) on the same benchmark subset (10%); repeat a 10% subsample with the model swapped (GLM-5.3) to show provider-agnosticism. Same core package, same telemetry schema, only the adapter differs.
-
-### 9.6 Cost budget (deepseek-flash, peak; assumptions labeled)
-
-**Three arms run: ~446 episodes per arm** (SWE-V 100 + tau2 ~280 + TB 66), so ~1,340 episodes where the four-arm grid budgeted ~1,780. At that per-arm density: SWE-V 100/cell ≈ $16; tau2 ≈ $17; Terminal-Bench ≈ $330 **lean assumption** (5M in + 1M out per task; frontier-scale TB runs 20–65M tokens/episode → budget-buster) — **pilot 10 TB tasks first** to pin tokens/task; Artificial Analysis publishes per-model TB 4.0 cost/task for calibration. Total ≈ **$360 peak / $180 off-peak** — the same per-arm estimate that read $480/$240 at four arms, scaled by three quarters and printed so it can be checked ($16 + $17 + $330 ≈ $363) — off-peak = 50% discount outside 01:00–04:00 & 06:00–10:00 UTC weekdays, so schedule runs accordingly. Optional `deepseek-v4-pro` arm on SWE-V only: +$57 (was $76 at four arms). GLM-5.3 10% model-swap check: +$30 (was $40). This is an estimate at the same per-arm density and nothing else: the budget **cap** remains the owner's decision (§12.3).
-
-### 9.7 The optimization loop (the phase that runs now, from 2026-10-01)
-
-Everything above stands, and it is what a **claim** requires: the arms and the pairing of §9.1, the metrics and the
-registered success rule of §9.3, the validity controls of §9.4, the generality checks of §9.5 and the budget line of
-§9.6. What changed on 2026-10-01 is what the project does **next**, and it is deliberately not the grid: short-turn
-token accounting was retired as a measurement — the evidence is in `STATUS.md` §8 — and the phase that follows is a
-test/optimize loop.
-
-**The loop.** Draw one long-horizon task at random from the pools of §9.2, run it under `C0`, `C1` and `C2`, optimize
-whatever the run exposes, then draw again. Each iteration's record carries the task, its pool and the rule the draw
-followed, so that the draw is auditable rather than plausible; the three cells' time / cost / completion tables and
-the System-1 lane facts are reported per `STATUS.md` §8, and every optimization decision cites the run that
-motivated it.
-
-**Why not the grid yet.** §9.6 prices the three-arm run set at ≈ $360 peak / $180 off-peak (~1 340 episodes), and
-that is the cost this phase avoids while the configuration is still moving: one draw buys a signal for
-*optimization* at a fraction of it. It buys nothing else. **One draw supports optimization, not a claim** — a claim
-still needs the repeated grid, and an iteration is complete only when the *same task* has been run under all three
-cells, because §9.1's within-task pairing is the only thing that makes the three cells comparable at all.
-
-**Supervision.** The loop is run by a Collaborator supervised with `GPT-6-Astra`. The system under test does not
-change: DSH with `deepseek-account/deepseek-flash` (DeepSeek V4.1 Flash), `reasoningEffort` pinned, no sampling
-parameter claimed (§9.1). `GPT-6-Astra`'s provider and model id are **not verified on this machine**: they are to be
-resolved and verified in the Collaborator's own profile, not assumed from this document.
-
-**Left open against this section, because §9 is the owner's design** — none of the five was changed here:
-(a) §9.1's "randomized run order" against the run book's fixed serial cell order; (b) the draw rule itself, which no
-part of §9 fixes; (c) there is no per-iteration metric in §9.3, because none of its metrics can come from a single
-draw; (d) the loop has no budget cap or iteration count, while §9.6 prices the grid and §12.3 caps *that*; and
-(e) §9.4's variance subsample presumes the grid. All five are stated in full, with what each would change, in
-`STATUS.md` §8, "Left to the owner".
+- **Primary:** solve rate per benchmark. **Secondary family:** cost/task, time/task, the token triple (uncached input /
+  cached input / output), cache-hit rate as a diagnostic, System-1 calls and time, tool errors, overflow events.
+- **H2 — the plan gate saves wasted-attempt tokens.** **No arm can test this today**: the gate is designed,
+  implemented and unit-tested, but no cell runs it (its two inputs never occurred in a live round). An arm with a plan
+  source the model actually writes to is what would test it.
+- **H3 — selection, stabiliser and cache, one contrast, and it cuts both ways.** The layout changes the hit rate and the
+  net cost effect is measured per update policy; the selection claim rides the same contrast, which is why **H1 is
+  retired and folded here, not renumbered** — two hypotheses on one contrast cannot be separated afterwards.
+- **H4 — transfer.** The `C0`→`C2` deltas persist on a second harness (opencode) at a 10 % subsample.
+- **And what `C0` vs `C2` measures today is the recall lane, not TAS.** The arm under test has one delivery channel,
+  which inserts the recalled block and nothing else; the state proxy is deliberately never sent; TAS's ordering reaches
+  the model only through the model-view write-back, which does not exist and is a separate project. **Until it does, no
+  arm can attribute anything to the ordering switches**, and neither recorded round's contrast measured TAS: in round
+  `20261001-1300` *both* arms delivered nothing, so their per-step difference compares two recordings of a layout, not
+  two model inputs. The round's selection figures are the recall lane's — the best hit rate beside the largest counts on
+  all three components, which is exactly why the counts are the measurement and the hit rate is not.
+- **Success rule (the registered rule; it replaces "win any of three"):** solve-rate **non-inferiority** vs the baseline
+  (paired McNemar, one-sided α = 0.05, margin −2 pp absolute) **AND** ≥10 % improvement in cost/task **OR** time/task
+  with a 95 % CI excluding 0 (paired bootstrap, 10k resamples; Holm across the secondary family). **A cell that wins
+  cost but loses >2 pp solve rate is not a win.** Report every cell plus a quality-vs-cost Pareto figure. The test, the
+  margin, the seed handling and what the tool refuses are `docs/FORMULAS.md` §8 and `scripts/paired-stats.mjs` — the
+  frozen, committed implementation.
+- **Validity controls:** pin model versions and log call dates; repeat a 10 % subsample three times (no seed is
+  available to vary, so run-to-run variance is the variance there is); automated scorers only, no LLM judges; state the
+  contamination caveats and keep a contamination-free spot-check fallback; **the analysis script is frozen and committed
+  before the first full run.**
+- `[VERIFY]` **Power.** The power analysis is still owed, and the current note is **unresolved — do not plan against
+  it**: the start figures (~14–15 pp at n = 100, ~18 pp at n = 66) are not reconcilable with a sign test that runs on
+  *discordant* pairs, which would need more discordant pairs than the arm has tasks (`docs/FORMULAS.md` §8.1). Report
+  the minimal detectable effect honestly once the analysis module records the discordance it assumed.
+- **Cost budget:** ~446 episodes per arm for the three-arm run set (the grid's pools at one draw per task per cell), with
+  Terminal-Bench as the **lean assumption** and a 10-task pilot to pin tokens/task before committing. Prices are the
+  §1 anchor row; the budget **cap** is the owner's decision (§9).
+- **The phase that runs now is a test/optimize loop** — one drawn task under all three cells, optimize, draw again — and
+  its record, its evidence and what remains open for the owner are `docs/STATUS.md` §8. What this protocol keeps:
+  **one draw supports optimization, not a claim**; an iteration is complete only when the same task has run under all
+  three cells; a claim still needs the grid, its metrics and its success rule (§5–§6); and the system under test does not
+  change for the loop.
 
 ---
 
-## 10. Milestones
+## 7. Milestones
+
+Deliverables and their acceptance, outcomes only — the commands are `docs/STATUS.md` §5, the procedure is
+`docs/CELLS-RUN.md` / `.s1cap-ablation/RUNBOOK.md`.
 
 | M | Week | Deliverable | Acceptance |
 |---|---|---|---|
-| M0 | 1 | All `[VERIFY]` items closed; monorepo scaffold; `s1-client` against live Jev + laya-serve; telemetry v1; DSH plugin skeleton | `dsh --dump-config` shows the bundle; hardcoded assembly rewrites surface in a smoke session |
-| M1 | 2–3 | SEGMENTER + RG + ASSEMBLER; proxy MVP; replay-correctness tests | ≥90% core coverage; replay invariance green |
-| M2 | 3–4 | Plan gate; degradation paths; settings UI; **TB 10-task pilot** (pins the cost model); GAIA-free runner set up | Pilot report; C0 vs C2 smoke on 10 SWE-V tasks |
-| M3 | 5–6 | Full 2×2 crossing on SWE-V + tau2 (+TB if pilot green); optional Laya fine-tune + calibration refit | 3 arms × n complete; frozen stats module emits the report |
-| M4 | 7–8 | Terminal-Bench cells; opencode transfer check (10%); GLM model-swap check (10%) | H4 evaluated |
-| M5 | 9–10 | Paper artifacts: Pareto + cache-waterfall figures, case studies (`/s1 why` traces), LaTeX draft per §11 | Full draft |
+| M0 | 1 | `[VERIFY]` items closed; monorepo scaffold; S1 client against live Jev + local serve; telemetry v1; plugin skeleton | a composed-config dump shows the bundle; a smoke session delivers assembled context |
+| M1 | 2–3 | SEGMENTER + RG + ASSEMBLER; proxy MVP; replay-correctness tests | core coverage ≥90 %; replay invariance green |
+| M2 | 3–4 | Plan gate; degradation paths; settings UI; **TB 10-task pilot**; runner set up | pilot report; a baseline-vs-full smoke on 10 SWE-V tasks |
+| M3 | 5–6 | Full three-arm run on SWE-V + tau2 (+TB if pilot green); optional local fine-tune + calibration refit | 3 arms × n complete; the frozen stats module emits the report |
+| M4 | 7–8 | TB cells; opencode transfer check (10 %); model-swap check (10 %) | H4 evaluated |
+| M5 | 9–10 | Paper artifacts: Pareto + cache-waterfall figures, case studies, draft | full draft |
+
+*The plan gate is still built and tested here, but no cell carries it (§3.4); case studies draw on provenance
+readbacks, not on a `/s1 why` command — that command was a design note and does not exist.*
 
 ---
 
-## 11. Paper outline (Technique paper)
+## 8. Paper: naming and decisions
 
-- **Title (revised 2026-09-28 after the naming erratum; earlier "Selective Context and Adaptive Planning" was wrong):** *S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents*
-  - In-paper expansion: **S1CAP (System-1 Context-Aware Planning)** — `S1` = System-1, `C-A-P` = Context-Aware Planning. Never expand it any other way in prose, slides or abstracts.
-  - The two interventions are **Context Awareness** (which segments the model sees, per LLM call) and **Plan Ordering** (the order the model's own plans run in); the earlier labels "Selective Context" / "Adaptive Planning" are retired with the old expansion.
-  - Collision check 2026-09-28: no AI/ML/agent-space collision for "S1CAP" (web-search hits are biomedical false positives — "severe community-acquired pneumonia" literature). npm `s1cap` and `dsh-s1cap` both unregistered (404) — reserved for this project.
-  - Related work to keep citing in §2 (no longer a name collision): Xiao et al., EMNLP 2023 token-level compression (github.com/liyucheng09/Selective_Context) — distinguish token-level pruning for input compression from segment-level association-graph recall for the agent context lifecycle.
-  - Repo/package naming (decided 2026-09-28): repo `s1cap`, npm proxy `s1cap`, DSH plugin `dsh-s1cap` — paper, repo and plugin names aligned. Repository: github.com/Jaffe2718/s1cap
-- **System-1 credential handling (user decision 2026-09-28): the Jev API key is entered by the user in a settings panel, never read from a file we author and never baked into a profile patch.** Surfaces observed in DSH **0.1.7-rc.2** (that line, not re-confirmed on the release in use): `dsh-credentials` + `dsh-credentials-local` (credential service with a local store), `dsh-client-ui-settings*` (settings shell with general/models/plugins/plugin-inventory sections) and `dsh-llm-deepseek-api-key` (the shipped precedent for "fill an API key in settings"). One of them has since been re-checked on **0.2.0-rc.2**: the credential service answers a plugin under the profile — the live pre-flight's tape carries `kind:"credential"`, `result:"not found"`, `ref:"s1cap/jev"` with the service's own method list (`resolve`, `readRecord`, `describeRecord`, `set`, …), which is the credential path being *called* rather than declared. The settings shell, the section list and the deepseek precedent are still 0.1.7-rc.2 evidence. Implementation path: declare `s1.apiKey` as a secret config field, contribute a settings section from the plugin's client half, persist through the credential service; the value must never reach a log, a control-plane record or the transcript (only `redactKey()` output). `s1.apiKey`/`TYPESAFE_API_KEY`/`S1CAP_API_KEY` stay as fallbacks for headless runs.
-- **Installation policy (user decision 2026-09-28): the `desktop` profile is off limits — it carries other plugins and skills and must stay a clean environment.** S1CAP is exercised only in its own dedicated, clean profile (dsh-base + web app + this plugin, nothing else). Never register the bundle, a junction or a patch row in `desktop`; never run `dsh plugin --profile desktop` (the CLI refuses it anyway). Any instruction to install into `desktop` is obsolete.
-- **M1 block 2 — observation mode: done 2026-09-28.** `agent/pre-step` runs SEGMENTER → RECALL → ASSEMBLER on
-  every LLM call (`observation: log`, the default whenever the plugin is enabled) and appends one `assembly`
-  record to the control-plane log; the harness decision is returned untouched, and `observe()` never throws.
-  Verified end-to-end in a real DSH round on the **0.1.7-rc.2** line (§1.8) inside a clean CLI profile
-  (`dsh --profile s1capobs "…"`), not only
-  in unit tests — the record above is from that round; the same pipeline runs on 0.2.0-rc.2 in `observation: tape`
-  mode, where the live pre-flight wrote both streams (`control.jsonl`: `assembly` ×4, `context_delivery` ×4,
-  `s1_call` ×14; `session.jsonl`: 15 lines) with `blocks.pinned` 700 → 1499 — but that is today's round, not this
-  2026-09-28 handover. Adapter shapes are read from `dsh-llm`'s packaged
-  source (`role: user|developer|assistant|system|tool`, parts tagged `type`, `source.kind`), and every shape
-  without a rule is reported (`AdapterReport`) instead of being dropped. Next sub-steps: source the system
-  prompt for the pinned block, drive the RG upkeep from session events (the asynchronous lane), then the
-  replay-parity harness over a recorded session.
-- 1 Intro: agent-loop context economics (cache-hit ≈ 50× cheaper than miss); Trace-as-State principle; the arrival of decision models.
-- 2 Related work: agent memory (MemGPT, Mem0, Zep, A-Mem, HippoRAG 1/2, MemOS, MESA, GAAMA, EMem); in-loop folding (AgentFold); order sensitivity (Lost in the Middle, Re2, Ok&Lee, CoRe, Racing Thoughts); prompt compression (LLMLingua 1/2); caching (Prompt Cache, CacheGen, Don't Break the Cache); routing/cascades (RouteLLM, FrugalGPT, Hybrid LLM); harness prior art (dsh-command-context-trim, pi-system-one, hermes-jev-skills, dsh-typesafe, laya-jev-GraphRAG); decision models (Jev, Laya, Kev, JevBench). Full verified list: `docs/RELATED_WORK.md`.
-- 3 Method: S1CAP control-layer architecture; association graph; TAS assembly; plan gate; cost model.
-- 4 Setup: 2×2 crossing, three arms, benchmarks, telemetry.
-- 5 Results: quality/cost/time + Pareto; **cache-hit waterfall (H3)**; degradation; case studies.
-- 6 Analysis: when does TAS pay for its cache penalty; S1 decision quality vs outcome; failure modes (jaggedness, adversarial segments).
-- 7 Discussion: limits, ethics (black-box gating, bias in decision models — cite Jev's own bias discussion), generality.
-- **Contributions:** (1) first infrastructure-in-the-loop use of decision models for agent context lifecycle; (2) Trace-as-State transplanted from single-document QA into live agent loops with cache-aware accounting; (3) an open 2×2-crossing benchmark suite, three arms run, + versioned telemetry schema; (4) a DSH plugin + portable proxy.
+- **Title:** *S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents*. **Expansion, use everywhere
+  the acronym is spelled out: System-1 Context-Aware Planning** — never the retired "Selective Context and Adaptive
+  Planning". The two interventions are **Context Awareness** (which segments the model sees) and **Plan Ordering** (the
+  order the model's own plans run in) — not "selective context" and "adaptive planning".
+- **Naming decided 2026-09-28:** repo `s1cap`, npm proxy `s1cap`, DSH plugin `dsh-s1cap`; paper, repo and plugin names
+  aligned. Collision-checked at that date.
+- **Outline:** intro (context economics, TAS principle, decision models) · related work (memory, in-loop folding, order
+  sensitivity, compression, caching, routing, harness prior art, decision models — full list in
+  `docs/RELATED_WORK.md`) · method (control layer, graph, TAS assembly, cost model; the gate stays described as design)
+  · setup (the three arms, benchmarks, telemetry) · results (quality/cost/time + Pareto, cache-hit waterfall,
+  degradation, case studies) · analysis (when TAS pays for its cache penalty, decision quality vs outcome, failure
+  modes) · discussion (limits, ethics, generality).
+- **Contributions:** first infrastructure-in-the-loop use of decision models for the agent context lifecycle;
+  Trace-as-State transplanted into live agent loops with cache-aware accounting; an open ablation run as three arms with
+  a versioned telemetry schema; a DSH plugin plus a portable proxy.
+- **Owner decisions that outlive this file — the `desktop` profile is off limits** (it carries other plugins and skills;
+  S1CAP runs only in its own clean profile, and no check, junction or patch row ever touches `desktop`); **the System-1
+  key is entered by the user in a settings panel**, never read from a file we author and never baked into a profile
+  patch, with environment variables as headless fallbacks only.
 
 ---
 
-## 12. Open questions for the human (do NOT decide alone)
+## 9. Open questions for the human (do not decide alone)
 
-1. Primary model: `deepseek-flash` (recommended; cheap, 1M ctx, vision) vs GLM-5.3 — affects budget and cache fields.
-2. Headline S1 backend for the paper: cloud Jev (quality, trivial integration) vs local fine-tuned Laya/EdgeJev (offline story, more work, M3 risk).
-3. Hard budget cap for the **future full crossing** — all four quadrants, the four-arm basis of §9.6 (≈ $480 peak / $240 off-peak), not the ≈ $360/$180 three-arm run set that runs today: recommended ≥ $500, to survive a frontier-scale TB surprise. A recommendation for the owner, not a settled setting.
-4. Target venue + deadline (scopes M5).
-5. Publish the Laya fine-tune weights? (Apache-2.0 base permits.)
+1. Primary model: `deepseek-flash` (recommended — cheap, long context) vs GLM-5.3; affects budget and cache fields.
+2. Headline System-1 backend for the paper: cloud Jev (quality, trivial integration) vs a local fine-tune (offline
+   story, more work, M3 risk).
+3. Hard budget cap for the full three-arm run: recommended ≥ $500, to survive a frontier-scale long-benchmark surprise.
+   A recommendation, not a settled setting.
+4. Target venue and deadline (scopes M5).
+5. Publish the local fine-tune weights? (The base licence permits it.)
 
 ---
 
-## 13. Source index (all fetched 2026-09-27/28)
+## 10. Sources
 
-Paper T: arxiv.org/abs/2609.02702 · Jev: docs.typesafe.ai/{api,models,model-jaggedness/jev-1.13,cookbooks/parallel_questions} · Laya: github.com/NandhaKishorM/laya · EdgeJev: github.com/yzfly/edgejev · Kev: github.com/jaredpalmer/kev · JevBench: benchmarkheaven.com/jev-models · DeepSeek: api-docs.deepseek.com/quick_start/pricing · GLM: docs.z.ai/guides/overview/pricing · DSH plugin mechanics: registry.npmjs.org/dsh-command-context-trim (README) + local `~/.dsh/profiles/desktop/` inspection · opencode: opencode.ai/docs/providers · pi-system-one: registry.npmjs.org/pi-system-one · Benchmarks: swebench.com/verified.html, tbench.ai, github.com/sierra-research/tau2-bench · Related work: see `docs/RELATED_WORK.md`.
-
-## Recall window: the algorithm step, and the rule it taught
-
-**Algorithm (upkeep).** After the segments of a step are added to the association graph, score **only the
-segments that arrived since the previous step**, each against the most recent `w = recall.window` segments, with
-edges below `r = recall.threshold` dropped. Emit `windowN` and `scoredPairs` on the assembly event so the System-1
-saving is a number in the telemetry rather than a claim in prose.
-
-**Ground rule 9 — a new value must land in every sibling parse path.** Adding `w` took two rounds to become real,
-because the same value is parsed in four places: the credential-style payload (`parseTuning`), the command line
-(`parseTuningArgs`), the tuning file reader (`readTuningFile`), and the merge that applies the file over the
-payload. It was added to the first two and forgotten in the latter two, so the panel and `/s1-tune` accepted a
-window that a session silently ignored — and the *probe* caught it only because it prints `read` and `effective`
-side by side. When you add a parameter: grep for every sibling parser, patch all of them in one pass, and make the
-probe show both halves.
-
-**Ground rule 10 — edit these files line-based, never by eyeballed indentation.** Three separate exact-string
-anchors missed because the leading whitespace was copied by eye; one of those misses mattered because a second
-patch had already referenced the symbol, and the suite went red with `windowScore is not defined`. Derive
-indentation from the file (`$indent = ($line -replace '^(\s*).*$', '$1')`), assert post-conditions (declaration
-counts, method presence) in the same command that writes, and re-run the suite before committing.
+| Subject | Source |
+|---|---|
+| Paper T | arxiv.org/abs/2609.02702 |
+| Jev (API, models, pricing, jaggedness, parallel questions) | docs.typesafe.ai |
+| Laya · EdgeJev · Kev · laya-mlx | github.com/NandhaKishorM/laya · github.com/yzfly/edgejev · github.com/jaredpalmer/kev · github.com/mizoreww/laya-mlx |
+| JevBench leaderboard | benchmarkheaven.com/jev-models |
+| DeepSeek pricing · GLM pricing | api-docs.deepseek.com/quick_start/pricing · docs.z.ai/guides/overview/pricing |
+| DSH plugin mechanics (peer contracts, profile layout) | registry.npmjs.org/dsh-command-context-trim + the local install (~/.dsh/profiles) |
+| opencode · pi-system-one | opencode.ai/docs/providers · registry.npmjs.org/pi-system-one |
+| Benchmarks | swebench.com/verified.html · tbench.ai · github.com/sierra-research/tau2-bench |
+| Related work (full verified list) | docs/RELATED_WORK.md |

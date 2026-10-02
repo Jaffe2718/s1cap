@@ -1971,7 +1971,8 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
    * The panel's Save button, the way `dsh-pet` does it: the host half registers a prefixed HTTP route on the same
    * web server that serves the UI, and the client half is a plain relative `fetch`. That is deliberately chosen over
    * writing through a settings namespace or a credential ref - both need declarations this out-of-tree plugin cannot
-   * make (docs/STATUS.md rounds 33-41) - while the route needs nothing beyond the service the UI already runs on.
+   * make (docs/STATUS-ARCHIVE.md rounds 33-41) - while the route needs nothing beyond the service the UI already
+   * runs on.
    *
    * GET returns the stored and effective triples, so the panel can fill itself from the host instead of guessing.
    * PUT takes the same text the command line takes ("3 0.7 512", or d=/r=/w=) and answers with the effective

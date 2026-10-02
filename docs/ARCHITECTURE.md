@@ -4,7 +4,7 @@ Reference for the connections drawn in the route diagram
 ([`figures/s1cap-technical-route.html`](./figures/s1cap-technical-route.html) — hand-authored, and the single
 geometry source). The committed SVGs
 ([`light`](./figures/s1cap-technical-route.light.svg) · [`dark`](./figures/s1cap-technical-route.dark.svg)) are
-generated from it by `scripts/build-route-svg.mjs` and embedded in the README and in AGENT_BRIEF §2.
+generated from it by `scripts/build-route-svg.mjs` and embedded in the README and in §1 below.
 
 **Diagram maintenance — do not regress.** The flow is a loop with a hook: `Run + Verify` carries a self-loop
 (`next LLM step · model continues`) and association-graph upkeep sits in its own asynchronous lane. Never
@@ -50,7 +50,7 @@ below and in [`figures/s1cap-technical-route.html`](./figures/s1cap-technical-ro
 
 | Module | Responsibility | Inputs | Outputs | Key parameters | Degradation | Status · code |
 |---|---|---|---|---|---|---|
-| **Event intake** | Harness adapter: turn session events into `RawEvent`; write the assembled context back to the **model view only** (user transcript stays chronological) | harness event stream (append-only log) | `RawEvent` → Segment / Recall; surface rewrite ops | — | plugin load failure → native harness behaviour | 🟡 adapter + observation live (M1) · `packages/dsh-plugin/src/harness-adapter.ts`, `observer.ts`, `control-log.ts` · 🔜 model-view write-back, `packages/proxy` |
+| **Event intake** | Harness adapter: turn session events into `RawEvent`; write the assembled context back to the **model view only** (user transcript stays chronological) | harness event stream (append-only log) | `RawEvent` → Segment / Recall; surface rewrite ops | — | plugin load failure → native harness behaviour | 🟡 adapter + observation live (M1) · `packages/core/src/harness-adapter.ts`, `packages/core/src/observer.ts`, `packages/dsh-plugin/src/control-log.ts` · 🔜 model-view write-back, `packages/proxy` |
 | **Segment / Recall** | Split each event into **message-level** segments (never token-level); generate relevance candidates | `RawEvent` | `Segment[]`, candidate edge list | `chunkTokens=512`, `overlapTokens=64`; tier-1 = `s1` (one batched `noul` call — the implemented mode) or `off`; `questionsPerCall ≤ 20` | tier-1 unavailable → tier-0 metadata only | ✅ segmenter · `packages/core/src/segmenter.ts`; 🔜 tier-1 orchestration · 🔜 **embed mode — designed and NOT implemented** (no embedder, `source: 'embed'` never written; the literal is rejected by `validatePolicy`, `packages/core/src/config.ts`) |
 | **S1 association backend** | Score relevance of new segment × history segments; produce the weights that expand the RG | segment pair batches | relevance probabilities | `noul` questions, batched; `timeoutMs=2500` | timeout → skip tier-2 for that turn; hard down → tier-0 + recency window | ✅ client · `packages/s1-client`; 🔜 orchestration |
 | **Association graph (RG)** | Store segment nodes and weighted edges; answer bounded recalls | verified edges | nodes, edges, recall hits | `recall.threshold=0.55`, `depth=2`, `fanout=8`, decay `λ=30 min` | thin recall → recency-window fallback | ✅ M0 · `packages/core/src/assoc-graph.ts` + asynchronous upkeep queue (`upkeep-queue.ts`, fed by real `session/event` traffic; in-memory, SQLite 🔜 M1) |
@@ -89,7 +89,8 @@ decide what S1CAP *records* and what it would write into the model view — they
 reads. `C1`'s row above is the sharpest case: its switches are on in the wiring and its `deliver` is off because
 the only block delivery can insert is empty by construction when `recall.tier1: 'off'` (the whole recall path sits
 behind one guard, `packages/core/src/assembler.ts`), so its model-visible input is `C0`'s. The registered contrast
-is therefore `C0` vs `C2` (`docs/CELLS-RUN.md` carries the round evidence and the per-round wording; `FORMULAS.md`
+is therefore `C0` vs `C2` (the round evidence is each round's own record under `.s1cap-ablation/round-<id>/`, and
+`docs/CELLS-RUN.md` "The arms, and what the contrast is" carries the wording that reads it; `FORMULAS.md`
 §6.1 says what it does and does not isolate).
 
 ### The model-view write-back — a separate project, and the prerequisite of any TAS measurement
@@ -114,8 +115,9 @@ None of that is part of the `C1`/`C2` registration change of 2026-10-02, and non
 
 Round `20261001-1300` ran four cells under an earlier labelling: `C1` (baseline) is today's **`C0`**, `C2` (read as
 TAS alone then; a second control arm today, see §5) is today's **`C1`**, `C3` (recall selection with `tas.on: false`)
-was **dropped, no successor**, and `C4` (the full configuration) is today's **`C2`**. `docs/CELLS-RUN.md` carries the
-mapping table with the measured reason the fourth arm was dropped.
+was **dropped, no successor**, and `C4` (the full configuration) is today's **`C2`**. The round-label mapping is the
+table in `docs/AGENT_BRIEF.md` §5; the measured reason the fourth arm was dropped is in `bench/README.md`, over that
+round's own tables (`.s1cap-ablation/round-20261001-1300/ROUND-REPORT.md`).
 
 ## 6. Loop, authority and asynchrony
 

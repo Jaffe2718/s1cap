@@ -39,6 +39,11 @@ Candidates are de-duplicated case-insensitively on Windows.
 
 ## 3. Configuration keys
 
+Key names and meanings are listed here; **the defaults and the accepted ranges are the schema's**
+(`packages/laya-runtime/src/types.ts`, `defaultLayaConfig()`, and the key rules in
+`packages/laya-runtime/src/config.ts`), and a profile patch's value always wins over a default. Where a default is
+quoted below it is a reading of that schema, not a second source.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | opt-in switch; nothing is spawned while false |
@@ -52,7 +57,7 @@ Candidates are de-duplicated case-insensitively on Windows.
 | `host` / `port` | `127.0.0.1` / `8008` | bind address of the local server (injected as `LAYA_HOST` / `LAYA_PORT`) |
 | `healthPath` | `/health` | readiness endpoint polled after spawn (`/v1/models` is tried as a fallback) |
 | `model` | — | model id sent to `/v1/systemone` (e.g. `laya-typed-decisions`) |
-| `autoStart` | `true` | start the server when the plugin loads |
+| `autoStart` | see schema | start the server when the plugin loads. The default is `defaultLayaConfig()`'s; each profile pins the value it wants and the effective value is the profile's (the ablation's profiles start the backend by hand — `.s1cap-ablation/RUNBOOK.md` step 4) |
 | `startupTimeoutMs` | `120000` | readiness budget (first run downloads weights) |
 | `pollIntervalMs` | `500` | readiness poll interval |
 | `env` | `{}` | extra environment variables (`LAYA_THREADS`, `LAYA_DEVICE`, `LAYA_MODELS`, `HF_ENDPOINT`, …) |
@@ -106,7 +111,8 @@ over the CLI returned `noul: 0.0287, confidence: 0.9713` with `usage.input_token
 
 ## 5. DSH profile patch
 
-Machine-specific values belong in `~/.dsh/profiles/<profile>/cordis.patch.yml`, not in the bundle:
+Machine-specific values belong in `~/.dsh/profiles/<profile>/cordis.patch.yml`, not in the bundle. The block below is
+the *shape* of such a patch — the keys a profile decides — not a set of defaults:
 
 ```yaml
 - id: s1cap
@@ -121,11 +127,14 @@ Machine-specific values belong in `~/.dsh/profiles/<profile>/cordis.patch.yml`, 
       host: 127.0.0.1
       port: 8008
       model: laya-typed-decisions
-      autoStart: true
-      startupTimeoutMs: 120000
       env:
         LAYA_THREADS: "8"
 ```
+
+Keys left out of it are the schema's to default (`packages/laya-runtime/src/types.ts`; §3 lists the key set), and any
+key written here is the profile's to own. `autoStart` is the one that is always a profile decision rather than a
+default worth inheriting — whether the backend starts itself is a property of the round, not of the runtime, and the
+ablation's profiles start it by hand (`.s1cap-ablation/RUNBOOK.md` step 4).
 
 ## 6. Verified behaviour (laya 0.3.21)
 
@@ -146,7 +155,7 @@ Read from the installed `laya/serve.py`, not from documentation:
   optional `state`, `model`, `max_len`, `head_max_len`; oversized bodies get 413, and saturation
   past `LAYA_MAX_CONCURRENT` gets 503 with `Retry-After: 1` instead of queueing.
 - **Startup cost:** with `LAYA_PRELOAD=1` the checkpoints are built *before* uvicorn binds, so a
-  first run that has to download weights can exceed the default 120 s readiness budget — raise
+  first run that has to download weights can exceed the schema's default readiness budget — raise
   `startupTimeoutMs` (the CLI defaults to 600 s) or restrict `LAYA_MODELS` to one checkpoint.
 - **Reproducibility:** `LAYA_REVISION` and `LAYA_SHA256_DIGESTS` pin checkpoint revisions and
   digests — worth setting for paper artifacts.

@@ -62,11 +62,7 @@
           # fired on 9 of 9 steps of a live run and replaced every System-1 selection with recency.
         tail:
           k: 3
-        planGate:
-          on: true
-          maxPlans: 3
-          attemptCap: 2
-          abstainConfidence: 0.5
+        # planGate is gone from AssemblyPolicy (2026-10-02): designed, unimplemented in every cell, kept as a mechanism.
         s1:
           # jev | laya-serve | edgejev | kev | none — EXACTLY ONE backend is active at a time:
           # enabling Laya while selecting a cloud provider is a config error, not a priority rule

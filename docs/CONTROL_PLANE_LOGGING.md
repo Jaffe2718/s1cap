@@ -35,7 +35,9 @@ failure mode, and it is a correctness problem before it is a cost problem.
 | File (plugin default) | `./.s1cap/session.jsonl` | `./.s1cap/control.jsonl` |
 
 Splitting the *sinks* is what makes the rule enforceable: the two streams never share a writer,
-a schema, or a reader.
+a schema, or a reader. The paths above are the plugin's own defaults (`DEFAULT_TELEMETRY`,
+`packages/dsh-plugin/src/index.ts`); a profile may move them, and the pair a run actually used is
+in its configuration, not here.
 
 ## 3. Enforced invariants
 
@@ -46,25 +48,29 @@ a schema, or a reader.
 | **I3** | Anything shown to System-1 or the LLM is session segments only | `assertSessionSegments(...)` gates the assembled view and the `/v1/systemone` state |
 | **I4** | The control-plane log never receives session segments and is never read back into the model view | `ControlPlaneLog.emit` rejects segments; the sink is not in any read path of the assembly pipeline |
 
-The allowlist `SESSION_SEGMENT_KINDS = ['user','assistant','trace','toolCall','toolResult','systemPinned']`
+The session-segment allowlist (`SESSION_SEGMENT_KINDS`, [`packages/core/src/provenance.ts`](../packages/core/src/provenance.ts))
 is closed: adding a kind to the pipeline requires editing that list, which is the moment to decide
-whether the new material is session data or control data.
+whether the new material is session data or control data. The members are the code's; the rule that
+they are a closed set is this document's.
 
 ## 4. Correlation without coupling
 
-Cost and timing must join to turns for the paper, but joining must not move content:
+Cost and timing must join to turns for the paper, but joining must not move content. The record shape is the code's
+([`packages/core/src/telemetry.ts`](../packages/core/src/telemetry.ts)); the rules this document fixes are:
 
-- every S1 record carries `turnId` and `taskId` (ids only);
-- `scoredSegmentIds` records *which* segments were scored (ids, capped) so coverage can be analysed;
-- `routedModel` records the checkpoint the backend actually chose (e.g. Laya routing to `english`);
-- answers/decisions are stored in the control log — they are results, and they are never re-inserted
+- **ids only** — a record may name the turn, the task and the segments it scored, capped, and never their text.
+  Without the scored-id list, coverage (*what share of the offered pairs the backend answered*) cannot be analysed,
+  and a silent fallback to the lexical scorer reads as a healthy graph;
+- **the checkpoint is recorded** — a routed model the record omits is a run whose System-1 answers cannot be
+  attributed to the checkpoint that produced them;
+- **answers and decisions are results, not context**: they are stored in the control log and are never re-inserted
   into the conversation by the logging system.
 
 ## 5. Rules for the plugin surface
 
-- `/s1 laya status` and `/s1 laya discover` print a **compact** status (state, base URL, interpreter,
-  last error). Raw backend stdout/stderr stays a bounded diagnostic buffer (`LayaServer.logs`, 50 lines)
-  and is never pasted into the transcript as a tool result deliberately fed back to the model.
+- `/s1 laya status` and `/s1 laya discover` print a **compact** status, not a log dump. Raw backend
+  stdout/stderr stays a bounded diagnostic buffer (`LayaServer.logs`, whose size is the runtime's own
+  constant) and is never pasted into the transcript as a tool result deliberately fed back to the model.
 - The agent is never instructed to read the control log. If it reads the file as a tool call, that tool
   *result* is ordinary session material — the log's contents are not privileged, but the plugin must not
   route them back to System-1 on its own initiative.

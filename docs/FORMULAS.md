@@ -1,30 +1,37 @@
 # S1CAP Formal Definitions and Formula Handbook
 
-**Version** 0.1 · 2026-09-28 · Companion to [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [AGENT_BRIEF.md](./AGENT_BRIEF.md) · [technical roadmap](./figures/s1cap-technical-route.html)
+**Version** 0.1 · 2026-09-28 · revised 2026-10-02 (definitions only; parameter values and the report generator's
+row list removed to pointers) · Companion to [PROPOSAL.md](./PROPOSAL.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [AGENT_BRIEF.md](./AGENT_BRIEF.md) · [technical roadmap](./figures/s1cap-technical-route.html)
 
-This document uses Markdown + LaTeX to fix all mathematical definitions of S1CAP: segmentation and association graph, context assembly, Trace-as-State layout, plan gate, cost and cache break-even model, time model, statistical protocol. Parameter default values agree with [AGENT_BRIEF.md](./AGENT_BRIEF.md) §4-§5.
+This document uses Markdown + LaTeX to fix all mathematical definitions of S1CAP: segmentation and association graph, context assembly, Trace-as-State layout, plan gate, cost and cache break-even model, time model, statistical protocol. **It defines symbols; it does not own parameter values.** Every knob named below takes its default from `defaultPolicy()` and the cell presets (`packages/core/src/types.ts`, `bench/cells/*.json`), and a run's values are its own `kind:"wiring"` record — so where a value is quoted here it is quoted as an *input to a computation*, dated, and never as the place the value is maintained.
 
 ---
 
 ## 0. Notation
 
-| Symbol | Meaning | Default value |
-|---|---|---|
-| $\mathcal{L} = (e_1,\dots,e_T)$ | Session event log (append-only, human-recorded, never rewritten) | — |
-| $S=\{s_1,\dots,s_n\}$ | Segment set; $s_i=(\mathrm{id},\mathrm{kind},\mathrm{tok}_i,t_i,\mathrm{text}_i)$, $\mathrm{kind}\in\{$user, assistant, trace, toolCall, toolResult$\}$ | — |
-| $x$ | Current user input (condition/instruction) | — |
-| $P$ | Fixed prefix (system prompt + tool schema), never reordered | — |
-| $T_{\mathrm{state}}$ | Task-state proxy (serialized reasoning trace + task brief) | $\le 8\mathrm{k}$ chars |
-| $G_t=(V_t,E_t)$ | Association graph at time $t$ (association graph) | — |
-| $\tau,\ d,\ k$ | Association threshold / BFS depth / per-node expansion limit | $0.55,\ 2,\ 8$ |
-| $\lambda$ | Time decay constant (active session time) | 30 min |
-| $K$ | Number of recent-tail verbatim turns kept | 3 |
-| $B$ | Context token budget | §3.1 |
-| $\rho$ | Recall-block share of the budget | 0.35 |
-| $\mu$ | Minimum recall-block fill rate (token share; fallback below this) | **0 — off by default** ⁽¹⁾ |
-| $\mu_{\mathrm{seg}}$ | Minimum recall-block **segment count** (fallback below this) — the guard that actually runs | 1 |
-| $m,\ M$ | Number of candidate plans / attempt limit | $3,\ 2$ |
-| $c_{\min}$ | Plan gate abstention confidence | 0.5 |
+**Symbols and meanings only.** This table used to carry a "Default value" column — $\tau/d/k$, $\lambda$, $K$,
+$\rho$, $\mu$, $\mu_{\mathrm{seg}}$, $m/M$, $c_{\min}$ and the state proxy's size bound. That column was a second
+copy of code-owned defaults and is removed rather than synchronised: the defaults are `defaultPolicy()`'s and the
+presets', each knob keeps its name here so a symbol can be looked up, and a reader who needs a value reads it
+there or in the run's wiring record.
+
+| Symbol | Meaning |
+|---|---|
+| $\mathcal{L} = (e_1,\dots,e_T)$ | Session event log (append-only, human-recorded, never rewritten) |
+| $S=\{s_1,\dots,s_n\}$ | Segment set; $s_i=(\mathrm{id},\mathrm{kind},\mathrm{tok}_i,t_i,\mathrm{text}_i)$, $\mathrm{kind}\in\{$user, assistant, trace, toolCall, toolResult$\}$ |
+| $x$ | Current user input (condition/instruction) |
+| $P$ | Fixed prefix (system prompt + tool schema), never reordered |
+| $T_{\mathrm{state}}$ | Task-state proxy (serialized reasoning trace + task brief) (bound: `tas.tMaxChars`) |
+| $G_t=(V_t,E_t)$ | Association graph at time $t$ (association graph) |
+| $\tau,\ d,\ k$ | Association threshold / BFS depth / per-node expansion limit (`recall.threshold`, `recall.depth`, `recall.fanout`) |
+| $\lambda$ | Time decay constant (active session time) |
+| $K$ | Number of recent-tail verbatim turns kept (`tail.k`) |
+| $B$ | Context token budget (defined in §3.1) |
+| $\rho$ | Recall-block share of the budget (`recall.budgetRatio`) |
+| $\mu$ | Minimum recall-block fill rate (token share; fallback below this) — `recall.minRecalledShare`, **off by default** ⁽¹⁾ |
+| $\mu_{\mathrm{seg}}$ | Minimum recall-block **segment count** (fallback below this) — `recall.minRecalledSegments`, the guard that actually runs |
+| $m,\ M$ | Number of candidate plans / attempt limit (§4; `PlanGateOptions`, no policy field) |
+| $c_{\min}$ | Plan gate abstention confidence (§4; `PlanGateOptions`, no policy field) |
 
 ⁽¹⁾ **The in-force fallback rule is the count floor, not the token share.** This document, `ARCHITECTURE.md:57` and
 `AGENT_BRIEF.md` §3.5 all stated $\mu = 0.25$ as the rule that fires the recency fallback; the code's default is
@@ -34,7 +41,9 @@ fired on 9 of 9 steps of a live run and discarded every System-1 selection befor
 (`packages/core/src/config.ts`), a floor of one segment under a recall selection: fewer than one selected segment
 is not a selection, so the block falls back to the recency window. Both fields are now recorded on the
 `kind:"wiring"` tape record (`governance.recall`) so a run cannot be read through the wrong one. A reader modelling
-*when* the fallback fires must use $\mu_{\mathrm{seg}}$, not $\mu$.
+*when* the fallback fires must use $\mu_{\mathrm{seg}}$, not $\mu$. **The values themselves are `defaultPolicy()`'s
+and are not restated here**; what this note owns is the rule — which field is in force, and why the token-share one
+is not.
 
 ## 1. Segmentation (SEGMENTER)
 
@@ -212,23 +221,31 @@ C_{\mathrm{task}} = \sum_{\text{calls}} c_{\mathrm{call}} + C_{\mathrm{S1}}, \qq
 C_{\mathrm{S1}} = p_{\mathrm{s1}} \sum_{\text{S1 calls}} n_{\mathrm{in}}^{\mathrm{S1}} \quad (\text{Jev output is free})
 $$
 
-Reference prices (per 1M tokens, verified 2026-09-28): `deepseek-flash` peak $p_{\mathrm{hit}}=0.006,\ p_{\mathrm{miss}}=0.30,\ p_{\mathrm{out}}=1.20$ (halved off-peak); GLM-5.3 at $0.26/1.40/4.40$; Jev $p_{\mathrm{s1}}=0.042$ (input only).
+**The prices are inputs, owned elsewhere.** $p_{\mathrm{hit}}, p_{\mathrm{miss}}, p_{\mathrm{out}}$ and
+$p_{\mathrm{s1}}$ are properties of a provider contract, not of this system: the price-anchor row of
+[AGENT_BRIEF.md](./AGENT_BRIEF.md) §"Facts the protocol depends on" (its sources table and the fetch date are in
+that document's §"Sources") owns the reference table, and a run's own price list belongs in the run's
+record. This document owns only the formula above, which applies whatever those prices are. The two tables in §6
+below are the one place prices appear here, and they appear as **derived** figures — computed from that row's
+anchors on 2026-09-28 and labelled as such — not as a second copy of the list.
 
 ### 5.1 What a report has to carry
 
 > **Cell labels in this section.** The measured figures quoted here come from round `20261001-1300`, which ran
-> **four** cells under labels that no longer exist. The mapping is: round `C1` (baseline) is today's **`C0`**;
-> round `C2` (read as TAS alone then; a second control arm today — §6.1) is today's **`C1`**; round `C3` (recall selection with `tas.on: false`) is **dropped, no
-> successor**; round `C4` (the full configuration) is today's **`C2`**. Every figure below stays attributed to that
-> round and to the label it ran under, and none is silently re-labelled. `docs/CELLS-RUN.md` §"The names changed
-> after round `20261001-1300` ran" carries the same table, with the per-step reason the fourth arm was dropped
-> (3 625 uncached input tokens per step against the baseline's 2 595, 2 574 output against 1 523, a 79.2% hit rate
-> against 86.7%, and 22.5% coverage, below the 0.5 floor).
+> **four** cells under labels that no longer exist: round `C1` (baseline) is today's **`C0`**; round `C2` (read as
+> TAS alone then; a second control arm today — §6.1) is today's **`C1`**; round `C3` (recall selection with
+> `tas.on: false`) is **dropped, no successor**; round `C4` (the full configuration) is today's **`C2`**. Every
+> figure below stays attributed to that round and to the label it ran under, and none is silently re-labelled. The
+> table itself, and the per-step reason the fourth arm was dropped, are kept once as frozen history of that round
+> in `.s1cap-ablation/round-20261001-1300/ROUND-REPORT.md`, whose cells are named `C1`–`C4`; `docs/CELLS-RUN.md`
+> states the reading rule (a figure from that round is never a contrast, and its labels are never re-labelled into
+> today's scheme) without reproducing the table.
 
 The primary measurements are the three raw token counts inside $c_{\mathrm{call}}$ — the triple
 $(n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}})$: uncached input tokens, cached input tokens, output
 tokens — reported **separately and per unit of work**, per turn and per step, because a hit rate is a ratio and a
-ratio hides scale. **No scalar is formed from the three.** $c_{\mathrm{call}}$ above is a price list applied to the
+ratio hides scale. (Which usage field each count is read from is `docs/CELLS-RUN.md`'s table in "The measurement,
+and what must be in the round's record".) **No scalar is formed from the three.** $c_{\mathrm{call}}$ above is a price list applied to the
 triple, and prices differ per model and per provider: $p_{\mathrm{hit}}, p_{\mathrm{miss}}, p_{\mathrm{out}}$ are
 properties of a contract, not of the system under test, so a weighted total would rank cells by the rates assumed
 rather than by what ran. A cell that wins on one component and loses on another is a normal outcome, not a tie to be
@@ -237,7 +254,8 @@ with the best hit rate (round `C4`, the full configuration, today's `C2`, 92.6%)
 all three components, and the arm slightly *below* the baseline's rate (round `C2`, then read as TAS alone, today's `C1`, 86.2%)
 carried the smallest. So a report prints $n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}}$ per cell with
 their per-turn and per-step quotients, and treats $h$ as a **mechanism diagnostic** — it answers "did the prefix stay
-stable across steps", which is worth knowing and is not a cost — and never reports it instead of the triple.
+stable across steps", which is worth knowing and is not a cost — and never reports it instead of the triple. $h$ is
+the §6 break-even input below: it is defined once, with the usage fields it is read from, in `docs/CELLS-RUN.md`.
 
 $C_{\mathrm{S1}}$ is a line of its own, with its call count, and it is compared in tokens, never in currency. The
 claim that a cheap System-1 saves an expensive LLM has to carry the System-1 lane's own usage: last round the lane
@@ -295,32 +313,22 @@ a total that is then compared across cells.
 
 `scripts/cell-report.mjs` is committed and validates against round `20261001-1300` exactly. It reads a finished
 run's own evidence — `evidence/<cell>/control.jsonl`, `home/<cell>/sessions/**/session.v4.jsonl.zstd`, and
-`home/<cell>/.s1cap/rg/*.json` — and prints the metrics above **per cell, per turn and per step**: time (turns,
-steps, LLM calls, System-1 calls, other tool calls; LLM time, System-1 time, other tool time, with the step and turn
-frames printed beside them so the residual is visible instead of assumed), cost (cached-hit input tokens, uncached
-input tokens, output tokens, plus the System-1 lane's own tokens **split into input — the priced quantity — and
-output, which the cost model prices at zero**) and completion (benchmark-only — the current
-stimulus completes in every cell, and the report prints that as one constant column rather than a per-turn table of
-the same value). The cache hit rate appears once, under mechanism diagnostics, never in the cost table:
+`home/<cell>/.s1cap/rg/*.json` — and prints the metrics defined above **per cell, per turn and per step**. Which
+rows it prints, how it is invoked and how it reconciles them are the script's own (`METRICS`, its usage block and
+its `--self-test`); what this document owns is the definition those rows implement. The row labels a reader of this
+section will see in its output: `cached-hit input tokens`, `uncached input tokens`, `output tokens`, and the
+System-1 lane's two rows — `System-1 lane input tokens (the priced quantity)` and `System-1 lane output tokens
+(free under the cost model)`.
 
-```
-node scripts/cell-report.mjs --run <dir> --cells C0,C1,C2 --out <dir> --format all
-```
+Three reading rules the numbers cannot state for themselves, each of which a round's record keeps so the next
+reader does not re-derive it:
 
-A run recorded under the old labels is reported with `--cells C1,C2,C4` plus `--label C1=baseline,C2=TAS,C4=full`
-for the display labels that round used. **Those arguments are the historical round's labels — round
-`20261001-1300` only; the current scheme is `C0`, `C1` and `C2`, which is what the `--cells C0,C1,C2` line above
-reads.** The correspondence between those labels and today's cells is the mapping note at the head of this
-section, which is exactly why it matters. Three facts the generator had to handle, each of which belongs in the
-record so the next reader does not re-derive it:
-
-- **System-1 calls do not align to steps.** Association-graph upkeep ticks off the step clock, so calls are
-  attributed by timestamp into a step window, then a turn window, and the remainder is printed as its own rows. In
-  the baseline arm of round `20261001-1300` (round `C1`, today's `C0`) only **179 of 363** calls fell inside a step
-  window — 48 between steps of a turn, 108 between turns, 28 after the last `turn/end` — so a per-step-only table
-  would have dropped the other **184**, just over half of that arm's calls, while its total still read 363.
-- **System-1 time is concurrent, not additive.** In the full configuration (round `C4`, today's `C2`) turn 3 sums
-  **10 633 810 ms** of lane time inside a turn of **1 306 265 ms**, so it must never be added to LLM time.
+- **System-1 calls do not align to steps.** Upkeep ticks off the step clock, so calls are attributed by timestamp
+  into a step window and then a turn window, and the remainder is printed as its own rows (between steps, between
+  turns, after the last turn). The rows must add up to the cell total: in round `20261001-1300`'s baseline arm only
+  **179 of 363** calls fell inside a step window, and a per-step-only table would have dropped the other **184**.
+- **System-1 time is concurrent, not additive.** It must never be added to LLM time; lane time can exceed the
+  wall-clock width of the turn it sits in.
 - **A lane-absent zero is not a refused zero.** The lane state is read from the plugin's own `kind:"wiring"` record
   on the cell's tape (`<DSH_HOME>/.s1cap/tape.jsonl`), whose `s1` field is literally `"none"` for the Off choice. A
   lane-absent cell prints `0 (no S1 lane)` with coverage *undefined*; a refused lane prints its
@@ -341,7 +349,10 @@ $$
 \frac{\Delta_s}{\Delta_i} > \rho^{*} = \frac{p_{\mathrm{miss}} - p_{\mathrm{hit}}}{h\,p_{\mathrm{hit}} + (1-h)\,p_{\mathrm{miss}}}
 $$
 
-Substituting the `deepseek-flash` peak prices:
+**Derived table — not a price list.** Substituting the `deepseek-flash` **peak** prices of
+[AGENT_BRIEF.md](./AGENT_BRIEF.md) §"Facts the protocol depends on" — the price-anchor row, whose sources are in
+§"Sources" — ($p_{\mathrm{hit}} = 0.006$, $p_{\mathrm{miss}} = 0.30$ per 1M tokens as
+fetched 2026-09-27/28) into the $\rho^{*}$ formula above, computed **2026-09-28**:
 
 | Baseline hit rate $h$ | $\rho^{*}$ (tokens that must be saved per 1 hit token invalidated) |
 |---|---|
@@ -349,6 +360,9 @@ Substituting the `deepseek-flash` peak prices:
 | 0.75 | 3.70 |
 | 0.90 | 8.31 |
 | 1.00 | 49.0 |
+
+The inputs are that price-anchor row's and the arithmetic is this table's; a price change re-derives it rather than
+editing it, and the row worth quoting is whichever $\rho^{*}$ matches the $h$ a run measured.
 
 **Interpretation**: the higher the hit rate, the steeper the reorder cost (as $h \to 1$, 49 tokens must be saved per 1 invalidated token to break even) — this is exactly why H3 must be measured per call and why `updatePolicy` must be adjustable, and it is also the axis of the paper's conditional conclusion.
 
@@ -363,7 +377,8 @@ prompts *we actually send*, so three consequences follow:
 2. The hit rate does not depend on "subset or not" but on **selection stability**: if the assembled prefix
    repeats, the cache hits; if recall churns, it does not.
 3. A smaller prompt is **miss insurance**: when a miss does happen, the miss bill is proportional to what we
-   sent (100k all-miss = \$0.030 vs 40k all-miss = \$0.012 at `deepseek-flash` peak prices).
+   sent — twice the prompt, twice the all-miss bill at any price list, which is the whole content of the rule
+   (the currency figures are the brief's price-anchor row applied to $n_{\mathrm{miss}}$, and are not restated here).
 
 **Positional + amortized test.** Cutting $R$ tokens at a point with $A$ tokens after it, of which a fraction
 $h$ were hits, and with $n$ calls left in the task, costs the suffix one re-prefill and saves on every
@@ -376,7 +391,9 @@ $$
 $$
 
 The left-hand ratio counts removed tokens per invalidated **hit** token, i.e. the same unit as $\rho^{*}$
-(`packages/core/src/cache-policy.ts`, `decideReselect`). With $h = 0.75$ ($\rho^{*} = 3.70$):
+(`packages/core/src/cache-policy.ts`, `decideReselect`). **Derived table:** at $h = 0.75$, whose $\rho^{*} = 3.70$
+is the row above, also computed 2026-09-28 from the brief's price-anchor row — the case rows are inputs chosen to
+show the test's direction, and the test itself is the inequality, not the table:
 
 | cut $R$ | tokens after cut $A$ | calls left $n$ | $R/(hA)$ | required $\rho^{*}/n$ | decision |
 |---|---|---|---|---|---|
@@ -401,14 +418,17 @@ The left-hand ratio counts removed tokens per invalidated **hit** token, i.e. th
 - Never let per-turn metadata (timestamps, turn ids, cache flags) into the prefix.
 - Measure $h$ per call (already in `llm_call` telemetry) and apply the test above with the measured $h$:
   the `C0`-vs-`C2` comparison — baseline against the full configuration, the same pair §8's registered test is
-  stated over, and the pair round `20261001-1300` recorded under the labels `C1` vs `C4` (see the mapping note in
-  §5.1) — is the **design contrast** and isolates selection's cache effect, which is H3. It is also the only
+  stated over, and the pair round `20261001-1300` recorded under the labels `C1` vs `C4` (per that round's own
+  record; the label mapping is the note at the head of §5.1) — is the **design contrast** and isolates selection's
+  cache effect, which is H3. It is also the only
   contrast the selection claim has left, now that the recall-only arm is dropped and H1 is folded into H3
-  (AGENT_BRIEF §9.3): the same comparison answers both, and the two cannot be separated afterwards.
+  (the success rule and the H1-into-H3 fold are `AGENT_BRIEF.md` §"Metrics, hypotheses, success rule"): the same
+  comparison answers both, and the two cannot be separated afterwards.
   **`C1` is not that contrast and cannot be**: since 2026-10-02 it is a second control arm that delivers nothing —
   its `deliver` was `true` and structurally could never fire, because delivery inserts the `recalled` block and
-  nothing else while `tier1: 'off'` makes that block empty by construction (`docs/CELLS-RUN.md` carries the
-  measurement from both recorded rounds) — so its model-visible input is the baseline's and a `C1`-vs-`C2`
+  nothing else while `tier1: 'off'` makes that block empty by construction (the two rounds that measured it, and
+  the model-level statement of it, are in `docs/CELLS-RUN.md` "The arms, and what the contrast is") — so its
+  model-visible input is the baseline's and a `C1`-vs-`C2`
   difference would not be an arm's effect. And what `C0`-vs-`C2` measures **today** is the recall lane: TAS's
   ordering reaches the model only through the model-view write-back, which does not exist yet
   (`docs/ARCHITECTURE.md`, `packages/proxy`) and is a separate project.
@@ -430,8 +450,9 @@ report; it is printed as its own column (see §5.1).
 
 ## 8. Statistical protocol (pre-registered)
 
-The full configuration is now `C2` and the baseline `C0` (see the mapping note in §5.1: round `20261001-1300`
-called them `C4` and `C1`). The protocol below — the **registered rule** — is stated in today's names; the test and
+The full configuration is now `C2` and the baseline `C0` (round `20261001-1300` called them `C4` and `C1`; the
+label mapping is the note at the head of §5.1). The protocol below — the **registered rule** — is stated in today's
+names; the test and
 the margin are unchanged. It needs no re-registration from the 2026-10-02 relabelling of `C1`: this protocol was
 already stated over `C2` vs `C0`, and `C1` — a control arm that delivers nothing — is not part of the test (§6.1
 says why it cannot be, and what the `C2`-vs-`C0` pair therefore measures while the ordering stays unrouted).
@@ -459,107 +480,37 @@ $$
 
 **Success criterion (overall)**: completion rate non-inferior **and** cost or time improved by ≥10% (CI excluding 0).
 
-#### 8.1 The tool, and what it refuses
+#### 8.1 The tool, and the three facts of the protocol a reader of §8 needs
 
-`scripts/paired-stats.mjs` is the implementation of the four rules above. It is dependency-free, it is the
-analysis script this section says is frozen before the full run, and it exists because until it did the protocol
-was words: a grep for `McNemar|bootstrap|Holm` across `scripts/*.mjs`, `packages/*/src/*.ts` and `docs/*.md`
-returned documentation and no code, so no round could be declared a *result* by the committed tooling
-(`.s1cap-ablation/s1cap-audit-lane.md` finding F7; `DEFECT-GATE.md` item F7).
+`scripts/paired-stats.mjs` is the implementation of the four rules above: dependency-free, frozen before the full
+run, and checked against hand-computed cases by its own `--self-test`. **What it does, what its input must look
+like, and every status it can refuse are documented in its own header** — the document that moves when the code
+moves. Three facts belong to the protocol rather than to the tool:
 
-```
-node scripts/paired-stats.mjs --input <results.json> [--seed 20261002] [--b 10000] [--min-n 20]
-node scripts/paired-stats.mjs --self-test
-```
+- **The pairing unit is the task.** Two arms are compared only over the task keys both ran, and a ragged input is
+  **refused**, never silently contracted, because a paired statistic over different task sets is not a paired
+  statistic. A repeat is a second draw and needs its own key, not an average folded onto the first.
+- **$B$, the seed and the family are parameters that appear in every output**, so a rerun reproduces the numbers
+  and Holm corrects exactly the family the run names — membership is never inferred from which metrics happen to be
+  present. §5.1 forbids collapsing $(n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}})$ into a scalar, so the
+  token triple enters as its own continuous metrics; `cost` is only a name for a total a run chooses to form, with
+  the price list that formed it recorded beside it.
+- **The resolvable difference runs on the discordant pairs, not on the number of tasks.** The sign test sees
+  $b+c$ discordant pairs, so the smallest difference it can resolve is
+  $(z_{1-\alpha/2}+z_{1-\beta})/\sqrt{b+c}$: a power figure quoted for $n$ tasks alone cannot be checked against
+  it, and the `[VERIFY] Power` bullet of `AGENT_BRIEF.md` §"Metrics, hypotheses, success rule" (14–15 pp at
+  $n = 100$) sits at $b+c \approx 373$ — more discordant pairs than that
+  arm has tasks. The tool prints the discordant count it observed beside the interval so the gap is visible.
+  **The registered plan's power note and its per-arm n are not reconciled here**, and that bullet's figure stays
+  unresolved until `bench/stats` records the discordance it assumed.
 
-**The pairing unit is the task, and the pairing is enforced.** Two arms are compared only over task keys both
-arms ran, and the number of pairs used is printed. A ragged input — an arm missing a task another arm has — is
-**refused**, not silently contracted; so is a metric missing from one arm of one task, because a paired
-statistic over different task sets is not a paired statistic. `--allow-drop` narrows the comparison to the
-shared keys and prints exactly which keys it dropped. The input groups the arms of one task under one key
-(`tasks["swe-1001"]["C2"]`) rather than listing per-arm rows, because a flat row list lets the two arms of one
-task land under two keys and the result is two unpaired means that nothing in the output reveals as unpaired.
-A repeat is a second draw and needs its own key (`"swe-1001#r2"`), not an average folded onto this one.
-
-**The seed and B are recorded, so a rerun reproduces the numbers.** The bootstrap resamples tasks (not arms,
-not observations within a task) with a seeded 32-bit mulberry32 generator, $B = 10^4$ by default, and reports
-the interval from type-7 quantiles. Every output prints `B`, the seed, the pair count `n`, the α, the minimum
-n in force and the **explicit family** — the list of comparisons Holm corrected, not an implied one:
-
-```
-  family (stated, not implied)
-    primary                 : solved (binary, McNemar; non-inferiority margin 0.02)
-    secondary family        : cost, timeMs, steps  →  K = 3
-    correction              : Holm step-down, applied to the secondary family as one family
-  reproducibility
-    bootstrap B             : 10000
-    seed                    : 20261002   (generator: mulberry32; resampled unit: the task)
-    minimum paired n        : 20   (parameter --min-n; the registered plan fixes none)
-```
-
-A margin of 0.02 is `--method asymptotic` (§9.3's margin is a shifted test, not §8's zero-margin sign test);
-run with the default `--method exact` and the tool refuses the combination rather than substituting one test
-for the other. The secondary family is whatever the run names in `family`, and the correction above is unchanged
-by its size: §8 registers $K=2$ (cost, time), which is the family this protocol corrects by default. §5.1
-forbids collapsing $(n_{\mathrm{miss}}, n_{\mathrm{hit}}, n_{\mathrm{out}})$ into a scalar, so the token triple
-enters as **its own continuous metrics** rather than as one cost total — the tokens *are* the registered
-secondary quantities, and `cost` above is only a name for a total a run chooses to form, with the price list
-that formed it recorded beside it. A run that registers the token triple as well as cost and time states a
-family of $K \ge 2$, and the tool corrects exactly the family it prints and no more: membership is never
-inferred from which metrics happen to be present in the file.
-
-**What it refuses, and why the refusal is the point.** The optimization loop of
-[AGENT_BRIEF.md](./AGENT_BRIEF.md) §9.7 draws **one** task at a time. One task gives the bootstrap nothing to
-resample — every resample is that same task, so the percentile interval has zero width and the achieved
-p-value is 0 or 1 — and gives McNemar no discordant structure. Both come out *degenerate*, and a degenerate
-interval is indistinguishable in a table from a precise one. The tool therefore reports one of three statuses
-rather than a number:
-
-| status | when | what is printed |
-|---|---|---|
-| `ok` | every arm on the same task keys, every metric complete, and `n ≥ --min-n` | the p-values, intervals, the Holm family and the success flag |
-| `refused: insufficient-pairing` | an arm is missing a task another arm has, or a metric is missing from one arm of one task | what is missing, for which key and which arm, and what the input needs — no p-value, no interval, no success flag |
-| `refused: insufficient-n` | fewer than `--min-n` paired tasks | the count it has, the minimum it needs, where that minimum comes from, and why one task is not enough |
-
-**The minimum n is an explicit parameter, because the registered plan does not fix one.** §8 above states the
-test, the margin, B and α and no per-arm n; `AGENT_BRIEF.md` §9.1 states the *grid's* per-arm n (SWE-bench
-Verified 100, Terminal-Bench 66, tau2 full `base` split) and §9.3 defers the power analysis to `bench/stats` as
-a `[VERIFY]`; §9.6 prices ~446 episodes per arm. Three numbers are therefore in play, and the tool prints the
-one in force with its provenance rather than assuming one:
-
-- **the default, 20** — the parameter `--min-n`, recorded in every output. It is a floor on computability and
-  elementary resolution, not a power guarantee.
-- **6, the exact test's own floor** — the exact two-sided p-value is $2\cdot 2^{-(b+c)}$, so $b+c \ge 6$ is
-  required for $p \le 0.05$ at all, even with every discordant pair on one side. No paired run of five tasks
-  can reject at the registered α whatever it observes.
-- **what an arm's own n resolves is not a single number, and the tool does not print one.** The sign test runs
-  on the *discordant* pairs $b+c$, so the resolvable difference is $(z_{1-\alpha/2} + z_{1-\beta})/\sqrt{b+c}$
-  = 2.80 pp × 100/√(b+c). At n = 100 tasks with the discordance a solve-rate change actually produces, that is
-  tens of percentage points — 28 pp if all 100 tasks were discordant, 56 pp at 25 % discordance — whereas
-  §9.3's power note quotes 14–15 pp for that arm, which $\sqrt{b+c}$ places at $b+c \approx 373$: more
-  discordant pairs than the arm has tasks. Every output therefore prints the discordant count it observed and
-  the sensitivity that count buys, so the gap between the note and the data is visible instead of being
-  averaged into a figure nobody can check. **The registered plan's power note and its per-arm n are not
-  reconciled here, and §9.3's figure should be treated as unresolved until `bench/stats` records the
-  discordance it assumed.**
-
-**Standing rule: frozen and committed before the full run, not tuned afterwards.** This is §9.4's
-pre-registration and it applies to this file: the analysis is fixed in a commit that precedes the first full
-registered run, and a run's numbers are read with the revision of `scripts/paired-stats.mjs` that produced
-them. Changing a test, a margin, α, the seed, B, the minimum n or the membership of the family after seeing
-results is a new registration and invalidates the round it was applied to retroactively — which is why all of
-them are parameters that appear in the tool's own output rather than constants inside it, and why `--self-test`
-exists: a protocol whose implementation cannot be checked against hand-computed cases is a protocol that is
-one edit away from being unverifiable.
-
-**Not implemented, and stated rather than approximated.** Non-inferiority at a nonzero margin $\delta$ is
-tested by the asymptotic shifted statistic $z = (\hat\Delta + \delta)\sqrt{b+c}$; §8's *exact* route for it is an
-inversion of the binomial test on $b/(b+c)$, which is not registered here and is therefore not computed.
-`--method exact` with a nonzero margin refuses rather than quietly substituting a different test. The
-bootstrap's p-value is the achieved level read off the resample distribution, not a registered statistic: it
-exists so Holm has a number to order, and §8's secondary criterion is the interval against the −10 % line. An
-achieved p of `0.000000` at $B = 10^4$ means *no resample crossed zero* — a lower bound of $1/B$, not a
-p-value of zero.
+One caveat that is a property of the protocol rather than of the tool: **non-inferiority at a nonzero margin**
+$\delta$ is tested by the asymptotic shifted statistic $z = (\hat\Delta + \delta)\sqrt{b+c}$; the *exact* route is
+an inversion of the binomial test on $b/(b+c)$, which is not registered here and is therefore not computed, so
+`--method exact` with a nonzero margin refuses rather than substituting a different test. The bootstrap's p-value
+is the achieved level read off the resample distribution, not a registered statistic — it exists so Holm has a
+number to order, and an achieved `0.000000` at $B = 10^4$ means *no resample crossed zero*, a lower bound of
+$1/B$ rather than a p-value of zero.
 
 #### 8.2 What a round still has to supply
 
@@ -582,7 +533,7 @@ artifacts; that gap is in the run set's court, not this tool's.
 
 ---
 
-*Citations and fact verification in [RELATED_WORK.md](./RELATED_WORK.md); implementation spec in [AGENT_BRIEF.md](./AGENT_BRIEF.md). Changes to parameter default values must be synced with the AGENT_BRIEF §4 configuration table.*
+*Citations and fact verification in [RELATED_WORK.md](./RELATED_WORK.md); implementation spec in [AGENT_BRIEF.md](./AGENT_BRIEF.md). **This document owns formulas and definitions, not parameter values:** every knob named here takes its default from `defaultPolicy()` and the cell presets (`packages/core/src/types.ts`, `bench/cells/*.json`), and a run's values from its own `kind:"wiring"` record. A value quoted in prose below is an input to a computation, dated and attributed — never a copy to be kept in sync, and never corrected here when the code and the prose disagree: the code wins and the prose is pointed at it.*
 
 ## Recall window w (`recall.window`)
 
@@ -592,15 +543,17 @@ graph itself stays unbounded: segments that fall out of the window keep every ed
 reachable by the bounded BFS (`recall.depth = d`, `recall.threshold = r`). **w decides whether a pair is scored;
 it never decides what exists in the graph.**
 
-Cost per new segment, with `t` segments already in the graph:
+Cost per new segment, with `t` segments already in the graph — **the table is the formula, stated as a table**:
 
 | strategy | pairs scored for segment `t+1` | total after `T` segments |
 | --- | --- | --- |
 | full history | `t` — grows without bound | `T(T-1)/2` = Theta(T^2) |
 | windowed (this design) | `min(t, w)` — bounded by `w` | `T*w - w(w-1)/2` = Theta(T*w) |
 
-At `T = 4096`, `w = 1024`: full history scores **8,386,560** pairs, the window scores **3,670,528**, and — the
-part that matters for a long session — the window's *per-segment* cost never exceeds 1024 no matter how long the
+**Derived figures:** at `T = 4096` and `w = 1024` — the code's own default for `recall.window`
+(`defaultPolicy()`), whose lower bound is a `NUMBER_RULES` entry in `packages/core/src/config.ts` — full history
+scores **8,386,560** pairs and the window scores **3,670,528** (rows of the table above, 2026-09-28), and — the
+part that matters for a long session — the window's *per-segment* cost never exceeds `w` no matter how long the
 conversation runs, while the full-history cost keeps climbing. This is the S1 call saving the window exists for;
 it is not a recall parameter.
 
@@ -618,31 +571,29 @@ there), so a run that lowers `w` must carry `fallback`, `unknownAdmitted` and `r
 
 > **Where those three are carried, and how a report reads them (2026-10-02).** `recallTree` is written on every
 > assembly record and `fallback` / `unknownAdmitted` when they are defined (`packages/core/src/observer.ts`), and
-> until this date `scripts/cell-report.mjs` read none of them: the word "fallback" appeared in it only in the prose
-> about the local lexical scorer. A run that lowered `w`, or whose recency fallback fired, could therefore not honour
-> this requirement from its own report. The mechanism-diagnostics table now has three rows — `recall block source`
-> (`N backend / M recency-fallback`, with the fallback's kinds), `unjudged pairs admitted ('unknownAdmitted')`, and
-> `recall structure recorded (steps / nodes placed)` — and the same three are rows in the CSV. All three are
-> **three-valued**: a cell whose build did not write the field prints `— (not recorded by this snapshot)`, which is a
-> different statement from "the event did not happen". In round `20261002-2037` the first two are unrecorded (that
-> build wrote neither) and `recallTree` is present on all 277 C2 assemblies, 5 950 nodes placed.
+> until this date `scripts/cell-report.mjs` read none of them, so a run that lowered `w` could not honour this
+> requirement from its own report. The mechanism-diagnostics table now carries all three — `recall block source`,
+> `unjudged pairs admitted ('unknownAdmitted')`, `recall structure recorded (steps / nodes placed)` — in the
+> markdown and in the CSV, and all three are **three-valued**: a cell whose build did not write the field prints
+> `— (not recorded by this snapshot)`, a different statement from "the event did not happen".
 >
 > Why it matters for `w`: the recency fallback **replaces the System-1 selection with the last-N window**, so
 > without it in the report `selected` / `candidates` cannot be read as evidence about the *selector* — "recall
-> selected nothing" and "recall was overridden" are different facts about the same count.
+> selected nothing" and "recall was overridden" are different facts about the same count. (Row labels and the
+> round `20261002-2037` readings: `scripts/cell-report.mjs` and that round's record.)
 
 Measured offline in `packages/core/test/window.test.ts` (`w = 64`, 400 segments): `scoredPairs` stays within
 `total * w` and strictly below full pairwise scoring, the first segment still holds its edges after leaving the
 window, and **doubling w roughly doubles the cost** — the cost tracks `w`, not the session length.
 
-**Measured in a live round (`20261001-1300`), and the caveat that comes with it: the window did not bind.** The
-four arms of that round offered 6 670 / 4 278 / 3 321 / 22 791 pairs for 116 / 93 / 82 / 214 segments (their
-labels: `C1` / `C2` / `C3` / `C4`, i.e. today's `C0` / `C1` / dropped / `C2` — see the mapping note in §5.1) —
-`T(T-1)/2` to the pair, i.e. the *full-history* row of the table above, because `w = 1024` is larger than any
-session the round produced. Each persisted graph (`<DSH_HOME>/.s1cap/rg/*.json`) held exactly that many **distinct**
-pairs by `from->to`, so no pair was ever scored twice: `scoredPairs` counts offers, `scores` is keyed by pair, and
-one repeated pair would show up as a difference of exactly one. The call count then follows from the pair count and
-not from any redundancy — 22 791 pairs at `s1.questionsPerCall = 20` are the 1 155 calls the full-configuration arm
-(round `C4`, today's `C2`) made. The lever on this cost is `w` (or the cap), never de-duplication: at `w = 64` the
-same 214 segments would offer 11 616 pairs, half of them, in 732 full batches where the unbounded window needs
-1 243.
+**Measured in a live round (`20261001-1300`), and the caveat that comes with it: the window did not bind** — the
+four arms offered exactly `T(T-1)/2` pairs (6 670 / 4 278 / 3 321 / 22 791 for 116 / 93 / 82 / 214 segments,
+labels `C1` / `C2` / `C3` / `C4` — see the label note at the head of §5.1), the *full-history* row of the table
+above,
+because `w = 1024` was larger than any session that round produced. Two things follow, and they are the reason the
+measurement is recorded beside the formula: a repeated pair would show as a difference of exactly one between
+`scoredPairs` and the distinct pairs keyed by `from->to`, and the difference was **zero** in all four arms — so
+`scoredPairs` counts offers and there is no duplicate work to remove, the lever on this cost is `w` (or the
+`s1.questionsPerCall` cap) and never de-duplication; and the call count follows from the pair count
+alone (22 791 pairs at a cap of 20 are the 1 155 calls the full-configuration arm made, where `w = 64` would offer
+11 616, half of them).

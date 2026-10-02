@@ -47,7 +47,7 @@ const source = `/**
  *
  * Why it exists: the settings namespace a panel can write into is the one the exported \`Config\` declares. Without
  * this export the loader has no namespace to validate against, so \`settings/mutate\` answers \`settings/rejected\`
- * with the namespace name and there is nothing for a Save button to write into (docs/STATUS.md rounds 32-40).
+ * with the namespace name and there is nothing for a Save button to write into (docs/STATUS-ARCHIVE.md rounds 32-40).
  *
  * Coverage is the union of the dumped defaults and the keys the test profile patch sets (laya.condaEnv,
  * laya.condaPath, laya.env). An omitted field makes the loader reject the profile's configuration and the plugin then
