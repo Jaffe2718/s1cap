@@ -94,6 +94,7 @@
 
 import { S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
                                                    
+import { createHash } from 'node:crypto';
 
 /** A segment as far as delivery is concerned: id and text for rendering, chunkOf for chunk parents. */                                     
              
@@ -145,6 +146,8 @@ import { S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
                              
                                                         
                                
+                                                                                                
+                                       
      
                                                                                                               
                                                                                                                 
@@ -208,23 +211,56 @@ function isRecord(value         )                                   {
  * unfixable from here — the exact failure a live run measured, where one injection recalled the previous one.
  */
 function payloadIdFor(text        )         {
-  // FNV-1a, 32-bit, hex. Not a security primitive: a digest whose only job is to notice "same text as last
-  // time" without holding a second copy of the text.
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return `${S1CAP_INJECTED_ID_PREFIX}${hash.toString(16).padStart(8, '0')}`;
+  return `${S1CAP_INJECTED_ID_PREFIX}${createHash('sha256').update(text).digest('hex')}`;
 }
 
 function textOf(message         )         {
   if (!isRecord(message)) return '';
   const content = message['content'];
+  if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content
     .map((part) => (isRecord(part) && typeof part['text'] === 'string' ? part['text'] : ''))
     .join('');
+}
+
+/** Read the harness's actual projection, never the append-only log or the inbox.
+ * A missing/throwing API disables visibility-based suppression rather than guessing.
+ */
+export function visibleMessagesOf(payload         )                                 {
+  if (!isRecord(payload) || !isRecord(payload['agent'])) return undefined;
+  const session = payload['agent']['session'];
+  if (!isRecord(session) || typeof session['deriveMessages'] !== 'function') return undefined;
+  try {
+    const messages          = session['deriveMessages']();
+    return Array.isArray(messages) ? messages : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Exact-content evidence shared by scoring admission and delta delivery. */
+export function contextVisibility(messages                    )   
+                                                        
+                                        
+  {
+  const byId = new Map                ();
+  const injections           = [];
+  for (const message of messages) {
+    if (!isRecord(message) || typeof message['id'] !== 'string') continue;
+    const id = message['id'];
+    const text = textOf(message);
+    byId.set(id, text);
+    if (id.startsWith(S1CAP_INJECTED_ID_PREFIX)) injections.push(text);
+  }
+  return {
+    containsSegment(segment) {
+      const original = byId.get(segment.chunkOf ?? segment.id);
+      return (segment.text !== '' && original?.includes(segment.text) === true) ||
+        injections.some((text) => text.includes(renderSegment(segment)));
+    },
+    containsTrace: (trace) => trace !== '' && injections.some((text) => text.includes(trace)),
+  };
 }
 
 function renderSegment(seg                    )         {
@@ -325,7 +361,7 @@ export function deliverContext(input                      )                     
     }
   }
 
-  // Two kinds of block now go into the one inserted message, and the state proxy is first.
+  // Two kinds of block go into one message, in their recorded relative order.
   //
   // **This paragraph used to argue the opposite, and the argument was wrong.** It read: T is a summary S1CAP writes,
   // so delivering it would put S1CAP's own text into the model's context, "the same category as the prose that was
@@ -339,11 +375,9 @@ export function deliverContext(input                      )                     
   // wrote about the model. Consequence, and it is the whole point of the change: until this line changed, C0, C1 and
   // C2 all presented the *same* value of the variable the paper's headline result is about.
   //
-  // **`T` first, and not because `order` says so.** The paper's contrast is about `T`'s position relative to the
-  // long context, and the long context here is the `recalled` block — so `T` goes before it, whatever the layout
-  // order happens to be. `order` is walked only for `recalled`: depending on the assembler's own slot name for `T`
-  // would couple delivery to a token this module does not own, and would fail *silently* — an empty delivered list
-  // is a valid answer — if that token were ever renamed.
+  // T follows its slot when one is present. Forcing it first would erase the
+  // Trace Append control. This governs only the inserted blocks, never the
+  // position of the harness's original history or current question.
   //
   // `T` alone is a delivery. A cell with `tas.on` and an empty selection (`recall.tier1: 'off'`) used to have
   // nothing to insert at all; it now has exactly the thing the method is about, and the block count on the record
@@ -352,23 +386,32 @@ export function deliverContext(input                      )                     
   const proxy = renderStateProxy(typeof input.stateProxy === 'string' ? input.stateProxy : '');
   const parts           = [];
   const blocks           = [];
-  if (proxy !== '') {
-    parts.push(proxy);
-    blocks.push('stateProxy');
-  }
-  for (const block of input.order) {
-    if (block === 'recalled') {
+  const visibility = contextVisibility(input.visibleMessages === undefined ? [] : [...input.visibleMessages, ...input.messages]);
+  const emitted = new Set        ();
+  // Legacy callers may supply T without naming its slot. Otherwise follow the
+  // assembler's trace-placement order, including the Trace Append control.
+  const order = input.order.includes('stateProxy') ? input.order : ['stateProxy', ...input.order];
+  for (const block of order) {
+    if (block === 'stateProxy' && proxy !== '' && !emitted.has(proxy) &&
+        !visibility.containsTrace(proxy)) {
+      parts.push(proxy);
+      blocks.push('stateProxy');
+      emitted.add(proxy);
+    } else if (block === 'recalled') {
       for (const seg of input.recalled) {
-        parts.push(renderSegment(seg));
+        const rendered = renderSegment(seg);
+        if (emitted.has(rendered)) continue;
+        if (visibility.containsSegment(seg)) continue;
+        parts.push(rendered);
         blocks.push('recalled');
+        emitted.add(rendered);
       }
     }
   }
   if (parts.length === 0) {
-    // Nothing selected and no `T` to send. Delivering an empty block would cost tokens on every step of every turn
-    // and tell the model nothing, so the step is left exactly as the harness built it. The reason is kept
-    // character-for-character: `cell-report.mjs` and the refusal counts are read through this string.
-    return NOT_DELIVERED('nothing to insert: relevance selected no turns');
+    // Either nothing was selected or every selected block remains visible.
+    // In both cases an empty injection carries no information.
+    return NOT_DELIVERED('nothing to insert: no missing trace or recalled turns on the visible surface');
   }
 
   // No preamble, no explanation, no instruction. What the model reads is `T` inside the paper's delimiters and

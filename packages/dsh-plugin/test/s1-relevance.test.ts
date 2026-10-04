@@ -25,6 +25,20 @@ function segment(id: string, text: string): Segment {
 const current = segment('s1', 'the current task is to plot a distribution');
 const candidates = [segment('h1', 'read the csv schema'), segment('h2', 'unrelated weather note')];
 
+test('concurrent rows carry their own session attribution across awaits', async () => {
+  const seen: string[] = [];
+  const relevance = createS1Relevance({ decide: async (_state, questions, context) => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    seen.push(context?.sessionId ?? 'missing');
+    return { answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { noul: 0.8 }])) };
+  } });
+  await Promise.all([
+    relevance({ ...current, sessionId: 'left' }, candidates),
+    relevance({ ...current, sessionId: 'right' }, candidates),
+  ]);
+  assert.deepEqual(seen.sort(), ['left', 'right']);
+});
+
 /**
  * Answers whatever it is asked, with a weight derived from the candidate's own text, so a test can tell *which*
  * candidate a weight belongs to instead of trusting the position of a question id inside a retried request.
@@ -640,4 +654,3 @@ test('a growing session costs the new pairs and nothing else, so the call count 
     'the questions sent are the pair count: batching saves round trips and not questions',
   );
 });
-

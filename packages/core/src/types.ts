@@ -749,9 +749,8 @@ export interface AssemblyResult {
     selected: number;
     bfsDepth: number;
     /**
-     * Recall hits dropped because another chunk of the same passage (`chunkOf` parent) was already selected.
-     * Non-zero means the segment pool holds overlapping chunks of long events, which is normal, and the selection is
-     * over distinct passages instead of paying twice for the overlap between two halves of one.
+     * Recall hits whose complete text was already contained in a selected sibling
+     * of the same passage. Distinct sibling chunks are retained.
      */
     droppedSiblings?: number;
   };

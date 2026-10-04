@@ -4,6 +4,11 @@
 
 ![status](https://img.shields.io/badge/status-M1%20observation-blue) ![node](https://img.shields.io/badge/node-%3E%3D22.19-green) ![license](https://img.shields.io/badge/license-TBD-lightgrey)
 
+**Implementation update:** context delivery now restores only content missing from the actual DSH model-visible
+surface, and fully visible history skips recall scoring. Demand scoring uses bounded concurrency and reuses paid
+pairs across window changes. See [the optimization report](docs/OPTIMIZATION-20261004.md) for correctness fixes,
+reproducible offline measurements, and limitations; the older progress notes below describe earlier implementations.
+
 **S1CAP: Context-Aware Planning via System-1 Models for Efficient LLM Agents**
 
 **Authors:** Yuanming Chen · LI Changzhe

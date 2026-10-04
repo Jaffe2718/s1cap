@@ -38,7 +38,7 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
                                                           
 import { ControlPlaneLog, createRgFileStore } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.js';
-import { deliverContext } from './context-delivery.js';
+import { deliverContext, visibleMessagesOf } from './context-delivery.js';
                                                                    
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -709,7 +709,8 @@ function readPayloadSessionId(payload         )         {
                                                                                                                
                                                                                                   
      
-                                                                                                                    
+                                                                                            
+                                                                 
                                     
                                     
  
@@ -732,7 +733,8 @@ export function preStepMiddleware(
   const observer                           =
     optionsOrObserver !== undefined && 'observe' in optionsOrObserver ? optionsOrObserver : options?.observer;
   /**
-   * What this middleware has already delivered, per session, by payload digest.
+   * Legacy fallback for hosts without Session.deriveMessages(). Real sessions use
+   * the current visible surface, so a removed injection can be delivered again.
    *
    * The duplicate guard, and the reason it is here rather than only in `deliverContext`: that module's check scans
    * `decision.messages` for the text of the previous injection, on the premise that "the previous injection is
@@ -908,10 +910,14 @@ export function preStepMiddleware(
     // the counter across the call is what turns three identical records into three legible ones, and an undefined
     // observer leaves it at zero, which is the correct answer for "nothing read this step".
     const ingestOnlyBefore = observer?.stats().ingestOnly ?? 0;
+    const visibleMessages = visibleMessagesOf(payload);
     try {
       // Segment, recall and assemble for real, and record the result in the control plane. `observe()` never
       // throws, and neither does this catch: a failed observation costs the record, never the step.
-      observation = await observer?.observe(payload, { assemble: deliverable });
+      observation = await observer?.observe(payload, {
+        assemble: deliverable,
+        ...(visibleMessages === undefined ? {} : { visibleMessages: [...visibleMessages, ...stepMessages] }),
+      });
     } catch (err) {
       ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
     }
@@ -949,7 +955,10 @@ export function preStepMiddleware(
     // broken round.
     if (options === undefined || observation === undefined) return decision;
     try {
-      const result = options.deliver(observation, decision                           , payload);
+      // Re-read after the observation's awaits: a concurrent compaction may have
+      // replaced the surface used for the scoring-admission check.
+      const deliveryVisibleMessages = visibleMessagesOf(payload);
+      const result = options.deliver(observation, decision                           , payload, deliveryVisibleMessages);
       if (!result.delivered || result.messages === null) {
         // `assembled: true`, because it did: reaching this line means the walk ran, and the reason says only why
         // the *delivery* was declined. Three states produce `delivered: false` and this flag is what separates
@@ -963,7 +972,10 @@ export function preStepMiddleware(
       // the text so a *different* layout with the same digest is still recognised, and the empty payloadId - which
       // is what a refusal leaves behind, and a delivery never does - is not allowed to mark a session as seen.
       const payloadId = result.payloadId;
-      if (payloadId !== '') {
+      // A lifetime digest is not proof of current visibility after compaction.
+      // Real sessions use the projected surface; retain the legacy guard only
+      // for hosts that do not expose it.
+      if (payloadId !== '' && deliveryVisibleMessages === undefined) {
         const sessionKey = readPayloadSessionId(payload);
         const seen = deliveredPayloads.get(sessionKey) ?? new Set        ();
         if (seen.has(payloadId)) {
@@ -1187,10 +1199,6 @@ function applyInner(ctx               , raw                             )       
   let sessionLines = 0;
   let s1CallRecords = 0;
   let s1CallFailures = 0;
-  // The session the current System-1 call belongs to. Upkeep scores one session's events at a time and awaits
-  // inside that work, so a scope variable set by the delegate that starts the call is read back by the record
-  // the call produces; the alternative was threading an id through three layers of scorer that have no use for it.
-  let s1SessionScope = 'unassigned';
   /**
    * The control log, hoisted out of the observation branch. `preStepMiddleware` is registered after that block
    * and has to write delivery records, and a block-scoped const would simply not be visible there — the same
@@ -1460,7 +1468,8 @@ function applyInner(ctx               , raw                             )       
       },
     });
     relevance = createS1Relevance({
-      decide: async (state, questions) => {
+      decide: async (state, questions, context) => {
+        const sessionId = context?.sessionId ?? 'unassigned';
         // No client means no backend to ask, and that is a *state*, not a saturated backend: `undefined` keeps the
         // documented behaviour for it (score this window lexically, once, and move on) rather than deferring a
         // window that has nothing to wait for. Nothing is acquired on this path either - there is no endpoint whose
@@ -1469,7 +1478,7 @@ function applyInner(ctx               , raw                             )       
         const count = Object.keys(questions).length;
         try {
           const result = await client.decide(state, questions);
-          recordS1Call('assoc', 'noul', count, result, s1SessionScope);
+          recordS1Call('assoc', 'noul', count, result, sessionId);
           return result;
         } catch (err) {
           // Recorded, then **rethrown**. Returning `undefined` here looked like the same thing - the scorer below
@@ -1478,7 +1487,7 @@ function applyInner(ctx               , raw                             )       
           // the `S1TimeoutError` that actually happened, so the one line a human reads named the wrong failure.
           // A cancelled caller is reported as a cancellation and is not a reason to re-score lexically; the
           // scorer treats it the same way only because a cancelled batch has no answer to keep.
-          recordS1Failure('assoc', 'noul', count, err, s1SessionScope);
+          recordS1Failure('assoc', 'noul', count, err, sessionId);
           throw err;
         }
       },
@@ -1510,8 +1519,7 @@ function applyInner(ctx               , raw                             )       
       // scoring the previous process had already bought.
       rgStore,
       scoreBatch: (state, candidates) => {
-        // The candidates are segments, and segments know their session; the scoring that follows is theirs.
-        s1SessionScope = candidates[0]?.sessionId ?? s1SessionScope;
+        // Session attribution travels with each request, including retries and concurrent rows.
         // `relevance` **is** the scorer: `createS1Relevance` returns the batch function itself and hangs `stats`
         // off it (`s1-relevance.ts`: `const relevance = scoreBatch as S1Relevance`). Calling `relevance.scoreBatch`
         // therefore threw `not a function` on every segment, the upkeep catch swallowed it, and the session
@@ -1946,8 +1954,9 @@ function applyInner(ctx               , raw                             )       
       // Nothing in this repository sets it to `'every-step'`: no cell, no preset, no profile. A round flips it in
       // one profile patch, which is what makes the flip one variable.
       assemblyTrigger: config.assemblyTrigger,
-      deliver: (built, decision, payload) =>
+      deliver: (built, decision, payload, visibleMessages) =>
         deliverContext({
+          visibleMessages,
           enabled: config.deliver,
           trigger: config.assemblyTrigger,
           order: built.layout.order,

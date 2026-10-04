@@ -575,6 +575,7 @@ test('the assembly record carries the fail-open admission count, and omits it wh
   // The fixture is `core.test.ts`'s fail-open pair, driven through `observeStep` instead of `assemble`: a window
   // whose only pair the backend never judged, so recall finds no edge and the fail-open rule is what fills the block.
   const policy = cellPolicyOf('C2');
+  policy.tail.k = 0; // Keep the old user turn recallable; pinned content is never admitted.
   const graph = new AssociationGraph();
   const observation = await observeStep({
     ...BASE,
@@ -594,11 +595,11 @@ test('the assembly record carries the fail-open admission count, and omits it wh
   if (observation.kind !== 'assembled') return;
 
   assert.equal(observation.event.candidates, 0, 'sanity: no edge cleared the threshold, so the walk found nothing');
-  assert.equal(observation.event.selected, 2, 'and both unjudged segments were admitted rather than left out');
+  assert.equal(observation.event.selected, 1, 'the old turn is admitted, and the pinned prefix is excluded');
   assert.equal(observation.event.fallback, undefined, 'not by the recency window: the fail-open rule suppressed it');
   assert.equal(
     observation.event.unknownAdmitted,
-    2,
+    1,
     'the admission is on the record, which is what makes the block explainable after the round',
   );
 
@@ -611,6 +612,7 @@ test('the assembly record carries the fail-open admission count, and omits it wh
   // them, so a history turn with three short turns after it is the one that is left for the walk - with fewer,
   // everything in front of the anchor is "recent" and `selected` is 0.
   const judgedGraph = new AssociationGraph();
+  policy.tail.k = 3;
   const judged = await observeStep({
     ...BASE,
     policy,
@@ -915,4 +917,3 @@ test('a step whose newest event is the user\'s own question is still anchored th
   assert.ok(!obs.selectedIds.includes('q2'), 'the anchor is not also offered back as a recalled earlier turn');
   assert.ok(!obs.layout.tail.some((seg) => seg.id === 'q2'), 'nor as one of the k most recent turns');
 });
-

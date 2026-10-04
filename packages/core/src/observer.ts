@@ -128,10 +128,9 @@ export interface ObserveStepInput {
    * The order the recalled block was left in by this session's previous step, held by the caller for the same
    * reason `proxyCache` is and **mutated in place by `assemble()`** (see `AssembleInput.recallOrder`).
    *
-   * It is per **session** and not one slot per observer, which is the one place this differs from `proxyCache`: a
-   * T memo keyed on the task segment cannot be reused by another session (the id differs), while a block order is a
-   * list of ids and nothing in it says which session it came from. A caller holding two sessions at once therefore
-   * holds two of these, and the graph's own per-session map (`step-observer.ts`) is where they live.
+   * Like `proxyCache`, it belongs to one session. Forked sessions can share event
+   * ids, so an id alone is not a safe cache key across sessions. The plugin holds
+   * separate caches for both values alongside its per-session graph map.
    *
    * Its absence is supported and costs one step of ordering stability, never a different selection: without it the
    * block falls back to the deterministic order this build used before the ordering existed.
@@ -541,9 +540,12 @@ export async function observeStep(
   // `taskSegment` rather than on the recall anchor on purpose — a moving key would rebuild T on every step and
   // quietly turn the default `perTask` policy into a per-step one.
   const proxyCache = input.proxyCache ?? { id: '', text: '' };
+  // An opening question has no subsequent trace. Do not freeze that absence:
+  // perTask freezes the first nonempty trace once the model has produced it.
   // `perTask` reuses the memo across the steps of one task; `perTurn` rebuilds every step, which is what that
   // policy means and is not free.
-  const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === taskSegment.id;
+  const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === taskSegment.id &&
+    proxyCache.text !== '';
   const proxyText = reuseProxy
     ? proxyCache.text
     : buildStateProxy({

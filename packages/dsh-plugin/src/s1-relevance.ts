@@ -235,11 +235,11 @@ function isRetryable(err: unknown): boolean {
 }
 
 export interface S1RelevanceOptions {
-  decide(state: unknown, questions: Record<string, ReturnType<typeof noul>>): Promise<{
+  decide(state: unknown, questions: Record<string, ReturnType<typeof noul>>, context?: { sessionId: string }): Promise<{
     answers: Record<string, { type?: string; noul?: unknown; probabilities?: Record<string, number>; confidence?: number }>;
     usage?: { input_tokens: number; output_tokens: number };
     ms?: number;
-  }>;
+  } | undefined>;
   /** per-request question cap (policy: s1.questionsPerCall) */
   questionsPerCall?: number;
   onWarn?(message: string): void;
@@ -437,7 +437,7 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
       const natural = Math.min(perCall, candidates.length - cursor);
       let size = Math.min(requestSize, candidates.length - cursor);
       let batch: number[] = [];
-      let answers: Awaited<ReturnType<S1RelevanceOptions['decide']>>['answers'] | undefined;
+      let answers: NonNullable<Awaited<ReturnType<S1RelevanceOptions['decide']>>>['answers'] | undefined;
       let deferredChunk = false;
 
       // The attempt loop: `attempt` is 1-based and the first pass is the original request, so a window that never
@@ -537,6 +537,7 @@ export function createS1Relevance(opts: S1RelevanceOptions): S1Relevance {
               // it, which is the direction the design asks for (h_i's reference value for s_j, not string overlap).
               { kind: current.kind, text: stateText },
               questions,
+              { sessionId: current.sessionId },
             );
             // `undefined` is the caller saying there is no backend to ask - observation mode, or a provider that
             // resolved to `none`. That is a state and not a failure, so it is reported once instead of per segment;

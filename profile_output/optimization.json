@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "createdAt": "2026-10-04T13:48:16.807Z",
+  "node": "v24.18.1",
+  "baselineCommit": "346d7865913c231208830f12383f050081e3cfe7",
+  "scope": "Synthetic offline engineering benchmark; no task solve rates, provider token counts, cache billing, or live backend throughput measured.",
+  "delivery": {
+    "baseline": {
+      "steps": 48,
+      "injectedMessages": 48,
+      "injectedChars": 216916,
+      "injectedTokensEstimate": 54234,
+      "cumulativePromptTokensEstimate": 731506,
+      "coverageChecks": 356,
+      "elapsedMs": 74.10882800000013
+    },
+    "optimized": {
+      "steps": 48,
+      "injectedMessages": 48,
+      "injectedChars": 26124,
+      "injectedTokensEstimate": 6548,
+      "cumulativePromptTokensEstimate": 101397,
+      "coverageChecks": 356,
+      "elapsedMs": 17.283601999999973
+    }
+  },
+  "injectionReduction": 0.879263930375779,
+  "partialRow": {
+    "baseline": {
+      "questions": 4,
+      "hits": [
+        "s2",
+        "s3",
+        "s4",
+        "s5"
+      ]
+    },
+    "optimized": {
+      "questions": 2,
+      "hits": [
+        "s2",
+        "s3",
+        "s4",
+        "s5"
+      ]
+    }
+  },
+  "visibilityGate": {
+    "controlWithoutSurface": {
+      "steps": 12,
+      "calls": 11,
+      "questions": 66,
+      "skipped": 0
+    },
+    "optimizedWithSurface": {
+      "steps": 12,
+      "calls": 0,
+      "questions": 0,
+      "skipped": 12
+    }
+  },
+  "lexical": {
+    "pairs": 2936,
+    "reference": "Unicode-correct uncached scorer",
+    "referenceMedianMs": 147.33815600000003,
+    "optimizedMedianMs": 8.935848000000078,
+    "speedup": 16.48843579255139,
+    "samples": {
+      "reference": [
+        163.934444,
+        147.33815600000003,
+        145.676337,
+        146.155034,
+        149.52164800000003
+      ],
+      "cached": [
+        8.988188999999977,
+        8.972818999999959,
+        8.874025000000074,
+        8.838954999999942,
+        8.935848000000078
+      ]
+    },
+    "checksumMatched": true,
+    "regression": {
+      "expected": 0.6666666666666666,
+      "baseline": 0,
+      "optimized": 0.6666666666666666
+    }
+  },
+  "scheduling": {
+    "rows": 32,
+    "concurrency": 2,
+    "simulatedRowLatencyMs": 4,
+    "serialMedianMs": 135.43194399999993,
+    "parallelMedianMs": 66.7387960000001,
+    "speedup": 2.0292835969051604,
+    "samples": {
+      "serial": [
+        135.98756200000003,
+        134.2512069999998,
+        138.5906,
+        134.95980399999985,
+        135.43194399999993
+      ],
+      "parallel": [
+        66.7387960000001,
+        66.26124500000014,
+        67.11261800000011,
+        66.62228099999993,
+        68.48831100000007
+      ]
+    },
+    "answersMatched": true
+  }
+}

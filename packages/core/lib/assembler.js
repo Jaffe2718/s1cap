@@ -287,16 +287,21 @@ export function assemble(input               )                 {
   // lay inside d because of its size, so the recorded selection stops being the one the brief's rule produces. That
   // is why the cap is gone and these stay: pinned/tail/anchor are not history at all (the model already has them in
   // the prompt), the sibling chunks below are the current event quoted back as "an earlier turn" (false and
-  // redundant), and the passage de-duplication removes the overlap between two halves of one passage (the same text
-  // paid for twice). Each of the three is a claim about the content, checkable without knowing the window size.
+  // redundant), and passage de-duplication removes only text fully contained in an already selected chunk.
+  // A common parent alone cannot prove redundancy: its chunks may carry different facts.
   const structural = [...pinned, ...tail, current].map((s) => s.id);
   let excluded = new Set        ([...structural, ...(input.excludeIds ?? [])]);
-  // A long event is split into overlapping chunks that share a `chunkOf` parent. Recall scores each chunk
-  // independently, so two halves of one paragraph can both clear the threshold and both be selected - the model
-  // would then pay twice for the same passage, with the overlap repeated verbatim. Tracking the parents keeps
-  // the first-selected chunk of a passage and drops its siblings, which is the one place where a duplicate can
-  // be removed without losing a distinct fact.
-  const selectedParents = new Set        ();
+  // Keep distinct chunks of one passage. Drop a sibling only when its complete
+  // text already occurs inside a selected sibling, not merely because ids share a parent.
+  const selectedParents = new Map                  ();
+  const redundant = (seg         )          =>
+    selectedParents.get(seg.chunkOf ?? seg.id)?.some((text) => text.includes(seg.text)) ?? false;
+  const remember = (seg         )       => {
+    const parent = seg.chunkOf ?? seg.id;
+    const texts = selectedParents.get(parent) ?? [];
+    texts.push(seg.text);
+    selectedParents.set(parent, texts);
+  };
   let droppedSiblings = 0;
   let recalled            = [];
   let fallback                              ;
@@ -323,14 +328,13 @@ export function assemble(input               )                 {
       if (excluded.has(hit.id)) continue;
       const seg = graph.getSegment(hit.id);
       if (!seg) continue;
-      const parent = seg.chunkOf ?? seg.id;
-      if (selectedParents.has(parent)) {
+      if (redundant(seg)) {
         droppedSiblings += 1;
         continue;
       }
       recalled.push(seg);
       excluded.add(seg.id);
-      selectedParents.add(parent);
+      remember(seg);
       used += seg.tokens;
       bfsDepth = Math.max(bfsDepth, hit.depth);
     }
@@ -360,11 +364,11 @@ export function assemble(input               )                 {
     if (candidates === 0 && recalled.length === 0) {
       const unknown = graph.unjudgedWithin(current.id, policy.recall.window);
       for (const seg of unknown) {
-        const parent = seg.chunkOf ?? seg.id;
-        if (selectedParents.has(parent)) continue;
+        if (excluded.has(seg.id)) continue;
+        if (redundant(seg)) continue;
         recalled.push(seg);
         excluded.add(seg.id);
-        selectedParents.add(parent);
+        remember(seg);
         used += seg.tokens;
         unknownAdmitted += 1;
       }
@@ -395,14 +399,13 @@ export function assemble(input               )                 {
       // recency window as if no recall had been attempted, which is the one thing this run is a measurement of.
       for (const seg of history) {
         if (excluded.has(seg.id)) continue;
-        const parent = seg.chunkOf ?? seg.id;
-        if (selectedParents.has(parent)) {
+        if (redundant(seg)) {
           droppedSiblings += 1;
           continue;
         }
         recalled.push(seg);
         excluded.add(seg.id);
-        selectedParents.add(parent);
+        remember(seg);
         used += seg.tokens;
       }
     }

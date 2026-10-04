@@ -128,10 +128,9 @@ export function isInputEvent(segment         )          {
                                                                                                               
                                                                                                        
     
-                                                                                                                  
-                                                                                                                    
-                                                                                                                   
-                                                                                                     
+                                                                                  
+                                                                                  
+                                                                         
     
                                                                                                                    
                                                                                              
@@ -541,9 +540,12 @@ export async function observeStep(
   // `taskSegment` rather than on the recall anchor on purpose — a moving key would rebuild T on every step and
   // quietly turn the default `perTask` policy into a per-step one.
   const proxyCache = input.proxyCache ?? { id: '', text: '' };
+  // An opening question has no subsequent trace. Do not freeze that absence:
+  // perTask freezes the first nonempty trace once the model has produced it.
   // `perTask` reuses the memo across the steps of one task; `perTurn` rebuilds every step, which is what that
   // policy means and is not free.
-  const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === taskSegment.id;
+  const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === taskSegment.id &&
+    proxyCache.text !== '';
   const proxyText = reuseProxy
     ? proxyCache.text
     : buildStateProxy({

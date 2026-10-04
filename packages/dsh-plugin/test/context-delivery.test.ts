@@ -177,11 +177,11 @@ test('the trace is delivered on the value, not on a slot name this module does n
   assert.ok(injectedText(withoutSlot).includes(TRACE_START), 'no `stateProxy` slot in `order` does not suppress T');
   assert.ok(
     reordered.delivered && injectedText(reordered).includes(TRACE_START),
-    'and T does not follow the layout into a position after the long context',
+    'T is still delivered when its layout slot moves',
   );
   assert.ok(
-    injectedText(reordered).indexOf(TRACE_START) < injectedText(reordered).indexOf('quoted verbatim'),
-    'T is before the recalled block whatever `order` says',
+    injectedText(reordered).indexOf(TRACE_START) > injectedText(reordered).indexOf('quoted verbatim'),
+    'Trace Append places T after the recalled block',
   );
 });
 
@@ -211,7 +211,7 @@ test('the block carries quoted session content and no S1CAP prose of its own', (
   );
 });
 
-test('the layout order does not decide the delivered block order', () => {
+test('the delivered block respects trace placement within the injection', () => {
   // The two orders are the two layouts a round can actually record — the paper's two arms, Trace as State with `T`
   // in front of the long context and Trace Append with `T` behind it. **The pair used to be {question first,
   // question last}**, which the deleted axis produced; the question is the last block of every layout now, so the
@@ -225,18 +225,15 @@ test('the layout order does not decide the delivered block order', () => {
     return last.content[0].text;
   };
 
-  // The two layouts differ in where `T` sits in the *assembled view*, and the trace is placed by this module from
-  // its own value rather than from its position in `order`, so both deliver the same trace followed by the same two
-  // quoted turns. What `order` still decides is the position of the question in the layout — which this channel does
-  // not deliver, because insertion is the only thing it can do (see the header), and the recorded `layout.order` is
-  // the evidence of it.
+  // Insertion cannot reorder the harness history, but the blocks it does send
+  // must follow their recorded order rather than silently collapsing the arms.
   assert.deepEqual(traceBefore.blocks, ['stateProxy', 'recalled', 'recalled']);
   assert.deepEqual(
     traceAfter.blocks,
-    ['stateProxy', 'recalled', 'recalled'],
-    'the order array is walked for `recalled` only; the trace is placed by the paper, not by the layout',
+    ['recalled', 'recalled', 'stateProxy'],
+    'Trace Append must remain distinguishable from Trace as State on the wire',
   );
-  assert.equal(textOf(traceBefore), textOf(traceAfter), 'so the layout axis changes nothing about the delivered content');
+  assert.notEqual(textOf(traceBefore), textOf(traceAfter), 'the delivered order changes with the layout axis');
   assert.ok(textOf(traceBefore).startsWith(TRACE_START), 'the delivered block opens with the trace');
 });
 

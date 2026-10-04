@@ -40,11 +40,14 @@ import { AssociationGraph, CONTENT_EVENT_TYPES, S1_DEFERRED, adaptSessionEvent, 
            
           
              
+          
                   
                  
                    
                      
 import { isS1capInjected } from '@s1cap/core';
+import { scoreDemandRows } from './demand-scheduler.js';
+import { contextVisibility } from './context-delivery.js';
 
                                       
                          
@@ -121,6 +124,8 @@ import { isS1capInjected } from '@s1cap/core';
  
 
                                     
+                                                                                                      
+                             
                             
                 
                                      
@@ -233,6 +238,8 @@ import { isS1capInjected } from '@s1cap/core';
  
 
                                  
+                                                                                                              
+                                       
      
                                                                                             
     
@@ -407,8 +414,8 @@ export function createStepObserver(opts                     )               {
     const graph = graphs.get(sessionId);
     if (graph !== undefined) opts.rgStore.persist(sessionId, graph.snapshot());
   };
-  /** T's one-entry memo, alive for as long as the observer is. The anchor id is a segment id, and a new session's task has a new one. */
-  const proxyCache = { id: '', text: '' };
+  /** Per-session T memos; forked sessions may share the same task event id. */
+  const proxyCaches = new Map                                      ();
   /**
    * The recalled block's order, one array per session, alive for as long as the observer is. `assemble()` mutates
    * the array in place to the order the block was laid out in, so what is stored here is the *previous step's*
@@ -436,6 +443,7 @@ export function createStepObserver(opts                     )               {
   let systemPromptTokens = 0;
   let scheduled = false;
   const stats                    = {
+    recallVisibleSkips: 0,
     steps: 0,
     observed: 0,
     skipped: 0,
@@ -546,14 +554,10 @@ export function createStepObserver(opts                     )               {
   /**
    * The on-demand walk's scorer: the rows one level of the walk needs in, one weight list per row out.
    *
-   * **One call per row, and that is the honest reading at this build's numbers.** A row is `min(index, w)` pairs,
-   * so at the default `w = 16` it is at most 16 questions against `s1.questionsPerCall = 20` - one System-1
-   * request, which is why the walk's cost is counted in rows and its latency in calls. Several rows *could* be
-   * packed into one request, and the graph hands this function a whole level at a time so that a scorer which can
-   * pack them is free to (the request body is a state plus one question per candidate); what packing buys at
-   * `w = 16` is nothing, because two full rows are 32 questions - past the server's cap and, at 41 questions,
-   * past the 5-6x latency cliff `s1.questionsPerCall` records. Raising `w` would make packing the lever and would
-   * put the walk's latency back to one call per *level*; at this window the level and the row are the same thing.
+   * Rows run in a bounded pool at the existing admission limit. A level can
+   * contain several rows; its latency need not be their serial sum. Each worker
+   * checks the walk's deadline before taking another row. An admitted call still
+   * uses the client's own timeout/retry policy and may finish after the deadline.
    *
    * A row the scorer does not answer is reported as `undefined` and the graph releases it **unsettled** - no
    * lexical row is written in its place - so a later step's walk asks for it again. That is the one deliberate
@@ -564,20 +568,17 @@ export function createStepObserver(opts                     )               {
    */
   const scoreDemandedRows = async (
     rows                      ,
+    deadline        ,
   )                                                      => {
-    const out                                    = [];
-    for (const row of rows) {
-      try {
-        const weights = opts.scoreBatch === undefined ? undefined : await opts.scoreBatch(row.current, row.candidates);
-        out.push(weights === undefined || weights === S1_DEFERRED ? undefined : weights);
-      } catch (err) {
-        // Contained, like every other call on this path: a scorer that throws costs the row, never the step.
+    if (opts.scoreBatch === undefined) return rows.map(() => undefined);
+    return scoreDemandRows(rows, opts.scoreBatch, {
+      concurrency: opts.policy.s1.admissionLimit,
+      canStart: () => opts.now() < deadline,
+      onError: (row, err) => {
         stats.errors += 1;
         stats.lastError = `demand scoring for ${row.id}: ${String(err)}`;
-        out.push(undefined);
-      }
-    }
-    return out;
+      },
+    });
   };
 
   /**
@@ -608,7 +609,7 @@ export function createStepObserver(opts                     )               {
     waitMs        ,
   )                                    => {
     const started = opts.now();
-    const deadline = started + waitMs;
+    const deadline = waitMs > 0 ? started + waitMs : Number.POSITIVE_INFINITY;
     return graph
       .recallDemand(
         [anchorId],
@@ -619,10 +620,9 @@ export function createStepObserver(opts                     )               {
           now: opts.now(),
           window: opts.policy.recall.window,
         },
-        opts.scoreBatch === undefined ? undefined : scoreDemandedRows,
-        // The budget is the same deadline the wait is bounded by, and it is asked **between levels** - so a level
-        // that has been claimed is always answered and kept, and the walk never starts a row it cannot finish
-        // inside the step's own bound. `anchorWaitMs = 0` disables the *wait*, not the recall: the walk then runs
+        opts.scoreBatch === undefined ? undefined : (rows) => scoreDemandedRows(rows, deadline),
+        // Checked between levels and before each new row. Already admitted work
+        // may finish after the deadline. `anchorWaitMs = 0` disables the wait, not recall: the walk then runs
         // unbounded in the background, which is exactly "scoring starts when the BFS recall is called" with no
         // step waiting on it. With no batch scorer the walk is local and synchronous and the budget is moot.
         opts.scoreBatch !== undefined && waitMs > 0 ? () => opts.now() < deadline : undefined,
@@ -901,6 +901,11 @@ export function createStepObserver(opts                     )               {
       const started = opts.now();
       try {
         const sessionId = readSessionId(payload, opts.sessionId ?? 'unassigned');
+        let proxyCache = proxyCaches.get(sessionId);
+        if (proxyCache === undefined) {
+          proxyCache = { id: '', text: '' };
+          proxyCaches.set(sessionId, proxyCache);
+        }
         // Assigned *here*, before anything that reads it, and that placement is the whole of this fix (F10). It
         // used to sit with the other `stats` writes after `opts.emit(...)`, i.e. after the tape line below - so
         // the tape carried the *previous* step's session id and the first line of a session carried
@@ -966,6 +971,17 @@ export function createStepObserver(opts                     )               {
           // included.
           beforeAssemble: async (anchorId        ) => {
             try {
+              if (options?.visibleMessages !== undefined && opts.policy.recall.tier1 !== 'off') {
+                // Drain first: newly arrived content must be included in the proof.
+                queue.drain();
+                const visibility = contextVisibility(options.visibleMessages);
+                const graph = graphFor(sessionId);
+                if (graph.orderedSegments().every((seg) => seg.kind === 'systemPinned' || visibility.containsSegment(seg))) {
+                  stats.recallVisibleSkips += 1;
+                  writeProbe({ schema: 0, kind: 'recall-visible', step, sessionId, segments: graph.segmentCount });
+                  return;
+                }
+              }
               await waitForAnchorRow(writeProbe, step, sessionId, anchorId);
             } catch (err) {
               stats.errors += 1;

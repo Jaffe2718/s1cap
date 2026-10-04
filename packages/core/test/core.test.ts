@@ -97,9 +97,8 @@ test('segmentEvent: a long prose paragraph is split on sentence boundaries, neve
   assert.ok(out.at(-1)?.text.includes('(39)'), 'the last sentence must be in the tail chunk');
 });
 
-test('assemble: two chunks of one passage cannot both be selected', () => {
-  // A long event is chunked with an overlap, so its chunks share a `chunkOf` parent. Recall scores them
-  // independently; without the parent check both can be selected and the overlap is paid for twice.
+test('assemble: distinct chunks of one passage preserve both sets of facts', () => {
+  // A shared parent does not make two different passage chunks redundant.
   const graph = new AssociationGraph();
   const policy = defaultPolicy();
   policy.recall.threshold = 0.1;
@@ -137,8 +136,8 @@ test('assemble: two chunks of one passage cannot both be selected', () => {
 
   const selectedIds = res.layout.recalled.map((s) => s.id);
   const fromPassage = selectedIds.filter((id) => id.startsWith('long1#'));
-  assert.equal(fromPassage.length, 1, `one passage is one selection, got ${JSON.stringify(selectedIds)}`);
-  assert.equal(res.recall.droppedSiblings, 1, 'and the dropped sibling is counted, not hidden');
+  assert.equal(fromPassage.length, 2, `both halves carry distinct facts: ${JSON.stringify(selectedIds)}`);
+  assert.equal(res.recall.droppedSiblings, undefined, 'no fully covered chunk was dropped');
   // The distinct event is untouched: de-duplication must not look like recall losing candidates.
   assert.ok(selectedIds.includes('other'), 'a different event is still selected');
 });

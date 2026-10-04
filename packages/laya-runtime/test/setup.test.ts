@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { DEFAULT_VENV_DIR, parseSetupArgs, setupLayaEnv, venvPython } from '../src/setup.ts';
@@ -38,8 +38,9 @@ function scratch(): string {
 /** A venv whose interpreter file exists, so `setupLayaEnv` takes the reuse path and only the install runs. */
 function fakeVenv(root: string): string {
   const venvDir = join(root, 'laya-venv');
-  mkdirSync(join(venvDir, 'Scripts'), { recursive: true });
-  writeFileSync(join(venvDir, 'Scripts', 'python.exe'), '');
+  const interpreter = venvPython(venvDir, process.platform);
+  mkdirSync(dirname(interpreter), { recursive: true });
+  writeFileSync(interpreter, '');
   return venvDir;
 }
 
@@ -47,12 +48,12 @@ test('setup creates a venv, installs into it, and reports the interpreter to pas
   const dir = scratch();
   try {
     const venvDir = fakeVenv(dir);
-    const target = join(venvDir, 'Scripts', 'python.exe');
+    const target = venvPython(venvDir, process.platform);
 
     const { calls, run } = recorder({ freeze: { code: 0, out: 'laya==0.3.21\ntorch==2.4.0\n' } });
     const result = setupLayaEnv(
       { pythonPath: 'C:/py/python.exe', packageSpec: 'laya-ai', venvDir, lock: true, dryRun: false },
-      'win32',
+      process.platform,
       run,
     );
 
@@ -81,7 +82,7 @@ test('an existing venv is reused, never recreated', () => {
 
     const result = setupLayaEnv(
       { pythonPath: 'C:/py/python.exe', packageSpec: 'laya-ai', venvDir, lock: false, dryRun: false },
-      'win32',
+      process.platform,
       run,
     );
 

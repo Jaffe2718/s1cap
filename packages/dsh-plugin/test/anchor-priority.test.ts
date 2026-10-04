@@ -79,6 +79,7 @@ function harness(opts: { anchorWaitMs?: number; advanceMs?: number; holdFirstRow
     releaseRow = resolve;
   });
   const policy = defaultPolicy();
+  policy.recall.depth = 1; // This fixture isolates anchor priority, not deeper background expansion.
   if (opts.anchorWaitMs !== undefined) policy.recall.anchorWaitMs = opts.anchorWaitMs;
   const observer = createStepObserver({
     policy,
@@ -113,6 +114,9 @@ function harness(opts: { anchorWaitMs?: number; advanceMs?: number; holdFirstRow
     },
     sleep: async (ms: number) => {
       slept.push(ms);
+      // A real timer drains ready promises before advancing time. Model that
+      // boundary so worker-pool bookkeeping is not charged fake seconds.
+      await new Promise<void>((resolve) => setImmediate(resolve));
       ticks.value += opts.advanceMs ?? 6_000;
     },
   });
@@ -246,7 +250,7 @@ test('with no backend to judge the row, nothing is waited for - and the graph is
   // And the step's own reading is exactly what it was: the fixture's anchor shares no tokens with its history, so
   // nothing clears `tau`, the walk finds no candidates, and the fail-open rule admits the window as the backstop.
   assert.equal(observation.event.candidates, 0, 'no lexical weight cleared the threshold');
-  assert.equal(observation.event.unknownAdmitted, SEED, 'and the fail-open rule admits the window, as it must');
+  assert.equal(observation.event.unknownAdmitted, SEED - defaultPolicy().tail.k, 'fail-open excludes the verbatim tail');
 });
 
 test('wait=0 disables the wait entirely: no sleep, no line - and the walk still buys the row', async () => {
@@ -262,7 +266,7 @@ test('wait=0 disables the wait entirely: no sleep, no line - and the walk still 
   assert.deepEqual(h.slept, [], 'the researcher who turns the wait off gets the step timing back');
   assert.equal(h.probes.filter((probe) => probe.kind === 'anchor-wait').length, 0, 'and nothing is reported');
   assert.equal(observation.event.candidates, 0, 'the step assembles from the graph as it stands');
-  assert.equal(observation.event.unknownAdmitted, SEED, 'with the fail-open rule as the backstop');
+  assert.equal(observation.event.unknownAdmitted, SEED - defaultPolicy().tail.k, 'fail-open does not duplicate the tail');
   // The row was asked for anyway, and the step did not wait for it: that is the difference between "do not wait"
   // and "do not score", and it is the reason `0` is not a way to switch the lane off.
   assert.equal(h.asked[0], `${ANCHOR}:${String(SEED)}`, `the row is in flight: ${JSON.stringify(h.asked)}`);

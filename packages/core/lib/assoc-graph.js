@@ -54,7 +54,7 @@ function isBackwardStep(from                    , to                    )       
  * demanded row is a segment's arrival-order row, asked for because a walk reached the segment rather than because
  * the segment arrived. `candidates` is never empty (a row with no window is settled by `#offer` without being
  * handed out), and `index` is the segment's position in the graph's own append order, which is what makes the
- * demand's cost `min(index, w)` and lets a caller state it.
+ * demand's maximum cost `min(index, w)`. Already measured pairs are omitted.
  */
                             
                                                                                     
@@ -74,7 +74,7 @@ function isBackwardStep(from                    , to                    )       
                 
                                   
                
-                                                              
+                                                                                            
                 
                                                   
                  
@@ -98,7 +98,7 @@ function isBackwardStep(from                    , to                    )       
                         
                                            
                
-                                                               
+                                                                               
                 
                                                 
                  
@@ -341,6 +341,8 @@ export class AssociationGraph {
   #edges = new Map                         ();
   /** every scored pair, above and below the threshold, by `${from}->${to}`; see `ScoredPair` */
   #scores = new Map                    ();
+  /** All measured incoming pairs, including scores below the ingest threshold. */
+  #scoreRows = new Map                                 ();
   #adj = new Map                  ();
 
   get segmentCount()         {
@@ -437,6 +439,7 @@ export class AssociationGraph {
   /** Settle a taken entry: it is scored (or had no window) and will never be offered again. */
   #settle(index        )       {
     this.#taken.delete(index);
+    if (index < this.#scored) return;
     this.#settled.add(index);
     // The cursor advances over the settled prefix and forgets what it passes, so `#settled` stays bounded by the
     // entries that finished ahead of an earlier one rather than growing with the session.
@@ -482,7 +485,7 @@ export class AssociationGraph {
       const other = candidates[i]           ;
       const source             = byBackend ? 's1-noul' : 'lexical';
       if (Number.isFinite(weight)) {
-        this.#scores.set(`${other.id}->${current.id}`, { from: other.id, to: current.id, w: weight, source, at: current.ts });
+        this.#putScore({ from: other.id, to: current.id, w: weight, source, at: current.ts });
       }
       if (!Number.isFinite(weight) || weight < threshold) continue;
       this.upsertEdge({
@@ -579,7 +582,7 @@ export class AssociationGraph {
        
                               
                       
-   )   
+   )           
                         
                         
                   
@@ -587,7 +590,7 @@ export class AssociationGraph {
                           
                                                                                              
                              
-    {
+     {
     const windowN = Math.max(1, Math.trunc(opts.windowN));
     const maxPairs =
       opts.maxPairsPerSweep === undefined ? Number.POSITIVE_INFINITY : Math.max(1, Math.trunc(opts.maxPairsPerSweep));
@@ -783,6 +786,29 @@ export class AssociationGraph {
     return out;
   }
 
+  #putScore(score            )       {
+    this.#scores.set(`${score.from}->${score.to}`, score);
+    let row = this.#scoreRows.get(score.to);
+    if (row === undefined) {
+      row = new Map();
+      this.#scoreRows.set(score.to, row);
+    }
+    row.set(score.from, score);
+  }
+
+  /** A threshold change reuses paid measurements; explicit/manual edges remain traversable. */
+  #walkNeighbors(id        )                                             {
+    const out = new Map                                                  ();
+    for (const edge of this.neighbors(id)) {
+      const other = edge.from === id ? edge.to : edge.from;
+      out.set(other, { other, w: edge.w, at: edge.verifiedAt });
+    }
+    for (const score of this.#scoreRows.get(id)?.values() ?? []) {
+      out.set(score.from, { other: score.from, w: score.w, at: score.at });
+    }
+    return [...out.values()];
+  }
+
   /**
    * Bounded BFS from the seed segments over edges with w_eff > τ,
    * depth ≤ d.
@@ -881,10 +907,10 @@ export class AssociationGraph {
         // cut is taken in. The direction filter sits in the same pass as the threshold because it is a condition on
         // the candidate, like the threshold beside it, and not a preference between candidates that both qualify:
         // a newer neighbour is not admitted and then dropped, it is never a candidate.
-        const ranked = this.neighbors(node.id)
+        const ranked = this.#walkNeighbors(node.id)
           .map((e) => {
-            const other = e.from === node.id ? e.to : e.from;
-            const age = opts.now - e.verifiedAt;
+            const other = e.other;
+            const age = opts.now - e.at;
             return { other, w: decayedWeight(e.w, age, opts.lambdaMs) };
           })
           .filter((n) => n.w > opts.threshold && isBackwardStep(from, this.#at.get(n.other)))
@@ -991,8 +1017,12 @@ export class AssociationGraph {
         stop = 'budget';
         break;
       }
-      const claim = this.#claimNeeded(frontier, windowN);
-      if (claim.rows.length > 0) levels.push(await this.#demandLevel(claim.rows, opts, windowN, scorer));
+      const claim = this.#claimNeeded(frontier, windowN, scorer !== undefined);
+      if (claim.rows.length > 0) {
+        const level = await this.#demandLevel(claim.rows, opts, windowN, scorer);
+        level.skipped = claim.skipped;
+        levels.push(level);
+      }
       else if (claim.skipped > 0) {
         // Rows the walk needed and could not have: another walk owns them, or they were settled between the
         // `#at` read and the claim. Nothing is asked for and nothing is waited on - the walk reads the graph as it
@@ -1023,17 +1053,15 @@ export class AssociationGraph {
   /**
    * The rows `frontier` needs and nobody else holds: one per node whose window is not yet fully scored.
    *
-   * Two questions, and they are different. **Does this node need its row?** It does when at least one pair inside
-   * its window has no `scores` entry - a pair that was never asked about, by any walk or sweep. A pair that *was*
-   * scored is never asked for again, whatever produced it: that is what stops a demanded row from being re-bought
-   * on the next step, and it is why `#scores` (graded, above and below the threshold) and not `#edges`
-   * (thresholded) is what this reads. **Can this walk have it?** `#offer` answers that, synchronously and before
-   * the first `await`: an entry below the settled prefix, one already settled out of order, or one another sweep
-   * is holding is not handed to a second caller.
+   * Only missing pairs are offered. When a backend is available, lexical guesses
+   * are missing backend judgements too. A widened window or partially restored row
+   * can therefore be completed without re-buying its measured pairs. The eager
+   * cursor does not suppress this demand, but a row held by another caller does.
    */
   #claimNeeded(
     frontier                                          ,
     windowN        ,
+    requireBackend         ,
   )                                         {
     const rows              = [];
     let skipped = 0;
@@ -1051,26 +1079,27 @@ export class AssociationGraph {
       // A seed the graph does not hold has no position and therefore no window; a seed at position 0 has nothing
       // in front of it. Neither is a row, and neither is a skip: there is nothing to ask for.
       if (index <= 0) continue;
-      if (!this.#rowMissing(index, node.id, windowN)) continue;
-      const claim = this.#offer(index, windowN);
-      if (claim === undefined) {
+      const current = this.#segments.get(node.id);
+      if (current === undefined) continue;
+      const candidates            = [];
+      for (let j = Math.max(0, index - windowN); j < index; j += 1) {
+        const id = this.#order[j]          ;
+        const scored = this.#scores.get(`${id}->${node.id}`);
+        if (scored !== undefined && (!requireBackend || scored.source === 's1-noul')) continue;
+        const segment = this.#segments.get(id);
+        if (segment !== undefined) candidates.push(segment);
+      }
+      if (candidates.length === 0) continue;
+      // The settled cursor belongs to eager scoring under its original window. Demand
+      // may widen that window, or resume a partially measured row after a restart.
+      if (this.#taken.has(index)) {
         skipped += 1;
         continue;
       }
-      rows.push({ id: node.id, index, depth: node.depth, current: claim.current, candidates: claim.candidates });
+      this.#taken.add(index);
+      rows.push({ id: node.id, index, depth: node.depth, current, candidates });
     }
     return { rows, skipped };
-  }
-
-  /** Whether any pair of this entry's window has no `scores` entry: the row is unscored and a walk may want it. */
-  #rowMissing(index        , id        , windowN        )          {
-    const from = Math.max(0, index - windowN);
-    for (let j = from; j < index; j += 1) {
-      const other = this.#order[j]          ;
-      if (!this.#segments.has(other)) continue;
-      if (!this.#scores.has(`${other}->${id}`)) return true;
-    }
-    return false;
   }
 
   /**
@@ -1128,7 +1157,8 @@ export class AssociationGraph {
         const weights = answers?.[i];
         // A short or over-long list is a caller bug and is treated exactly like no answer rather than guessed at:
         // `scoreNew` throws here, and a walk cannot afford to - see the note above.
-        if (weights === undefined || weights.length !== row.candidates.length) {
+        if (weights === undefined || weights.length !== row.candidates.length ||
+            !Array.from(weights).every((w) => Number.isFinite(w) && w >= 0 && w <= 1)) {
           level.missed += 1;
           level.missedPairs += row.candidates.length;
           this.#miss(row.index, row.candidates.length);
@@ -1271,7 +1301,7 @@ export class AssociationGraph {
       graph.#edges.set(`${edge.from}->${edge.to}`, edge);
       graph.#link(edge.from, edge.to);
     }
-    for (const score of snap.scores ?? []) graph.#scores.set(`${score.from}->${score.to}`, score);
+    for (const score of snap.scores ?? []) graph.#putScore(score);
     // Clamped, because a cursor larger than the order array would silently skip scoring forever.
     graph.#scored = Math.max(0, Math.min(graph.#order.length, Math.trunc(snap.scored ?? 0)));
     graph.#scoredPairs = Math.max(0, Math.trunc(snap.scoredPairs ?? 0));
@@ -1354,17 +1384,28 @@ export class AssociationGraph {
  * touching the windowing logic.
  */
 export function lexicalScore(a         , b         )         {
-  const left = tokensOf(a.text);
-  const right = tokensOf(b.text);
+  const left = segmentTokens(a);
+  const right = segmentTokens(b);
   if (left.size === 0 || right.size === 0) return 0;
   let shared = 0;
   for (const token of left) if (right.has(token)) shared += 1;
   return shared / Math.min(left.size, right.size);
 }
 
+// Weak keys bound the cache to live segment objects. Check text as callers can replace
+// or mutate a segment, and never retain another session's text in a global string map.
+const tokenCache = new WeakMap                                                ();
+function segmentTokens(segment         )              {
+  const cached = tokenCache.get(segment);
+  if (cached?.text === segment.text) return cached.tokens;
+  const tokens = tokensOf(segment.text);
+  tokenCache.set(segment, { text: segment.text, tokens });
+  return tokens;
+}
+
 function tokensOf(text        )              {
   const out = new Set        ();
-  for (const token of text.toLowerCase().split(/[^\\p{L}\\p{N}_]+/u)) {
+  for (const token of text.toLowerCase().split(/[^\p{L}\p{N}_]+/u)) {
     if (token.length > 1) out.add(token);
   }
   return out;
