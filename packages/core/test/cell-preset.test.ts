@@ -75,7 +75,14 @@ test('the preset reaches the policy through the one rule table, and the cell cod
   const merged = mergeCellPreset({ cell: 'C2' }, preset);
   const result = validatePolicy(merged.raw);
   assert.deepEqual(result.errors, [], 'the shipped preset validates cleanly');
-  assert.equal(result.policy.recall.threshold, 0.6, 'the value in the JSON is the value the policy carries');
+  // **Compared against the file's own value, not against a literal.** This read `0.6` until 2026-10-05, and the file
+  // has moved three times since (0.55 -> 0.6 -> 0.58 -> 0.55): a hardcoded expected value turns "the JSON is the
+  // source" into "the JSON equals what the test remembers", and it failed on a change that was correct.
+  assert.equal(
+    result.policy.recall.threshold,
+    (preset['recall'] as { threshold?: unknown } | undefined)?.threshold,
+    'the value in the JSON is the value the policy carries',
+  );
   assert.equal(merged.overridden.length, 0, 'with no patch, the preset is not overridden by anything');
 });
 

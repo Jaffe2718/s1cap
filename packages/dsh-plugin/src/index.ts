@@ -1729,6 +1729,13 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
         s1Knobs: {
           questionsPerCall: config.s1.questionsPerCall,
           retryAttempts: config.s1.retryAttempts,
+          // **The model the lane was configured with, which no record carried until 2026-10-05.** It became a preset
+          // path the day C2 moved to the hosted lane (`bench/cells/C2.json` -> `s1.model: "jev-latest"`), and the test
+          // that walks every preset leaf against this record failed on it: a value that reached the session and no
+          // artifact, which is the gap that test exists to catch. The per-call records carry the model the deployment
+          // *answered* with (`routedModel`, e.g. `jev-1.13.0`); this is the one that was asked for, and the two are
+          // not the same statement.
+          model: config.s1.model,
         },
         governance,
       }) + '\n',

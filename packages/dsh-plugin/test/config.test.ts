@@ -1071,6 +1071,10 @@ test('every path a cell preset writes has a field on the wiring record', () => {
     deliver: (r) => r['deliver'],
     'tail.k': (r) => (r['tail'] as Record<string, unknown>)['k'],
     's1.provider': (r) => r['configuredProvider'],
+    // `s1.model` joined the presets the day C2 moved to the hosted lane, and this test failed on it: the value
+    // reached the session and no artifact. It is read from `s1Knobs.model` - the model that was *asked for*, beside
+    // the per-call `routedModel`, which is the one the deployment answered with.
+    's1.model': (r) => (r['s1Knobs'] as Record<string, unknown>)['model'],
     's1.questionsPerCall': (r) => (r['s1Knobs'] as Record<string, unknown>)['questionsPerCall'],
     's1.retryAttempts': (r) => (r['s1Knobs'] as Record<string, unknown>)['retryAttempts'],
     's1.admissionLimit': (r) => (r['governance'] as Record<string, unknown>)['admissionLimit'],
