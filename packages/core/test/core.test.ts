@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { AssemblyPolicy, AssemblyResult, AssociationEdge, Cell, Segment, SegmentKind } from '../src/types.ts';
-import { defaultPolicy, cellPolicy } from '../src/types.ts';
+import { defaultPolicy } from '../src/types.ts';
+import { cellPolicyOf } from './preset-fixture.ts';
 import { estimateTokens, segmentEvent, splitBlocks } from '../src/segmenter.ts';
 import { AssociationGraph, decayedWeight } from '../src/assoc-graph.ts';
 import { assemble } from '../src/assembler.ts';
@@ -564,7 +565,7 @@ test('every cell records the paper\'s Trace-as-State layout: the arm is the defa
     C2: ['pinned', 'stateProxy', 'tail', 'recalled', 'anchor'],
   };
   for (const cell of ['C0', 'C1', 'C2'] as const) {
-    const policy = cellPolicy(cell);
+    const policy = cellPolicyOf(cell);
     const fx = buildAssemblerFixture();
     const res = assemble({
       graph: fx.graph,
@@ -697,7 +698,7 @@ test('assemble: TAS off drops the state proxy and orders recall chronologically'
   const fx = buildAssemblerFixture();
   // Selection on with TAS off: the dropped fourth arm was the preset that named this pairing, so it is built
   // here from the full configuration by turning the state proxy off.
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   policy.tas.on = false;
   policy.recall.threshold = 0.5;
   const res = assemble({
@@ -862,7 +863,7 @@ test('the recalled block is ordered by first selection: a surviving segment keep
 
 test('assemble: tier1 off (C0/C1) leaves the recalled block empty by design', () => {
   const fx = buildAssemblerFixture();
-  const policy = cellPolicy('C0');
+  const policy = cellPolicyOf('C0');
   const res = assemble({
     graph: fx.graph,
     policy,

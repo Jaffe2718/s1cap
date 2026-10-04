@@ -41,7 +41,8 @@ export const CELL_PRESET_META_KEY = '_meta';
 
 // The one list of policy paths this build has. Imported rather than restated: a second copy is the drift this module
 // exists to remove, and a path added to `NUMBER_RULES` must become preset-writable without a second edit.
-import { KNOWN_PATHS } from './config.ts';
+import { KNOWN_PATHS, validatePolicy } from './config.ts';
+import type { AssemblyPolicy, Cell } from './types.ts';
 
 export interface CellPresetMerge {
   /** the config to hand to `validatePolicy`: the preset as its base, the profile's own keys on top */
@@ -148,7 +149,7 @@ export function mergeCellPreset(config: unknown, preset: unknown, options: CellP
     });
   }
 
-  const merged = mergeLayer(supplied, cfg);
+  let merged = mergeLayer(supplied, cfg);
   const fromPreset = pathsOf(supplied).sort();
   const extraTops = new Set(options.extraTopLevel ?? []);
   const known = new Set(KNOWN_PATHS);
@@ -168,7 +169,84 @@ export function mergeCellPreset(config: unknown, preset: unknown, options: CellP
   const cfgPaths = new Set(pathsOf(cfg));
   const overridden = fromPreset.filter((p) => p !== 'cell' && cfgPaths.has(p)).sort();
 
+  // -------------------------------------------------------------------------------------------------------------
+  // Fail-safe, second layer: a rejected value in the profile must not erase the preset's value for the same path
+  // -------------------------------------------------------------------------------------------------------------
+  //
+  // `validatePolicy` keeps the base value when a rule rejects a key, and that is the right shape for a profile with
+  // no preset. With a preset in play it lands wrong, because the merge happens *before* validation: a profile
+  // writing `recall: { tier1: 'embed' }` overwrote C1's `'off'`, and the rejected key then fell back to
+  // `defaultPolicy()`'s `'s1'` — the cell's own value was already gone when the fallback looked for it. Measured on
+  // `resolveWithPreset('C1', { recall: { tier1: 'embed' } })`, which answered `'s1'` where the control arm's value is
+  // `'off'`. **The preset is the source of a cell's policy, so a refused patch removes the patch and not the cell.**
+  //
+  // The check calls `validatePolicy` instead of restating its rules, so the two cannot drift apart, and the drop is
+  // reported rather than silent: a caller learns that the value it wrote was refused *and* that the preset stands.
+  const rescue = dropRejectedOverrides(merged, cfg, supplied, extraTops);
+  for (const issue of rescue.issues) issues.push(issue);
+  merged = rescue.raw;
+
   return { raw: merged, fromPreset, overridden, cell: cellOf(cfg, supplied), issues };
+}
+
+/** Read a dotted path out of a plain-object tree — `undefined` when any hop is missing. */
+function valueAt(obj: Record<string, unknown>, path: string): unknown {
+  let cursor: unknown = obj;
+  for (const part of path.split('.')) {
+    if (!isPlainObject(cursor)) return undefined;
+    cursor = cursor[part];
+  }
+  return cursor;
+}
+
+/**
+ * Write a value back at a dotted path, creating the intermediate objects.
+ *
+ * **Writing the preset's value back is the point, and the first version of this got it wrong in a way worth
+ * recording:** it *deleted* the path instead. That looks equivalent — the offending value is gone — but it also
+ * removes the preset's value for that path, so `validatePolicy` fell back to `defaultPolicy()` and C1's `'off'`
+ * still turned into `'s1'`. Measured while fixing it: `merged.recall` came back as `{threshold, depth}` with no
+ * `tier1` at all, and the validator then answered the default. A refusal has to restore, not amputate.
+ */
+function setPath(obj: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.');
+  let cursor: Record<string, unknown> = obj;
+  for (const part of parts.slice(0, -1)) {
+    const next = cursor[part];
+    if (!isPlainObject(next)) cursor[part] = {};
+    cursor = cursor[part] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1] as string] = value;
+}
+
+function dropRejectedOverrides(
+  raw: Record<string, unknown>,
+  cfg: Record<string, unknown>,
+  supplied: Record<string, unknown>,
+  extraTops: Set<string>,
+): { raw: Record<string, unknown>; issues: CellPresetIssue[] } {
+  const presetPaths = new Set(pathsOf(supplied));
+  const cfgPaths = new Set(pathsOf(cfg));
+  const checked = validatePolicy(raw, [...extraTops]);
+  const rejected = checked.issues.filter(
+    (issue) => issue.severity === 'error' && issue.path !== '' && cfgPaths.has(issue.path) && presetPaths.has(issue.path),
+  );
+  if (rejected.length === 0) return { raw, issues: [] };
+  const next = JSON.parse(JSON.stringify(raw)) as Record<string, unknown>;
+  const issues: CellPresetIssue[] = [];
+  for (const issue of rejected) {
+    const restored = valueAt(supplied, issue.path);
+    setPath(next, issue.path, restored);
+    issues.push({
+      path: issue.path,
+      severity: 'error',
+      message:
+        `the profile's value for \`${issue.path}\` was refused (${issue.message}), so it is dropped and **the cell ` +
+        `preset's value, ${JSON.stringify(restored)}, stands** — without this the merge would have erased it before ` +
+        `the fallback looked, and the run would have taken the default instead of the cell's own setting`,
+    });
+  }
+  return { raw: next, issues };
 }
 
 function cellOf(cfg: Record<string, unknown>, supplied: Record<string, unknown> | null): string | null {
@@ -176,4 +254,27 @@ function cellOf(cfg: Record<string, unknown>, supplied: Record<string, unknown> 
   if (fromCfg !== null) return fromCfg;
   const fromPreset = supplied && typeof supplied['cell'] === 'string' ? (supplied['cell'] as string) : null;
   return fromPreset;
+}
+
+/**
+ * The policy a cell runs, given its preset: `defaultPolicy()`, then the preset, then nothing else.
+ *
+ * This is the runtime path with the profile layer left out, and it exists so that callers which are not the plugin —
+ * tests, the doc checker, a replay harness — can ask "what does this cell run" and get the same answer the session
+ * would, instead of the defaults with a cell's name on them. `cellPolicy(cell)` deliberately no longer answers that
+ * question: since 2026-10-05 it returns `defaultPolicy()` with the name stamped, because the configuration moved
+ * into `bench/cells/<cell>.json`.
+ *
+ * `options.extra` is folded in last, standing for the profile patch, so a caller can express
+ * "this cell, with this deviation" in one call.
+ */
+export function cellPolicyFromPreset(
+  cell: Cell,
+  preset: unknown,
+  options: { extra?: Record<string, unknown> } = {},
+): AssemblyPolicy {
+  const merged = mergeCellPreset({ cell, ...(options.extra ?? {}) }, preset, {
+    extraTopLevel: ['laya', 'telemetry', 'enabled', 'observation'],
+  });
+  return validatePolicy(merged.raw, ['laya', 'telemetry', 'enabled', 'observation']).policy;
 }

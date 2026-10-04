@@ -10,7 +10,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { cellPolicy, defaultPolicy, digestRecords, parseTape, replayTape, stableStringify } from '../src/index.ts';
+import { defaultPolicy, digestRecords, parseTape, replayTape, stableStringify } from '../src/index.ts';
+import { cellPolicyOf } from './preset-fixture.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tapeText = readFileSync(join(here, 'fixtures', 'tape.synthetic.jsonl'), 'utf8');
@@ -32,8 +33,8 @@ test('a tape round-trips through parse and replays identically every time', asyn
     [1, 2, 3],
   );
 
-  const first = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C2') });
-  const again = await replayTape(parseTape(tapeText), { ...OPTIONS, policy: cellPolicy('C2') });
+  const first = await replayTape(tape, { ...OPTIONS, policy: cellPolicyOf('C2') });
+  const again = await replayTape(parseTape(tapeText), { ...OPTIONS, policy: cellPolicyOf('C2') });
 
   assert.equal(first.records.length, 3);
   assert.deepEqual(again.records, first.records, 'records must be identical field for field');
@@ -66,8 +67,8 @@ test('a malformed tape fails at the offending line instead of producing a partia
 
 test('the cells behave as the ablation claims: C0 selects nothing, C2 accounts a real budget', async () => {
   const tape = parseTape(tapeText);
-  const c0 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C0') });
-  const c2 = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C2') });
+  const c0 = await replayTape(tape, { ...OPTIONS, policy: cellPolicyOf('C0') });
+  const c2 = await replayTape(tape, { ...OPTIONS, policy: cellPolicyOf('C2') });
 
   for (const record of c0.records) {
     assert.equal(record.selected, 0, 'the baseline cell never recalls anything by design');
@@ -96,7 +97,7 @@ test('the cells behave as the ablation claims: C0 selects nothing, C2 accounts a
 
 test('a taped system prompt becomes the pinned block and never moves between steps', async () => {
   const tape = parseTape(tapeText);
-  const result = await replayTape(tape, { ...OPTIONS, policy: cellPolicy('C2') });
+  const result = await replayTape(tape, { ...OPTIONS, policy: cellPolicyOf('C2') });
 
   const pinned = result.records.map((r) => r.blocks['pinned'] ?? 0);
   assert.ok(

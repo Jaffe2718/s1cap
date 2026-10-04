@@ -1003,3 +1003,113 @@ test('a legacy question spelling on the command line is refused or noted, and a 
     assert.equal('questionPlacement' in stored, false, 'and the deleted axis is not in the file at all');
   });
 });
+
+test('a cell named with no preset beside it is reported, because the defaults are not that arm', () => {
+  // `cellPolicy()` stopped setting a cell's switches on 2026-10-05, so a profile naming `cell: C0` with no preset
+  // resolves to `defaultPolicy()` — trace on, recall selection on, delivery on, which is **C2's shape labelled C0**.
+  // Every value is legal and nothing refuses, so the only thing that can catch it is a sentence, and `setup.mjs` is
+  // the only thing that puts the file there.
+  const c0 = JSON.parse(readFileSync(new URL('../../../bench/cells/C0.json', import.meta.url), 'utf8')) as unknown;
+  const staged = resolvePluginConfig({ cell: 'C0' } as never, { file: '/tmp/cell-preset.json', value: c0 });
+  assert.equal(
+    staged.policy.warnings.filter((i) => i.path === 'cell').length,
+    0,
+    'a cell whose preset was read says nothing: this is the ordinary path',
+  );
+  assert.equal(staged.policy.policy.tas.on, false, 'and it runs the baseline, because the file said so');
+
+  const bare = resolvePluginConfig({ cell: 'C0' } as never, { file: null, value: undefined });
+  const warning = bare.policy.warnings.find((i) => i.path === 'cell');
+  assert.notEqual(warning, undefined, `the missing preset must be reported: ${JSON.stringify(bare.policy.issues)}`);
+  assert.match(warning?.message ?? '', /no cell preset was read/, 'it names what is missing');
+  assert.match(warning?.message ?? '', /not the settings C0 is defined by/, 'and what the run therefore is not');
+  assert.equal(bare.policy.ok, true, 'and it stays a warning: a session that means the defaults is legitimate');
+  // The claim the warning makes is a measured one, so the test measures it: the defaults are not C0. This is the
+  // difference `setup.mjs` exists to prevent, and it is one field deep — which is exactly why nothing would notice.
+  assert.equal(bare.policy.policy.recall.tier1, 's1', 'the default selects with s1');
+  assert.equal(staged.policy.policy.recall.tier1, 'off', 'while C0 — as its file defines it — selects nothing');
+});
+
+test('every path a cell preset writes has a field on the wiring record', () => {
+  // The record is the authority for "what did this cell run", and a preset path with no field here is a value that
+  // reaches the session and no artifact: `bench/cells/C2.json` carried `recall.threshold: 0.6` through a round that
+  // ran 0.55 precisely because the file and the record were not joined up. `cellPreset.fromPreset` names the paths,
+  // which is what let the gap be found; this asserts the values, and it is written as a walk over the files so a path
+  // added to a preset later fails here instead of vanishing from the record.
+  const record = (cell: string): Record<string, unknown> => {
+    const h = harness();
+    return withEmptyHome(() => {
+      const home = process.env['DSH_HOME'] as string;
+      mkdirSync(join(home, '.s1cap'), { recursive: true });
+      writeFileSync(
+        join(home, '.s1cap', 'cell-preset.json'),
+        readFileSync(new URL(`../../../bench/cells/${cell}.json`, import.meta.url), 'utf8'),
+        'utf8',
+      );
+      // No `s1` override: the point is to read back what the *preset* supplied, so the patch must not replace it.
+      apply(h.ctx, { enabled: true, observation: 'tape', laya: layaIdle });
+      const tape = readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tape.jsonl'), 'utf8');
+      const found = tape
+        .split('\n')
+        .filter((l) => l.trim() !== '')
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .find((r) => r['kind'] === 'wiring');
+      assert.ok(found, 'the tape must hold a wiring record');
+      return found;
+    });
+  };
+
+  /** Preset path → where its value has to appear on the wiring record. A path with no entry fails the test below. */
+  const FIELD: Record<string, (r: Record<string, unknown>) => unknown> = {
+    tas: (r) => (r['tas'] as Record<string, unknown>)['on'],
+    'tas.on': (r) => (r['tas'] as Record<string, unknown>)['on'],
+    'tas.tMaxChars': (r) => (r['tas'] as Record<string, unknown>)['tMaxChars'],
+    'tas.updatePolicy': (r) => (r['tas'] as Record<string, unknown>)['updatePolicy'],
+    'recall.threshold': (r) => (r['recall'] as Record<string, unknown>)['r'],
+    'recall.depth': (r) => (r['recall'] as Record<string, unknown>)['d'],
+    'recall.tier1': (r) => (r['recall'] as Record<string, unknown>)['tier1'],
+    deliver: (r) => r['deliver'],
+    'tail.k': (r) => (r['tail'] as Record<string, unknown>)['k'],
+    's1.provider': (r) => r['configuredProvider'],
+    's1.questionsPerCall': (r) => (r['s1Knobs'] as Record<string, unknown>)['questionsPerCall'],
+    's1.retryAttempts': (r) => (r['s1Knobs'] as Record<string, unknown>)['retryAttempts'],
+    's1.admissionLimit': (r) => (r['governance'] as Record<string, unknown>)['admissionLimit'],
+    // `cell` is provenance rather than a policy value: it decides which file is read, and the record states the file.
+    cell: (r) => (r['cellPreset'] as Record<string, unknown>)['file'] !== null,
+  };
+
+  for (const cell of ['C0', 'C1', 'C2']) {
+    const preset = JSON.parse(readFileSync(new URL(`../../../bench/cells/${cell}.json`, import.meta.url), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const record_ = record(cell);
+    const leaves: string[] = [];
+    const walk = (obj: Record<string, unknown>, prefix: string): void => {
+      for (const [key, value] of Object.entries(obj)) {
+        if (key === '_meta') continue;
+        const path = prefix === '' ? key : `${prefix}.${key}`;
+        if (value !== null && typeof value === 'object' && !Array.isArray(value)) walk(value as Record<string, unknown>, path);
+        else leaves.push(path);
+      }
+    };
+    walk(preset, '');
+    for (const path of leaves) {
+      const read = FIELD[path];
+      assert.notEqual(
+        read,
+        undefined,
+        `${cell}: the preset writes \`${path}\`, which the wiring record has no field for — a value that reaches the ` +
+          'session and no artifact',
+      );
+      if (path === 'cell') continue; // provenance: what is asserted is that the record names a file at all
+      const plain = (o: Record<string, unknown>, p: string): unknown =>
+        p.split('.').reduce<unknown>((acc, k) => (acc as Record<string, unknown>)?.[k], o);
+      assert.deepEqual(
+        read(record_),
+        plain(preset, path),
+        `${cell}: the wiring record's value for \`${path}\` must be the one its file wrote`,
+      );
+    }
+  }
+});

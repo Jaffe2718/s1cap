@@ -8,7 +8,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { AssociationGraph, cellPolicy, defaultPolicy, observeStep } from '../src/index.ts';
+import { AssociationGraph, defaultPolicy, observeStep } from '../src/index.ts';
+import { cellPolicyOf } from './preset-fixture.ts';
 import { TELEMETRY_SCHEMA_VERSION } from '../src/index.ts';
 
 /** A DSH-shaped message list: roles and part `type`s as read from dsh-llm's message.js. */
@@ -164,7 +165,7 @@ test('the control-plane record carries the frozen schema and the full C0/C2 cont
   assert.equal(c2.event.layoutOrder.at(-1), 'anchor', 'the question is last, in the record as in the layout');
 
   // C0 is the baseline cell: no System-1 selection at all, so nothing is recalled.
-  const c0Policy = cellPolicy('C0');
+  const c0Policy = cellPolicyOf('C0');
   const graph = new AssociationGraph();
   const c0 = await observeStep({ ...BASE, policy: c0Policy, graph });
   assert.equal(c0.event.selected, 0);
@@ -182,7 +183,7 @@ test('the control-plane record carries the frozen schema and the full C0/C2 cont
 });
 
 test('the graph accumulates across steps, so a later step can recall an earlier one', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   const first = await observeStep({ ...BASE, policy, graph, messages: MESSAGES.slice(0, 2), step: 1 });
   const second = await observeStep({ ...BASE, policy, graph, step: 2 });
@@ -200,7 +201,7 @@ test('the tail block holds the newest turns of the pool, and never the anchor', 
   // against the anchor rather than against a position: every segment except the anchor, the anchor's sibling chunks
   // and the pinned prefix is in the pool, whatever the anchor is. Exercised through the graph-window path (empty
   // payload) because that is what production takes: `pre-step` hands over an empty array after the first step.
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   policy.tail.k = 3;
   const graph = new AssociationGraph();
   // Seed the graph the way upkeep would: the anchor first, then the turns produced for it.
@@ -237,7 +238,7 @@ test('the tail block holds the newest turns of the pool, and never the anchor', 
  * reads it as part of the transcript either way. What is excluded is its use as a *recall candidate*.
  */
 test('a delivered block is never ingested, never recalled, and never in the token baseline', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   policy.tail.k = 2;
   const graph = new AssociationGraph();
   await observeStep({ ...BASE, policy, graph, messages: MESSAGES, step: 1 });
@@ -285,7 +286,7 @@ test('a delivered block is never ingested, never recalled, and never in the toke
  * for a walk that found something and for one that found nothing.
  */
 test('the assembly record carries the recall walk as a nested tree of ids', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   policy.tail.k = 1; // a1 is a tail turn, so it cannot also be a recalled one - it is still in the tree
   const graph = new AssociationGraph();
   const at = BASE.now;
@@ -333,7 +334,7 @@ test('the assembly record carries the recall walk as a nested tree of ids', asyn
 });
 
 test('a step whose recall found nothing records recallTree as {}, not as a missing field', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   graph.addSegments([
     {
@@ -379,7 +380,7 @@ test('a step whose recall found nothing records recallTree as {}, not as a missi
  * index 3 of its own segment list; index 3 of the graph is `u1`, which is what the old expression returned.
  */
 test('the walk is rooted on the current question, not on the segment that index happens to name in the graph', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   policy.tail.k = 1;
   const graph = new AssociationGraph();
   const at = BASE.now;
@@ -467,7 +468,7 @@ test('the walk is rooted on the current question, not on the segment that index 
  * called, that it is called with the anchor's own id, and that it happens before `assemble()` reads the graph.
  */
 test('observeStep offers the anchor id to beforeAssemble, and only after the anchor is chosen', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   const seen: string[] = [];
   // The hook is called with the anchor's id *and* with the anchor already in the graph, which is what makes the
@@ -492,7 +493,7 @@ test('observeStep offers the anchor id to beforeAssemble, and only after the anc
 });
 
 test('a throwing beforeAssemble costs the wait, never the step or the observation', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   const observation = await observeStep({
     ...BASE,
@@ -514,7 +515,7 @@ test('a throwing beforeAssemble costs the wait, never the step or the observatio
 });
 
 test('a rejecting beforeAssemble is contained too: it is awaited, not left to reject the promise', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   const observation = await observeStep({
     ...BASE,
@@ -532,7 +533,7 @@ test('a rejecting beforeAssemble is contained too: it is awaited, not left to re
 test('a delivered block arriving on the session-event stream is dropped at ingestion', async () => {
   // The path production takes: upkeep folds the session-event stream into the graph, so the delivered message
   // comes back as a RawEvent rather than being added by hand. The ingestion gate is what keeps it out.
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   const obs = await observeStep({
     ...BASE,
@@ -573,7 +574,7 @@ test('a delivered block arriving on the session-event stream is dropped at inges
 test('the assembly record carries the fail-open admission count, and omits it when it is zero', async () => {
   // The fixture is `core.test.ts`'s fail-open pair, driven through `observeStep` instead of `assemble`: a window
   // whose only pair the backend never judged, so recall finds no edge and the fail-open rule is what fills the block.
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   const observation = await observeStep({
     ...BASE,
@@ -654,7 +655,7 @@ test('the assembly record carries the fail-open admission count, and omits it wh
  * own message, tool call or tool result as well, which is the anchor on every step after the turn's first.
  */
 test('a chunk of the current question is never recalled as history', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   // One long user message, chunked by the segmenter (512-token chunks) into several pieces that all share
   // `chunkOf: 'q'`. The paragraph breaks are what makes the segmenter pack it into more than two pieces; a block of
   // newlines with no blank line goes through the sentence splitter and can come out as one or two.
@@ -766,7 +767,7 @@ test('a chunk of the current question is never recalled as history', async () =>
  * one output.
  */
 test('the walk is seeded from the newest input event, and the seed advances through an agent loop', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   policy.tail.k = 2;
   const graph = new AssociationGraph();
   const at = BASE.now;
@@ -870,7 +871,7 @@ test('the walk is seeded from the newest input event, and the seed advances thro
  * prefix that follows it in the same payload, and it is the root rather than merely the last block.
  */
 test('a step whose newest event is the user\'s own question is still anchored there', async () => {
-  const policy = cellPolicy('C2');
+  const policy = cellPolicyOf('C2');
   const graph = new AssociationGraph();
   const at = BASE.now;
   graph.addSegments([

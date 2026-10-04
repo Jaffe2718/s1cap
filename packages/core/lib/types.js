@@ -888,60 +888,53 @@ export function defaultPolicy()                 {
 export function cellPolicy(cell      )                 {
   const p = defaultPolicy();
   p.cell = cell;
-  switch (cell) {
-    case 'C0': // baseline: chronological append, native compaction only
-      p.tas.on = false;
-      p.recall.tier1 = 'off';
-      // **`deliver` is not set here any more (2026-10-05), and its absence is the point rather than a gap.** The
-      // baseline is the one cell that does not take context management away from the harness: it delivers nothing
-      // at all, so what it measures is the harness doing what it would have done anyway. That value now comes from
-      // `bench/cells/C0.json` (`deliver: false`), because a switch the cell *is* belongs in the file a reader
-      // compares against the run - and because this function is code, it could not be changed by a researcher, not
-      // even through the panel. The wiring record carries the result and `cellPreset.fromPreset` names where it came
-      // from, so "which value ran" is readable without opening this file.
-      // No layout line, and the absence is the point: the baseline is `M([x, q])` — the long context, then the
-      // question — which is what the defaults lay out with TAS off. The `xFirst = false` that used to sit here was
-      // written to make the baseline chronological, and it recorded `pinned, anchor, recalled, tail`: the question
-      // *first*, which is the baseline of no paper arm either. The paper's baseline ends in `q` like its two other
-      // conditions, and this cell now does too — with the second axis deleted, `layout.order` here ends in `anchor`
-      // and there is no setting that can say otherwise.
-      break;
-    case 'C1': // the paper's Trace-as-State arm: the trace reaches the model, no recall selection and no System-1 lane
-      p.tas.on = true;
-      p.recall.tier1 = 'off';
-      // **Re-opened 2026-10-04**, reversing the 2026-10-02 re-registration, because the reason that closed it is
-      // gone. It was closed on a fact that is no longer true: delivery inserted the `recalled` block and nothing
-      // else (`T` was deliberately never sent), so with `tier1: 'off'` this arm's channel was empty by
-      // construction, every assembly refused with "nothing to insert", and the model read what C0's model read -
-      // two rounds agreeing (20261002-2037: 76 assemblies, 0 with a non-empty recalled block; 20261001-1300: 13
-      // assemblies, 13 refusals, 0 `delivered: true`). C1 then became a second control arm: a placebo.
-      //
-      // `tas.on` now implies `T` is delivered (`packages/dsh-plugin/src/context-delivery.ts`), so this arm's
-      // channel carries the trace alone and fires. That is what makes it the arm the whole scheme was missing:
-      // `C0 -> C1` is the paper's Trace-as-State contrast with the System-1 lane **absent** (`s1.provider: 'none'`
-      // stays, so the TAS claim is measurable with the lane out rather than merely unscoped), and `C1 -> C2` is
-      // S1CAP's recall contribution on top of it. Leaving this arm closed would conflate those two variables in
-      // every C0-vs-C2 comparison, because C2 now differs from C0 in the recall selection *and* in `T`.
-      //
-      // The honest part that survives: **the layout axis reaches the model in no arm.** The one insertion channel
-      // appends, so the injected message is `T` followed by the recalled turns whatever the recorded order was; the
-      // layout axis is measured in `layout.order`, not in the delivered text. C1 is a control over *recall
-      // selection* and over the lane, not over the layout.
-      //
-      // `deliver: true` is not set here any more (2026-10-05); `bench/cells/C1.json` carries it. This arm and C2 are
-      // the two that own context management, and the file says so where a reader can change it.
-      break;
-    case 'C2':
-      // the full configuration: the paper's Trace-as-State ordering plus S1 governance (recall selection). The
-      // second half of that governance used to be a plan gate; it is gone, and the comment above `s1` says why.
-      //
-      // `tier1: 's1'` is stated here as well as in `defaultPolicy()` because it is the half that decides whether
-      // this cell has anything to deliver at all: `'s1'` is the tier-1 mode that exists (one batched `noul` call),
-      // and until 2026-10-02 the preset said `'embed'` - a mode with no implementation anywhere, read by exactly
-      // one test (`!== 'off'`). The cell that *is* the full configuration must name the mechanism it runs.
-      p.recall.tier1 = 's1';
-      // `deliver: true` likewise comes from `bench/cells/C2.json` since 2026-10-05.
-      break;
-  }
+  // **No cell sets a switch here any more (2026-10-05).** What this returns is `defaultPolicy()` with the cell's
+  // name on it; the cell's *configuration* is `bench/cells/<cell>.json`, folded in as a layer by `mergeCellPreset`
+  // (`packages/core/src/cell-preset.ts`) and resolved by `validatePolicy`. Precedence is
+  // `defaultPolicy()` < cell preset < explicit config in the profile patch.
+  //
+  // Why the six assignments that used to live here are gone - `tas.on` and `recall.tier1` for C0, `recall.tier1`
+  // for C1 and C2, and `deliver` for all three (that one moved earlier the same day):
+  //
+  //   - **A switch a cell *is* belongs in the file a reader compares against the run.** These were code, so a
+  //     researcher could not change them - not even through the settings panel, which owns `depth`,
+  //     `relevanceThreshold`, `window`, `anchorWaitMs` and `tracePlacement` and nothing else. That is the same
+  //     defect `recall.fanout` was deleted for: a parameter that decides behaviour, reachable only by editing source.
+  //   - **The record now carries the result and its provenance.** The wiring record's
+  //     `cellPreset: {file, fromPreset, overridden}` names which fields the JSON supplied and which the profile patch
+  //     then replaced, so "which value ran, and where did it come from" is readable without opening this file. The
+  //     protection `check-doc-pointers.mjs`'s `preset-override` rule provided did not disappear; it moved from "a
+  //     preset may not carry this" to "a preset may carry this and the tape says so".
+  //
+  // What still cannot be reached from a preset, and why: `tracePlacement` (below) and `assemblyTrigger` are the
+  // paper's arm and the assembly trigger, and a preset carrying either would put one cell on one side of a contrast
+  // the paper defines. They stay code-owned, and `CODE_OWNED_SWITCHES` in the checker still refuses the first.
+  //
+  // The history those six assignments recorded is kept below, because each line is a measurement rather than a
+  // preference, and a reader comparing this build with a round recorded before 2026-10-05 needs it:
+  //
+  //  * **C0 is the baseline**: chronological append, native compaction only, no trace, no selection, and it delivers
+  //    nothing at all - so what it measures is the harness doing what it would have done anyway. It lays out
+  //    `M([x, q])`, the long context then the question, which is what the defaults produce with TAS off. The
+  //    `xFirst = false` that used to sit here was written to make the baseline chronological, and it recorded
+  //    `pinned, anchor, recalled, tail`: the question *first*, which is the baseline of no paper arm either. The
+  //    paper's baseline ends in `q` like its two other conditions, and this cell now does too - with the second axis
+  //    deleted, `layout.order` ends in `anchor` and there is no setting that can say otherwise.
+  //  * **C1 is the paper's Trace-as-State arm with the System-1 lane absent** (`s1.provider: 'none'` in its preset),
+  //    re-opened 2026-10-04 because every fact that had closed it stopped being true. It was closed while delivery
+  //    inserted the `recalled` block and nothing else and `tier1: 'off'` made that block empty by construction, so
+  //    every assembly was refused with "nothing to insert" and the arm was a placebo - round `20261002-2037`: 76
+  //    assemblies, 0 with a non-empty recalled block; round `20261001-1300`: 13 assemblies, 13 refusals, 0
+  //    `delivered: true`. `tas.on` now implies `T` is delivered (`packages/dsh-plugin/src/context-delivery.ts`), so
+  //    this arm's channel carries the trace alone and fires: `C0 -> C1` is the trace's contrast with the lane out,
+  //    and `C1 -> C2` is the recall selection on top of it. Leaving it closed would conflate those two variables in
+  //    every C0-vs-C2 comparison.
+  //  * **The honest part that survives for both arms: the layout axis reaches the model in no arm.** The one
+  //    insertion channel appends, so the injected message is `T` followed by the recalled turns whatever the recorded
+  //    order was; the layout axis is measured in `layout.order`, not in the delivered text. C1 is a control over
+  //    recall selection and over the lane, not over the layout.
+  //  * **`tier1: 's1'` for C2** states the mechanism the full configuration runs - the one batched `noul` call that
+  //    exists. Until 2026-10-02 the preset said `'embed'`, a mode with no implementation anywhere, read by exactly
+  //    one test (`!== 'off'`), so a cell declared a mechanism it did not use.
   return p;
 }

@@ -11,7 +11,7 @@ import {
   UNENFORCED_KNOBS,
   validatePolicy,
 } from '../src/config.ts';
-import { mergeCellPreset } from '../src/cell-preset.ts';
+import { cellPolicyOf, resolveWithPreset } from './preset-fixture.ts';
 
 test('no config means the defaults, and every documented path exists on the policy', () => {
   const result = validatePolicy(undefined);
@@ -152,12 +152,12 @@ test('the cell presets carry the depth explicitly and inherit the window, which 
     };
     assert.equal(preset.recall?.['depth'], 16, `${cell} carries the depth the default also sets`);
     assert.equal('window' in (preset.recall ?? {}), false, `${cell} inherits recall.window rather than pinning it`);
-    // `cellPolicy()` starts from the defaults and moves neither field, so **the preset is not where this value comes
+    // `cellPolicyOf()` starts from the defaults and moves neither field, so **the preset is not where this value comes
     // from in this path** - the two agree because both are 16. The earlier wording here said the depth "resolves from
     // its own preset value", which was false: nothing in `cellPolicy` reads the file, and that gap is what
     // `mergeCellPreset` closes. The preset-driven path is asserted where it now lives, in `cell-preset.test.ts`
     // ("every shipped preset reaches the policy it declares, read from disk").
-    const policy = cellPolicy(cell);
+    const policy = cellPolicyOf(cell);
     assert.equal(policy.recall.window, 16, `${cell} resolves the window from defaultPolicy()`);
     assert.equal(policy.recall.depth, 16, `${cell} resolves the depth from defaultPolicy() as well`);
   }
@@ -247,9 +247,8 @@ test('the assembly trigger is a settable path whose default is the measured beha
   assert.equal(defaultPolicy().assemblyTrigger, 'every-step', 'the brief\'s requirement is the default');
   assert.ok(KNOWN_PATHS.includes('assemblyTrigger'), 'declared, so a profile patch can set it');
   // The cell is supplied the way the runtime supplies it — its own preset under the patch — because `deliver` moved
-  // out of `cellPolicy()` on 2026-10-05 and a bare `validatePolicy({ cell: 'C2' })` would leave it at the default.
-  const c2Preset = JSON.parse(readFileSync(new URL('../../../bench/cells/C2.json', import.meta.url), 'utf8')) as unknown;
-  const narrow = validatePolicy(mergeCellPreset({ cell: 'C2', assemblyTrigger: 'claimed-only' }, c2Preset).raw);
+  // out of `cellPolicyOf()` on 2026-10-05 and a bare `validatePolicy({ cell: 'C2' })` would leave it at the default.
+  const narrow = resolveWithPreset('C2', { assemblyTrigger: 'claimed-only' });
   assert.equal(narrow.ok, true, JSON.stringify(narrow.errors));
   assert.deepEqual(narrow.warnings, [], 'a declared path, not an unknown key');
   assert.equal(narrow.policy.assemblyTrigger, 'claimed-only', 'and the narrow value is the one applied');
@@ -324,7 +323,7 @@ test('the question\'s position is not a declared path any more, and the arm is t
   assert.equal(ENUM_RULES.some((rule) => rule.path === 'questionPlacement'), false, 'and from the enum rules');
   assert.equal(KNOWN_PATHS.includes('tracePlacement'), true, 'while the arm stays a settable path');
   for (const cell of ['C0', 'C1', 'C2'] as const) {
-    const p = cellPolicy(cell);
+    const p = cellPolicyOf(cell);
     assert.equal('questionPlacement' in p, false, `${cell}: no cell carries a question position`);
     assert.equal(typeof p.tracePlacement, 'string', `${cell}: the arm is the layout field the cell states`);
   }
@@ -449,7 +448,7 @@ test('the retired per-node cap is reported by name, and points at recall.thresho
   assert.equal(KNOWN_PATHS.includes('recall.fanout'), false, 'and from every path a profile patch may set');
   assert.equal(NUMBER_RULES.some((rule) => rule.path === 'recall.fanout'), false, 'and from the numeric rules');
   for (const cell of ['C0', 'C1', 'C2'] as const) {
-    assert.equal('fanout' in cellPolicy(cell).recall, false, `${cell}: no cell carries the cap`);
+    assert.equal('fanout' in cellPolicyOf(cell).recall, false, `${cell}: no cell carries the cap`);
   }
   // The key the validator actually reads is the dotted one, which is what a profile writes: `recall: { fanout: 8 }`.
   assert.ok(
@@ -540,7 +539,7 @@ test('tier-1 "embed" is rejected with its own reason, not read as "not off"', ()
   // Fail-safe, as everywhere in this file: reported, and the cell's own value is kept - for C2 that is now `s1`,
   // so a legacy profile runs the tier its cell names rather than the one it asked for.
   assert.equal(legacy.policy.recall.tier1, 's1', 'C2 is the base policy and C2 selects with s1');
-  assert.equal(validatePolicy({ cell: 'C1', recall: { tier1: 'embed' } }).policy.recall.tier1, 'off', 'a control arm falls back to its own value');
+  assert.equal(resolveWithPreset('C1', { recall: { tier1: 'embed' } }).policy.recall.tier1, 'off', 'a control arm falls back to its own value');
   // The generic enum path still exists for genuinely unknown strings, and the legacy sentence is not printed for
   // them: "not a value I know" and "a mode I do not implement" are different facts.
   const unknown = validatePolicy({ recall: { tier1: 'ann' } });
@@ -662,9 +661,9 @@ test('recall selection without the state proxy warns: that pairing measured wors
 
   // Absent in all three cells, and it is the *pairing* that decides - not "S1CAP is on" and not the cell
   // name. A rule written against the cell would be a rule about a preset rather than about the mechanism.
-  assert.deepEqual(validatePolicy({ cell: 'C0' }).warnings, [], 'both halves off: the baseline is not the pairing');
-  assert.deepEqual(validatePolicy({ cell: 'C1' }).warnings, [], 'the stabiliser with recall off is the counterpart, not the pairing');
-  assert.deepEqual(validatePolicy({ cell: 'C2' }).warnings, [], "the project's own configuration runs both halves and is silent");
+  assert.deepEqual(resolveWithPreset('C0').warnings, [], 'both halves off: the baseline is not the pairing');
+  assert.deepEqual(resolveWithPreset('C1').warnings, [], 'the stabiliser with recall off is the counterpart, not the pairing');
+  assert.deepEqual(resolveWithPreset('C2').warnings, [], "the project's own configuration runs both halves and is silent");
 
   // And it follows the effective policy, so an override creates or removes it wherever the value came from.
   assert.deepEqual(
@@ -673,12 +672,12 @@ test('recall selection without the state proxy warns: that pairing measured wors
     'turning the stabiliser on fixes the pairing',
   );
   assert.equal(
-    validatePolicy({ cell: 'C0', recall: { tier1: 's1' } }).warnings[0]?.path,
+    resolveWithPreset('C0', { recall: { tier1: 's1' } }).warnings[0]?.path,
     'recall.tier1',
     'turning recall on inside the baseline creates it, even though the baseline itself is silent',
   );
   assert.equal(
-    validatePolicy({ cell: 'C2', tas: { on: false } }).warnings.filter((i) => i.path === 'recall.tier1').length,
+    resolveWithPreset('C2', { tas: { on: false } }).warnings.filter((i) => i.path === 'recall.tier1').length,
     1,
     'and turning the stabiliser off inside the full configuration creates it too',
   );

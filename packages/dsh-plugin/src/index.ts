@@ -168,6 +168,37 @@ export function resolvePluginConfig(
     extraTopLevel: ['laya', 'telemetry', 'enabled', 'observation'],
   });
   const policy = validatePolicy(merged.raw, ['laya', 'telemetry', 'enabled', 'observation']);
+  // ---------------------------------------------------------------------------------------------------------------
+  // A cell named with no preset beside it is a configuration that is not the arm it says it is
+  // ---------------------------------------------------------------------------------------------------------------
+  //
+  // `cellPolicy()` stopped setting a cell's switches on 2026-10-05, so a profile writing `cell: C0` and no preset now
+  // resolves to `defaultPolicy()` — and the two are not the same policy. Measured against the defaults: C0's file
+  // says `recall.tier1: 'off'` where the default is `'s1'`; C1's file says `tas.on: true`, `tier1: 'off'` and
+  // `deliver: true` where the defaults say `false`, `'s1'`, `false`; C2's says `tas.on: true` and `deliver: true`
+  // where the defaults say `false`. Every one of those values is legal and nothing refuses, so nothing but a sentence
+  // can catch it — and `setup.mjs` is the only thing that puts the file there.
+  //
+  // A warning rather than an error: a session that names a cell and means the defaults is a legitimate thing to run
+  // (that is what every round before this change did), and the plugin must not refuse to start over a missing
+  // convenience copy. What it must not do is stay quiet while a run filed under a cell's name behaves like a
+  // different configuration.
+  const namedCell = typeof source['cell'] === 'string' ? (source['cell'] as string) : null;
+  if (namedCell !== null && (preset?.file ?? null) === null) {
+    policy.issues.push({
+      path: 'cell',
+      severity: 'warning',
+      message:
+        `this profile names cell ${namedCell} but no cell preset was read (\`<DSH_HOME>/.s1cap/cell-preset.json\` is ` +
+        `absent, and \`setup.mjs\` is what copies it from bench/cells/${namedCell}.json). Since 2026-10-05 a cell's ` +
+        `switches live in that file, so this session runs \`defaultPolicy()\` — not the settings ${namedCell} is ` +
+        'defined by. Measured, the defaults are not that cell: C0 differs in `tas.on` (true against the file\'s ' +
+        'false) and `recall.tier1` (s1 against off), and C1 and C2 differ in `tas.on` and `deliver` as well. A round ' +
+        'recorded under this name would be filed as an arm it did not run',
+    });
+    policy.warnings = policy.issues.filter((i) => i.severity === 'warning');
+    policy.ok = policy.issues.filter((i) => i.severity === 'error').length === 0;
+  }
   // A preset issue is an **error**, not a warning: the file is this project's own and a path it does not have means
   // the file and the build disagree about what will run. `validatePolicy` walks only the top level for unknown keys,
   // so without this a typo inside a section (`recall.thrsehold`) was dropped with nothing said at all.
@@ -1686,6 +1717,19 @@ function applyInner(ctx: PluginContext, raw?: Partial<S1CapPluginConfig>): void 
           tier1: config.recall.tier1,
         },
         tas: config.tas,
+        // **`tail` and the two `s1` knobs a preset supplies, added 2026-10-05 so the record covers every path the
+        // presets write.** Each of the three presets carries `tail: {k: 3}` and `s1.questionsPerCall`, and C2 also
+        // carries `s1.retryAttempts`; none of the three values appeared anywhere in this record. `cellPreset
+        // .fromPreset` named the paths, so a reader could see that *something* supplied them — but not what, which is
+        // the same half-statement this record exists to avoid. The check is mechanical: every leaf
+        // `bench/cells/<cell>.json` writes has a field here, and `packages/dsh-plugin/test/config.test.ts` walks that
+        // list against this object so a preset path added later without a line here fails the suite instead of
+        // disappearing from the authority.
+        tail: config.tail,
+        s1Knobs: {
+          questionsPerCall: config.s1.questionsPerCall,
+          retryAttempts: config.s1.retryAttempts,
+        },
         governance,
       }) + '\n',
     );
