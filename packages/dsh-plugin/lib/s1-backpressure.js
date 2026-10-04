@@ -45,6 +45,17 @@
  *     honest coverage ratio rather than one inflated by work the run declined to offer. What was
  *     left out is counted in `deferredPairs`, which is written on the assembly record beside it.
  *
+ *     **Corrected 2026-10-05: the refusal half is right and the conclusion drawn from it is not.** A refusal
+ *     really is excluded from `scoredPairs` - but `scoredPairs` also counted **re-offers**, so the ratio was
+ *     never an honest coverage. Measured in round `20261004-0233`'s C2: `scoredPairs` 10 157 against **2 211**
+ *     distinct pairs in the graph's `scores` map (exactly `67*66/2`), i.e. **4.59x** inflation of the
+ *     denominator from duplicate work, before any refusal is considered. `deferredPairs` is a further trap for a
+ *     reader of that ratio: it is a **tail counted once from the first refusal**, not a rate - `16 767 =
+ *     Sum_{i=23}^{184} i` with `185 - 23 = 162 = deferredSegments`, and it does not shrink as the graph catches
+ *     up. The two are also **not additive**: `scoredPairs + deferredPairs` = 26 924 against 17 020 offered, with
+ *     1 958 pairs counted in both. A coverage figure has to be built from **distinct pairs settled against
+ *     `Sum min(i, w)`**, not from this pair of counters.
+ *
  * Time is injected, so the whole state machine is testable without sleeping.
  */
 

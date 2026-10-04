@@ -72,20 +72,22 @@ DSH's session model separates a **persistent append-only event log (the human re
 
 ## 4. Experimental Design
 
-### 4.1 2×2 Factorial, three arms run (within-task pairing)
+### 4.1 Three arms out of the 2×2 design space (within-task pairing)
 
 Three cells: **`C0`** baseline, **`C1`** second control, **`C2`** full configuration (the arm under test). **The
 switches each arm carries are not restated here** — the arm definitions are the presets plus the policy:
 `bench/cells/C0.json`–`C2.json` and `cellPolicy()` (`packages/core/src/types.ts`), and a disagreement with this
 proposal is a reason to read those. What this proposal fixes is how the three arms are read:
 
-**Factor A reaches the model through no cell.** `tas.on`/`xFirst` are recorded configuration in every arm — the
-delivery channel inserts one `recalled` block and never the assembled order — so the ordering becomes measurable
-only with the model-view write-back, which does not exist (`docs/ARCHITECTURE.md` §5 carries it as a 🔜 row;
-`packages/proxy` is not written). What separates the arms on the model's side today is recall selection and its
-insertion, and the registered contrast is **`C0` vs `C2`**: `C1` is a second control arm whose model-visible input
-is `C0`'s. Factor B is recall selection alone — the plan gate is designed, implemented and unit-tested but wired
-into no cell, and has been removed from the policy and the presets (`docs/FORMULAS.md` §4).
+**Factor A reaches the model through no cell.** The layout axis (`tracePlacement`, the only one — the question `q` is
+last in every layout by construction, so no field moves it) is recorded configuration in every arm, and no arm
+delivers the assembled order — the one insertion channel appends, and
+it never delivers a layout — so the ordering becomes measurable only with the model-view write-back, which does not
+exist (`docs/ARCHITECTURE.md` §5 carries it as a 🔜 row; `packages/proxy` is not written). What separates the arms on
+the model's side today is recall selection and its insertion, and the registered contrast is **`C0` vs `C2`**: `C1` is
+a second control arm whose model-visible input is `C0`'s. Factor B is recall selection alone — the plan gate is
+designed, implemented and unit-tested but wired into no cell, and has been removed from the policy and the presets
+(`docs/FORMULAS.md` §4).
 
 Same tasks, same model, same harness version, same tool allowlist, randomized order. The runs pin
 `reasoningEffort` on `deepseek-flash` (DeepSeek-V4.1-Flash) and claim no sampling parameter, because DSH exposes
@@ -96,7 +98,8 @@ successor**: per step it moved more uncached input and more output than the base
 its System-1 coverage was below the 0.5 floor that makes a cell a measurement of System-1 at all (`bench/README.md`
 carries the per-step comparison, `docs/FORMULAS.md` §5.1 states the floor, and `docs/AGENT_BRIEF.md` §5 maps the
 round's labels). Round `20261001-1300` ran under an earlier labelling: `C1` (baseline) is
-today's **`C0`**, `C2` (read as TAS alone then — its state proxy and x-first ordering were recorded configuration
+today's **`C0`**, `C2` (read as TAS alone then — its state proxy and the retired `xFirst` layout it carried were
+recorded configuration
 and **nothing was delivered**, so it is a second control arm today, not a "TAS alone" arm) is today's **`C1`**, `C3`
 (recall selection with `tas.on: false`) is **dropped,
 no successor**, and `C4` (the full configuration) is today's **`C2`**.
@@ -193,3 +196,228 @@ Suggested division of labor: one person leads core + the DSH plugin, one leads b
 ## 10. References (all verified via URL; the complete archive is in RELATED_WORK.md)
 
 Trace as State: arXiv:2609.02702 · Jev: docs.typesafe.ai · Laya: github.com/NandhaKishorM/laya · EdgeJev: github.com/yzfly/edgejev · Kev: github.com/jaredpalmer/kev · JevBench: benchmarkheaven.com/jev-models · DeepSeek pricing: api-docs.deepseek.com/quick_start/pricing · GLM pricing: docs.z.ai/guides/overview/pricing · Don't Break the Cache: arXiv:2601.06007 · GAAMA: arXiv:2603.27910 · AgentFold: arXiv:2510.24699 · Lost in the Middle: arXiv:2307.03172 · Context Engineering Survey: arXiv:2507.13334 · dsh-command-context-trim: github.com/snailium/dsh-command-context-trim · pi-system-one: npmjs.com/package/pi-system-one · SWE-bench Verified: swebench.com/verified.html · Terminal-Bench: tbench.ai · τ²-bench: github.com/sierra-research/tau2-bench
+
+---
+
+## Correction 2026-10-04 — three sentences in this proposal, superseded by dated append
+
+Appended under `docs/DOC-CONTRACT.md` §4. **Nothing above this line is edited.** The decision behind items A and
+B is `STATUS.md` §10, which this section points at rather than repeats.
+
+### A. Line 59's definition of `T` is wrong twice, and item 1 below is a statement of the paper
+
+Line 59 reads:
+
+> `T (state proxy: serialized reasoning trace + task brief, ≤8k characters, append-only, updated per task)`
+
+Both halves of that are falsified.
+
+- **There is no task brief in `T`.** The user's own text is the prompt's `x` — the condition, deliberately the
+  anchor, and already in the prompt by construction. Folding a "task brief" into `T` would pay for the same text
+  twice per step and would make `T` a different object from the paper's, whose `T = π(r_1,…,r_ntr)` is the
+  serialized reasoning traces and nothing else.
+- **The bound is the paper's 50,000 characters, not 8,000.** arXiv:2609.02702, *Setup*: traces "are so long that we
+  truncate them to the first 50,000 characters to keep the second-pass prompt within the model's context capacity".
+  The **direction** — first — is the point, and it is what `updatePolicy` selects between.
+
+The same correction applies to line 36's "the **state T distilled from the trace**" and to §2's table row for Paper
+T: the paper does not distill anything. It takes the model's collected reasoning traces and places them before the
+context on a fresh pass, against a matched control that places the same text after it. Line 36's second half —
+that paper-T does not mean "put `x` first", and that the current instruction goes last — is correct and is the
+part of this proposal that survived; the rejected "x inversion" it names is still rejected.
+
+**Which value is live is not this document's to say.** The bound is `tas.tMaxChars`, owned by `AssemblyPolicy` in
+`packages/core/src/types.ts` and resolved per cell through `bench/cells/*.json`; what is serialized and how is
+`packages/core/src/state-proxy.ts`. The number the paper fixes is stated above as a fact about the paper, which
+does not change; the project's effective value is read from the policy, never from this proposal.
+
+### B. Line 59's layout also now names a block that is being delivered
+
+Line 59's layout ends `… | near-tail K turns of raw text | x + current state snapshot`. The "+ current state
+snapshot" is a second state-shaped block alongside `T`, which the layout above it does not have. Read `T` as the
+paper's serialized trace and the layout is `[pinned | T | recall blocks | near-tail | x]` — five blocks, one state
+proxy, and the user input last. Whether `T` reaches the model at all was the open question in
+`ARCHITECTURE.md` §5; it is answered in the affirmative by `STATUS.md` §10.
+
+### C. `dsh-command-context-trim` is named as an existing plugin at line 71 (and again at 165, and in the
+### reference line) — it is not present in the DSH 0.2.0-rc.2 distribution
+
+Line 71 closes: *"The existing plugin `dsh-command-context-trim` (model-free oldest-first trimming) is precisely the
+spiritual prototype of the C0 baseline and the engineering template for the plugin mechanism."* Line 165's risk
+table probes "what context-trim does", and the reference line at 195 cites it.
+
+**The plugin is not in the distribution this project froze.** An exhaustive read of the DSH **0.2.0-rc.2** archive
+finds no package, row, or string by that name. The compaction-family packages actually shipped alongside it are
+`dsh-command-compact`, `dsh-compaction`, `dsh-compaction-basic` and
+`dsh-compaction-tool-result-pruner`; none of them is a model-free oldest-first `/trim` with an automatic
+`CONTEXT_WINDOW_EXCEEDED` hook. `docs/RELATED_WORK.md` describes it as an external community plugin reached over
+GitHub, and a URL to it is not evidence that it is installed — or was ever installed, or was installed under that
+name.
+
+**Whether it was removed, renamed, or never existed in any DSH distribution cannot be determined from an archive
+snapshot.** This correction deliberately does not choose between those three. What can be said is the thing a
+reader needs: the sentence asserts a harness capability on the strength of a package name, and that name resolves
+to nothing in the release this project runs against. A claim about a harness that rests on a package name is the
+same class of claim as the `D4b` `name:`-mismatch hypothesis — one that was declared fixed on a name that turned
+out to be irrelevant — so it is **marked unverified rather than trusted or quietly deleted**, and the same rule
+applies to `docs/AGENT_BRIEF.md`'s registry reference and to `README.md`'s citation.
+
+The reference line at 195 is left standing: a citation to a public repository is a claim about the repository, not
+about what this machine has installed. What is corrected is the assertion at line 71 that it is *existing* here.
+
+## Correction 2026-10-05 — one layout field was renamed and the second was **deleted**
+
+Appended beside the 2026-10-04 correction under `docs/DOC-CONTRACT.md` §4. The "Factor A reaches the model through
+no cell" paragraph of this file's experimental design is a live statement in a live document, so its one sentence
+naming the layout fields was corrected in place; the superseded text is carried here verbatim. **The axis this
+correction first called `questionPlacement` was deleted later the same day**; the note at the foot of this correction
+records that and quotes this section's mapping as superseded.
+
+**What moved.** `AssemblyPolicy.xFirst: boolean` is gone from the tree: it was renamed to
+`questionPlacement: 'first' | 'last'` and then **deleted** the same day (the field mapping this section used to carry
+is quoted as superseded at the foot of this correction). `AssemblyPolicy.stateProxyPosition: 'before-context' |
+'after-context'` is now `tracePlacement: 'trace-as-state' | 'trace-append'` (default `'trace-as-state'`), the **only**
+layout axis, because the question is last in every layout by construction. A profile that still spells an old key is
+read and reported (`LEGACY_LAYOUT_KEYS`, `packages/core/src/config.ts`); which spellings are warned about and which
+are refused is the code's and is not restated here. Names, values and
+defaults are owned by `packages/core/src/types.ts`, `packages/core/src/config.ts` and the presets, and §4.1's own rule
+— "*the switches each arm carries are not restated here*" — is unchanged.
+
+**Why.** The paper (arXiv:2609.02702, §4.1) places the question **last in every condition** — "the question appears at
+the end of the prompt … place it at the end of every input" — and its two arms are `[T, x, q]` (Trace as State) and
+`[x, T, q]` (Trace Append), **order the only difference**. `xFirst` moved the *question*, the one element the paper
+fixes, and its name presented that as the paper's variable; `stateProxyPosition` was already the paper's axis, so it
+took the paper's name. **The question's axis was then deleted rather than renamed**: `questionPlacement` left "the
+question's position is a variable" expressible and its `'first'` value produced `[T, q, x]`, which is neither paper
+arm. This is also the third item of §3.2's own revision list (*"'x inversion' corrected to a
+faithful TAS port"*) finally reaching the policy: the layout that line records, `[pinned | T | recall blocks |
+near-tail raw text | x]`, is what the one remaining axis lays out, and the field that produced it is the renamed one.
+
+**What it cost, measured — round `20261004-0233`'s own `layoutOrder` records.** `C1` and `C2` recorded
+`pinned, stateProxy, anchor, recalled, tail` (the question second, neither paper arm) because both set `xFirst: true`;
+`C0` (`xFirst: false`, TAS off) recorded `pinned, recalled, tail, anchor`, the paper's baseline `M([x, q])`. The block
+order each `tracePlacement` value produces is the table in `packages/core/src/assembler.ts`'s header.
+
+### The sentence this replaces, verbatim
+
+> **Factor A reaches the model through no cell.** `tas.on`/`xFirst` are recorded configuration in every arm — the
+> delivery channel inserts one `recalled` block and never the assembled order — so the ordering becomes measurable
+> only with the model-view write-back, which does not exist …
+
+It now names `tracePlacement` as the only layout axis, and says what is true of delivery without restating it: the one
+insertion channel appends, and it never delivers a layout. *(It named `questionPlacement` beside it for part of the
+day; that field was deleted — see the note at the foot of this correction.)*
+
+**One phrase in §4.1 was corrected with them.** The round-label mapping's *"its state proxy and x-first ordering were
+recorded configuration"* named the retired term as if it were a current layout; it now reads *"the retired `xFirst`
+layout it carried"*, which is what that round's wiring actually held. **§2's terminology row is deliberately left as
+written**: its *"paper T does not mean 'put x first'"* is the negation of the retired reading, which is what that row
+exists to normalise, and the 2026-10-04 correction above calls that half of the line correct.
+
+**Deletion, later the same day — the question axis is gone, and the mapping above is superseded.** Recorded under
+`docs/DOC-CONTRACT.md` §4, inside this correction rather than in place of it, because the sentences it supersedes are
+this note's own.
+
+- **What moved.** `AssemblyPolicy.questionPlacement: 'first' | 'last'` is **gone from the tree** — deleted, not
+  renamed. **`AssemblyPolicy.tracePlacement: 'trace-as-state' | 'trace-append'` is the only layout axis**, and `q` is
+  last by construction: the paper fixes it there in every condition, its two arms are `[T, x, q]` and `[x, T, q]` with
+  order the only difference, and `'first'` produced `[T, q, x]`, which is neither. `LEGACY_LAYOUT_KEYS`
+  (`packages/core/src/config.ts`) reads both retired spellings and reports them — the question-last ones as a warning,
+  the question-first ones as an error that quotes the sentence that retired the layout. So the mapping in **What
+  moved** above is superseded: `true` has no surviving field to be translated into.
+- **The evidence, from round `20261004-0233`'s own `layoutOrder` records**: `C0`
+  `["pinned","recalled","tail","anchor"]`, and `C1`/`C2` `["pinned","stateProxy","anchor","recalled","tail"]` — the
+  question second in the TAS cells. Those are the orders that round produced, not what any setting produces now.
+- **§2's row is still the negation of a retired reading, and now of two.** *"paper T does not mean 'put x first'"*
+  negates `xFirst` and, by the same argument, `questionPlacement: 'first'`: the paper's variable is `tracePlacement`,
+  which is what Factor A names above. The row needs no edit for the deletion, which is why it is named here instead.
+
+### Outstanding, and not part of this correction
+
+The rest of §4.1 — "*Three cells: **`C0`** baseline, **`C1`** second control, **`C2`** full configuration*", "*the
+registered contrast is **`C0` vs `C2`**: `C1` is a second control arm whose model-visible input is `C0`'s*", and the
+round-label mapping's "*its state proxy and x-first ordering were recorded configuration and **nothing was delivered**,
+so it is a second control arm today*" — states the registration that `docs/STATUS.md` §10's addendum and
+`cellPolicy('C1')`'s `deliver: true` superseded on 2026-10-04. That is a different correction with its own evidence:
+the arms are the baseline, **TAS** (the paper's Trace as State arrangement, `[T, x, q]`), and that plus the System-1
+lane (`docs/CELLS-RUN.md` "The arms, and what the contrast is" owns the wording), while the paper's other arm,
+**Trace Append** (`[x, T, q]`), is named by the placement axis rather than run by a cell.
+
+## Correction 2026-10-05 (second of the day) — "the anchor" in item A means two different segments now
+
+Appended under `docs/DOC-CONTRACT.md` §4, beside the two corrections above. This one corrects a sentence inside the
+**dated** 2026-10-04 correction, so that section is not edited: the record is superseded here.
+
+**The sentence.** Item A above (line 214 as it stands) reads: *"The user's own text is the prompt's `x` — the
+condition, deliberately the anchor, and already in the prompt by construction."* Three segments are involved and the
+sentence names only one, which is why it is now wrong in part.
+
+**What moved, and what did not.**
+
+- The **recall anchor** — the seed of the BFS walk — is the step's newest **input event** of any of five kinds
+  (`user`, `assistant`, `trace`, `toolCall`, `toolResult`; `systemPinned` excluded), not the newest `user` segment
+  (`packages/core/src/observer.ts`, `isInputEvent`). The user's own text is the anchor **only at a turn-opening step**;
+  on every later step of an agent loop the anchor is the model's own newest message, tool call or tool result.
+- **`T`'s boundary did not move.** `buildStateProxy` still serializes what follows the newest `user` segment — the
+  question the task was opened with — because a boundary that moved with the anchor would empty `T` on every step after
+  the first.
+- The sentence's **conclusion stands**: there is still no task brief in `T`, and the user's text is not part of it.
+
+The full statement, the reason (the brief's idea 3 reads "the user input *or* the model's own self-directed input") and
+the measurement from round `20261004-0233` are the third 2026-10-05 correction in `docs/FORMULAS.md`, which this note
+points at rather than repeats. **Nothing about the layout changes with it**: the anchor is the last block of every
+layout, and the field that decides the arrangement is the one named in the first correction of today — the second axis
+named there was deleted later the same day, and the record of that is the note at the foot of that same correction.
+
+---
+
+## Correction 2026-10-05 (third of the day) — the recalled block moved behind the tail: every layout literal in this file is the **old order**, and the paper's arm is unchanged
+
+Appended under `docs/DOC-CONTRACT.md` §4, at the foot of the two corrections above and in place of neither. **Nothing
+above this line is edited**: every layout literal this file carries sits either in the proposal body or inside a dated
+correction, so this note names the file and the line for each, quotes it, and states what the build does now. The
+**Why.** sentence at line 288 that the report names states the paper's variable and its two arms; it is right as
+written, and this section leaves it standing.
+
+**What moved.** The recalled block now sits **immediately before the anchor**, behind the tail. It used to be third of
+five, with `tail` and `anchor` behind it. The block order each `tracePlacement` value produces is the table in
+`packages/core/src/assembler.ts`'s header, and `AssemblyLayout.order` (`packages/core/src/types.ts`) is the statement of
+record; neither is restated as a rule here.
+
+**Why this is inside the paper's `x`, not the paper's variable.** The variable is where the trace `T` sits relative to
+the long context `x` — the two arms are `[T, x, q]` (Trace as State) and `[x, T, q]` (Trace Append), order the only
+difference — and the recalled block is **part of that long context** (`AssemblyLayout.order`: `anchor` is `q`, and the
+blocks between the pinned prefix and it are the long context the trace is placed around;
+`packages/dsh-plugin/src/context-delivery.ts`: "the long context here is the `recalled` block"). Moving a block inside
+`x` therefore leaves the arm exactly where it was — which is what §2's notation row says in this proposal's own words:
+S1CAP's recalled history plays the paper's `x`.
+
+**Why the block moved.** A prompt cache is a prefix cache: a change at any token breaks the match from that token to the
+end of the prompt, so everything placed behind a block that changes every step is invalidated with it — the economics
+§3.2's item 3 (line 60) already makes a first-class citizen. The recalled block is the block a re-selection moves; ending
+`x` with it means a re-selection costs the question and nothing else. **Measured on round `20261004-1458` C2**: the
+whole-prompt invalidation span per delivered pair fell from **2,539 to 2,111 tokens** with this move, on top of the
+ordering change that had already cut it from **6,179 to 2,539**.
+
+**The layout literals this file carries, quoted with their lines — all of them the old order.**
+
+1. **Line 36**, §2's terminology row: *"this project adopts `[pinned | T | recall blocks | near-tail raw text | x]`"*.
+   The recalled block now sits behind the near-tail raw text and is the last block before `x`.
+2. **Line 59**, §3.2's revision list, item 2: *"Assembly layout: `[pinned (system + tool schema, cache-stable prefix) |
+   T (state proxy: …) | recall blocks (descending w_eff, strongest first — the Lost in the Middle U-shape) | near-tail K
+   turns of raw text | x + current state snapshot]`"*. The recall-blocks term and the near-tail term are swapped; the
+   "strongest first" rule is the *within-block* order and is unchanged.
+3. **Line 238**, item B of the 2026-10-04 correction: *"Read `T` as the paper's serialized trace and the layout is
+   `[pinned | T | recall blocks | near-tail | x]` — five blocks, one state proxy, and the user input last."* Same swap;
+   "the user input last" is unchanged and is the paper's fixed point.
+4. **Lines 293–294**, the 2026-10-05 correction: *"the layout that line records, `[pinned | T | recall blocks | near-tail
+   raw text | x]`, is what the one remaining axis lays out, and the field that produced it is the renamed one."* The
+   field reading is right and stays; **what the axis lays out is the assembler header table's**, and the literal beside
+   it is the order that was in the tree for part of the day.
+
+**What is deliberately not corrected here, and why.** §2's row stays as written for the reason the correction above
+gives — its negation of the retired "x inversion" reading is what the row exists to normalise — so the current order is
+stated in this note rather than edited into the row. Line 59 stays as the record of the revision it describes: a dated
+record is superseded by a newer one, never edited into agreement with it. And the paper's own arms are untouched by any
+of this: no reader has to re-read `[T, x, q]` or `[x, T, q]`.
+

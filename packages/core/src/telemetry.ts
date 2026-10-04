@@ -196,20 +196,37 @@ export interface AssemblyEvent {
   candidates: number;
   selected: number;
   bfsDepth: number;
+  /**
+   * The size of the view this assembly built, in tokens: every block, the recalled one included. Copied from
+   * `AssemblyResult.budget.used` (`packages/core/src/types.ts`, which states the meaning in full).
+   *
+   * It was, until 2026-10-05, bounded above by `budgetTotal` because a `recall.budgetRatio` cap dropped candidates
+   * that did not fit the allowance. That cap is gone — selection is decided by `r` and `d` — so **`budgetUsed` may
+   * exceed `budgetTotal`**, and a reader who finds that is reading a step that spent more than the window budget,
+   * not a broken record. What responds to it is the harness's compaction, which sees the injected block as an
+   * ordinary surface node.
+   */
   budgetUsed: number;
+  /** what the step's window leaves after the output reserve and the fixed overhead: a measurement, not a ceiling */
   budgetTotal: number;
   blocks: Record<string, number>;
   prefixTokensStable: number;
   /**
-   * The block order this assembly was built in, e.g. `['pinned','stateProxy','anchor','recalled','tail']`.
+   * The block order this assembly was built in, e.g. `['pinned','stateProxy','recalled','tail','anchor']`.
    *
-   * Recorded because the layout is an experimental condition: two cells can differ only in where x sits, and a
-   * reader of the control plane has to be able to tell which one produced a record without inferring it from
-   * configuration that may have changed since.
+   * Recorded because the layout is an experimental condition: two cells can differ only in where the trace sits
+   * relative to the long context, and a reader of the control plane has to be able to tell which one produced a
+   * record without inferring it from configuration that may have changed since.
    */
   layoutOrder?: string[];
-  /** `policy.xFirst` as applied to this assembly */
-  xFirst?: boolean;
+  /**
+   * `policy.tracePlacement` as applied to this assembly: `'trace-as-state'` (`M([T, x, q])`, the paper's method) or
+   * `'trace-append'` (`M([x, T, q])`, its control).
+   *
+   * Optional so that records written before 2026-10-05 stay readable — they carry `layoutOrder`, which says the
+   * same thing in the layout's own words.
+   */
+  tracePlacement?: string;
   /** tokens at the front that stay byte-identical across steps of one task under this layout */
   layoutStableTokens?: number;
   /** the first block after the stable head: where a re-selection would cut the prefix */
@@ -255,9 +272,9 @@ export interface AssemblyEvent {
    *
    * A nested tree: the anchor segment id at the root, each hit under the id recall reached it from, leaves `{}`.
    * **Keys are segment ids only** - no weights, kinds, depths or counts - and every hit recall returned is in it,
-   * including the ones the budget dropped, because the tree records the walk the selector made rather than what
-   * survived it. Written on every assembly record: `{}` is the answer for a walk that produced nothing, and an
-   * absent field would read as "this step was not measured" instead.
+   * including the ones the passage de-duplication dropped, because the tree records the walk the selector made
+   * rather than what survived it. Written on every assembly record: `{}` is the answer for a walk that produced
+   * nothing, and an absent field would read as "this step was not measured" instead.
    *
    * Optional only so that records written before this field existed stay readable; `assemble()` always fills it.
    */

@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './config.js';
+export * from './cell-preset.js';
 export * from './segmenter.js';
 export * from './state-proxy.js';
 export * from './harness-adapter.js';

@@ -56,8 +56,9 @@ for (const line of server.logs.slice(-8)) console.log(`[server] ${line}`);
 if (!started.ok) process.exit(1);
 
 if (doCall) {
-  // No deadline option: the client's transport guard is a constant (S1_TRANSPORT_TIMEOUT_MS) on purpose, so a
-  // first-run weight download that outlives it is the probe timing out, not a knob this script can turn.
+  // No deadline option: the client's transport guard is `s1TransportGuardMs(questions)` - a base plus a
+  // per-question cost, owned by the client and not settable per call - so a first-run weight download that
+  // outlives it is the probe timing out, not a knob this script can turn.
   const client = new S1Client({ baseUrl: server.baseUrl });
   console.log('[smoke] calling POST /v1/systemone (this may download the checkpoint on first use)');
   const result = await client.decide('The export button crashes in Safari on macOS 15.', {

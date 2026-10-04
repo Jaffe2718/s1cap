@@ -202,22 +202,44 @@ check(
 const cell = status?.cell ?? '(none)';
 const cellOk = EXPECT_CELL === '' || cell === EXPECT_CELL;
 // The route reports these flat, which is the shape the panel reads them in.
+//
+// **Four knobs, and the question's position is not one of them.** The field that held it (`questionPlacement`, and
+// the boolean `xFirst` before that) was **deleted** on 2026-10-05 rather than renamed: the paper places the question
+// last in every condition, so the question's position is not a variable and this payload states no question field at
+// all. Reading one would count a knob that cannot exist, and the old translation of `xFirst` would have printed a
+// retired name beside live ones; `LEGACY_LAYOUT_KEYS` in `packages/core/src/config.ts` is where a stored old spelling
+// is read and reported, which is not this check's job. `tracePlacement` is the whole layout axis, and therefore the
+// whole arm.
+//
+// `admissionLimit` was a fifth entry and is not read: this route answers with
+// `s1: { provider, configuredProvider, mode, baseUrl }`, so `status.s1.admissionLimit` is `undefined` on every
+// payload it can produce — the number lives in the tape's `governance` block and in the richer `/s1` status, not
+// here. An entry that can never be counted is the shape this list has just been corrected for, so it is not kept as
+// decoration; when this route reports it, it belongs here as a required knob.
+//
 // `planGate` is not here: the knob was removed on 2026-10-02 (`packages/core/src/types.ts` carries the evidence -
 // the gate's record appears in no artifact of the round that was supposed to exercise it), so a status payload that
 // still carried the key would be the last place claiming C2 ran a component it does not have.
+//
+// **Every one of the four is required, and that replaces the `knobs.length >= 3` guard.** That count was written
+// when the list was longer, and over this list it tolerated a payload in which the layout axis had gone missing
+// without a failure — the same silent-loss shape, one field over. An instance running a build from before
+// 2026-10-05 reports `xFirst` and no `tracePlacement`, and fails here with the missing knob named in the detail line,
+// which is the honest reading: that payload does not state the axis this build has.
+const REQUIRED_KNOBS = ['tas', 'tier1', 'deliver', 'tracePlacement'];
 const knobs = [
   ['tas', status?.tas],
   ['tier1', status?.tier1],
-  ['xFirst', status?.xFirst],
   ['deliver', status?.deliver],
-  ['admissionLimit', status?.s1?.admissionLimit],
+  ['tracePlacement', status?.tracePlacement],
 ].filter(([, v]) => v !== undefined);
+const missingKnobs = REQUIRED_KNOBS.filter((name) => !knobs.some(([k]) => k === name));
 check(
   'I6 cell authority: the preset the profile names is the policy that ran',
-  cellOk && knobs.length >= 3,
+  cellOk && missingKnobs.length === 0,
   `cell ${cell}${EXPECT_CELL === '' ? '' : ` (expected ${EXPECT_CELL})`}, knobs: ${knobs
     .map(([k, v]) => `${k}=${String(v)}`)
-    .join(' ')}`,
+    .join(' ')}${missingKnobs.length > 0 ? ` — not reported: ${missingKnobs.join(', ')}` : ''}`,
 );
 
 // -------------------------------- 7. the System-1 selection was not thrown away before delivery

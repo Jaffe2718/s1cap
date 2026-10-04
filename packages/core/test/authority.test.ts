@@ -1,12 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { cellPolicy, defaultPolicy } from '../src/types.ts';
 import { validatePolicy } from '../src/config.ts';
+import { mergeCellPreset } from '../src/cell-preset.ts';
 import type { Cell } from '../src/types.ts';
 import { AttemptController, orderPlans } from '../src/plan-gate.ts';
 
 const CELLS: Cell[] = ['C0', 'C1', 'C2'];
+
+/**
+ * The policy a cell actually runs, resolved the way the runtime resolves it: `defaultPolicy()`, then the cell's own
+ * `bench/cells/<cell>.json`, then whatever the profile patch adds.
+ *
+ * **Why this exists rather than a bare `validatePolicy({ cell })`.** Until 2026-10-05 `cellPolicy()` set `deliver`
+ * itself, so `validatePolicy({ cell: 'C1' })` was a complete statement about the arm. `deliver` now comes from the
+ * preset — the file a researcher can edit — and a bare call returns the *default* for it. Reading the file here is
+ * what keeps these assertions about the cell rather than about the defaults, and it means a preset that loses a
+ * value fails this test instead of quietly redefining which arm the cell is.
+ */
+function cellPolicyOf(cell: 'C0' | 'C1' | 'C2') {
+  const preset = JSON.parse(readFileSync(new URL(`../../../bench/cells/${cell}.json`, import.meta.url), 'utf8')) as unknown;
+  return validatePolicy(mergeCellPreset({ cell }, preset).raw);
+}
 
 test('the loop is model-owned and the hook is bounded, in every cell (policy literals)', () => {
   const p = defaultPolicy();
@@ -25,25 +42,36 @@ test('the loop is model-owned and the hook is bounded, in every cell (policy lit
 /**
  * The ablation has to be able to say what it measured.
  *
- * `xFirst` was left at the policy default in every cell, so C0 - the one chronological cell - carried the same
- * position intervention as C1 and C2, the two ordered ones. The layout axis was therefore constant across the
- * whole scheme and no table could have attributed anything to it, which is invisible from the presets alone:
- * each cell looked individually correct.
+ * **Rewritten 2026-10-05, twice in one day, and both old assertions were wrong rather than stale.** The first
+ * required the *question's* position to vary across the ablation — `xFirst: false` for C0 and `xFirst: true` for
+ * C1/C2 — on the argument that a layout axis constant across every cell could not be attributed to anything. The
+ * argument was sound and the variable was the wrong one: the paper holds the question last in all three of its
+ * conditions and varies where the *trace* sits, so the axis that had to vary was `tracePlacement`, and what the old
+ * test called "the intervention" was the project recording a layout the paper does not have in every cell.
+ * `tracePlacement` is asserted constant here for the opposite reason: it is the paper's contrast, both arms must be
+ * runnable, and a preset that picked a side would redefine which arm that cell *is*.
+ *
+ * The second assertion pinned the question's position as a policy field — a "stated, not implied" layout axis every
+ * cell carried. That field is now **deleted**, not renamed: `q` is the last block of every order by construction, so
+ * there is nothing for a cell to state, and a field that recorded one value forever is exactly the kind of knob this
+ * project removes rather than documents.
  */
-test('the layout axis actually varies across the ablation, in the direction the cells are named for', () => {
-  const chronological: Cell[] = ['C0'];
-  const ordered: Cell[] = ['C1', 'C2'];
-  for (const cell of chronological) {
-    assert.equal(cellPolicy(cell).xFirst, false, `${cell} is a chronological cell: x belongs after the recalled block`);
+test('the layout axis is stated, constant across the ablation, and chosen by a round rather than a preset', () => {
+  for (const cell of CELLS) {
+    const p = cellPolicy(cell);
+    // The method, in every cell. `'trace-as-state'` is `M([T, x, q])`, which is what the paper calls Trace as State
+    // and what this project exists to measure; a cell that preset the control arm would be the control arm.
+    assert.equal(p.tracePlacement, 'trace-as-state', `${cell}: every arm runs the paper's method, not its control`);
+    // And no cell carries a question position, because there is no such field: the paper fixes the question last in
+    // every condition, so the only thing a cell could say about it is the only thing that ever happens.
+    assert.equal('questionPlacement' in p, false, `${cell}: the question's position is not a field any more`);
   }
-  for (const cell of ordered) {
-    assert.equal(cellPolicy(cell).xFirst, true, `${cell} is an ordering cell: x-first is the intervention`);
-  }
-  // And the factors stay orthogonal in the wiring: the two ordered cells share the TAS half, so what separates
-  // them is S1 governance - and, since 2026-10-02, delivery, which only C2 can use (asserted below).
-  assert.equal(cellPolicy('C1').tas.on !== cellPolicy('C2').tas.on, false, 'C1 and C2 both order by TAS');
+  // The factors that *do* vary, stated so a change to any of them has to be argued for here: the trace's presence
+  // (`tas.on`), the recall selection (`tier1`), and delivery.
+  assert.equal(cellPolicy('C0').tas.on, false, 'the baseline carries no trace');
+  assert.equal(cellPolicy('C1').tas.on, true, 'C1 carries the trace');
+  assert.equal(cellPolicy('C2').tas.on, true, 'and so does C2');
   assert.equal(cellPolicy('C1').recall.tier1 !== cellPolicy('C2').recall.tier1, true, 'and only C2 selects');
-  assert.equal(cellPolicy('C0').tas.on, false, 'while the baseline orders nothing');
   // The plan gate used to be asserted here as the second half of what separates C1 from C2. It is gone, and the
   // assertion that replaces it is the one that keeps it gone: no cell carries a gate, because a gate that cannot
   // fire is not a factor of the ablation (`types.ts` carries the measurement).
@@ -52,11 +80,14 @@ test('the layout axis actually varies across the ablation, in the direction the 
   }
 });
 
-test('every cell leaves the assembled layout readable, whichever side x lands on', () => {
+test('every cell leaves the assembled layout readable, whichever arm it runs', () => {
   for (const cell of CELLS) {
     const p = cellPolicy(cell);
-    assert.equal(typeof p.xFirst, 'boolean', `${cell}: the layout is a real branch, not an omission`);
+    assert.equal(typeof p.tracePlacement, 'string', `${cell}: the layout is a real branch, not an omission`);
     assert.equal(p.cell, cell, `${cell}: the record says which cell produced it`);
+    // The question's place is not part of what a cell states — it is a property of the layout every cell builds
+    // (`core.test.ts` asserts the recorded order ends in `anchor` for all three).
+    assert.equal('questionPlacement' in p, false, `${cell}: no cell states a question position`);
   }
 });
 
@@ -70,67 +101,127 @@ test('every cell leaves the assembled layout readable, whichever side x lands on
  * the record only said "off" because the cell name in the log is the cell *asked for*, not the policy that ran.
  */
 test('a cell preset is what the runtime actually starts from, and an override still wins', () => {
-  // C0 is the baseline: no TAS, no selection, chronological, and it delivers nothing.
-  const c0 = validatePolicy({ cell: 'C0' });
+  // C0 is the baseline: no TAS, no selection, the paper's baseline layout, and it delivers nothing at all.
+  const c0 = cellPolicyOf('C0');
   assert.equal(c0.ok, true, JSON.stringify(c0.errors));
   assert.equal(c0.policy.tas.on, false, 'C0 must not order by TAS');
   assert.equal(c0.policy.recall.tier1, 'off', 'C0 must not select');
-  assert.equal(c0.policy.xFirst, false, 'C0 is chronological');
-  assert.equal(c0.policy.deliver, false, 'C0 leaves history to the harness');
+  assert.equal('questionPlacement' in c0.policy, false, 'C0 is `M([x, q])` through the layout, not through a field');
+  assert.equal(c0.policy.tracePlacement, 'trace-as-state', 'and with no trace to place, the arm is inert rather than absent');
+  assert.equal(c0.policy.deliver, false, 'C0 leaves the whole model view to the harness');
 
-  // C1 is the second control arm: its TAS switches stay as recorded configuration, and nothing is delivered.
-  // It carried `deliver: true` until 2026-10-02 and it could never fire - delivery inserts the `recalled` block and
-  // nothing else, and `tier1: 'off'` makes that block empty by construction (`assembler.ts`). Measured: 76
-  // assemblies and 0 with a non-empty recalled block in round `20261002-2037`; 13 assemblies, 13 refusals and 0
-  // `delivered: true` in round `20261001-1300`.
-  const c1 = validatePolicy({ cell: 'C1' });
+  // C1 is the paper's arm: the trace reaches the model and nothing else does. It carried `deliver: false` from
+  // 2026-10-02 to 2026-10-04, because delivery then inserted the `recalled` block only and this arm has
+  // `tier1: 'off'`, so the channel was structurally empty - a switch reporting `off` for a cell that wanted it
+  // `on`. `tas.on` now implies the trace is delivered, so the channel carries `T` alone and fires.
+  //
+  // **This assertion was wrong, not merely stale.** It encoded "C1 delivers nothing, so C0-vs-C1 must show no
+  // difference", and C1 now delivers the paper's own mechanism: keeping the old value would have preserved a
+  // placebo in the one arm that exists to stop the trace and the recall selection being conflated in C0-vs-C2.
+  const c1 = cellPolicyOf('C1');
   assert.equal(c1.ok, true, JSON.stringify(c1.errors));
-  assert.equal(c1.policy.tas.on, true, 'C1 still records the TAS half');
-  assert.equal(c1.policy.recall.tier1, 'off', 'C1 must not select');
-  assert.equal(c1.policy.deliver, false, 'and it cannot deliver, so it must not claim to');
+  assert.equal(c1.policy.tas.on, true, 'C1 carries the trace');
+  assert.equal(c1.policy.recall.tier1, 'off', 'and selects nothing: that is the variable it holds still');
+  assert.equal(c1.policy.deliver, true, 'so the trace is what reaches the model');
+  // The System-1 lane being *absent* rather than merely unscoped is asserted nowhere here, and deliberately: it is
+  // `bench/cells/C1.json` that carries `s1.provider: 'none'`, not this function. `cellPolicy('C1')` inherits the
+  // base's `'jev'`, so an assertion about the lane has to be made against a resolved *preset*, not against the
+  // policy object this test is about.
 
-  // C2 is the full configuration: ordered, selecting, and the only cell that delivers.
-  const c2 = validatePolicy({ cell: 'C2' }).policy;
+  // C2 is the full configuration: the paper's arm, selecting, and delivering the trace plus the turns it found.
+  const c2 = cellPolicyOf('C2').policy;
   assert.equal(c2.tas.on, true, 'C2 orders by TAS');
-  assert.equal(c2.xFirst, true, 'C2 is x-first');
+  assert.equal(c2.tracePlacement, 'trace-as-state', 'C2 lays out the method, not the control');
+  assert.equal('questionPlacement' in c2, false, 'and states nothing about the question, which is always last');
   assert.equal(c2.deliver, true, 'C2 delivers');
   assert.equal(c2.recall.tier1, 's1', 'C2 selects, through the tier-1 mode that exists');
 
-  // The invariant F1 was: a cell that delivers must be able to fill the one block delivery can insert. Stated
-  // against the policy rather than against today's three presets, so a fourth cell cannot reintroduce the
-  // combination `deliver: true` + `tier1: 'off'` - a switch that reports on and can never fire.
+  // The invariant F1 was: a cell that delivers must be able to fill the one block delivery can insert. **Restated
+  // 2026-10-04, because the rule's *reason* changed and so did its answer.** It read `tier1 !== 'off'`, because
+  // delivery inserted the recalled block alone and that block is empty by construction when selection is off.
+  // Delivery now inserts the trace first (`context-delivery.ts`), so a trace alone is a complete delivery and C1
+  // delivers with `tier1: 'off'` on purpose. The invariant is the question it was always asking: does this arm have
+  // *anything* to insert? A cell that delivers nothing is the switch that reports `on` and cannot fire.
   for (const cell of CELLS) {
-    const p = cellPolicy(cell);
+    const p = cellPolicyOf(cell).policy;
     if (p.deliver) {
-      assert.notEqual(
-        p.recall.tier1,
-        'off',
-        `${cell}: with tier1 "off" the recalled block is empty by construction, so delivery could only refuse`,
+      assert.ok(
+        p.tas.on || p.recall.tier1 !== 'off',
+        `${cell}: with tas off and tier1 "off" there is nothing to insert, so delivery could only refuse`,
       );
     }
   }
-  // And exactly one cell delivers, which is what makes the registered contrast C0-vs-C2 rather than C1-vs-C2: C1's
-  // model-visible input is the baseline's, so a C1-vs-C2 difference would not be an ablation arm's effect.
+  // Two arms deliver and the third does not, which is what makes the registered contrasts `C0 -> C1` and
+  // `C1 -> C2` rather than `C0 -> C2`: C0-vs-C2 alone now moves the trace *and* the recall selection at once.
   assert.deepEqual(
-    CELLS.filter((cell) => cellPolicy(cell).deliver),
-    ['C2'],
-    'C2 is the only delivering arm; C0 and C1 are controls',
+    CELLS.filter((cell) => cellPolicyOf(cell).policy.deliver),
+    ['C1', 'C2'],
+    'the baseline is the only arm that delivers nothing; C1 delivers the trace, C2 the trace and the selection',
   );
 
   // What C2's "full configuration" is made of, stated so a future addition has to be argued for here: the state
-  // proxy, recall selection, the x-first layout, delivery, and the System-1 lane's own settings. Nothing else -
-  // there is no plan gate in the preset, the policy, the schema or the report.
+  // proxy, recall selection, the arm it lays out, delivery, the System-1 lane's own settings, and the assembly
+  // trigger. Nothing else - there is no plan gate in the preset, the policy, the schema or the report.
+  //
+  // The layout surface is **one field** since 2026-10-05, and it used to be two: `tracePlacement` names the arm, and
+  // the field that used to sit beside it (`questionPlacement`, and `xFirst` before that) is deleted rather than
+  // renamed, because the paper fixes the question last in every condition and a field whose other value produced
+  // `[T, q, x]` was never a variable. So the surface is one field smaller than the two-axis version, and what
+  // changed is not the number of knobs but the fact that `q` can no longer be laid out anywhere but last.
   assert.deepEqual(
     Object.keys(c2).filter((k) => k !== 'cell').sort(),
-    ['assemblyDeadlineMs', 'cache', 'deliver', 'recall', 'rgMaintenance', 's1', 'tail', 'tas', 'termination', 'xFirst'],
+    [
+      'assemblyDeadlineMs',
+      'assemblyTrigger',
+      'cache',
+      'deliver',
+      'recall',
+      'rgMaintenance',
+      's1',
+      'tail',
+      'tas',
+      'termination',
+      'tracePlacement',
+    ],
     'the policy surface is exactly this, and a new knob is a change to the ablation',
   );
 
+  // `assemblyTrigger` was added 2026-10-03 for round `20261003-2104`'s measured defect (33 model calls, 2
+  // assemblies), and it is the one knob whose *permissive* value no arm may carry: the point of it is that a
+  // single round flips it in one profile and moves one variable, so a preset that set `'every-step'` would
+  // confound that round before it started. Asserted over the presets rather than against today's three cells,
+  // so a fourth cell cannot quietly arrive pre-flipped.
+  for (const cell of CELLS) {
+    assert.equal(
+      cellPolicy(cell).assemblyTrigger,
+      'every-step',
+      `${cell}: no preset moves the trigger off the default the brief requires`,
+    );
+  }
+
+  // The arm is the same case for the same reason, and the reason is stronger here: Trace as State against Trace
+  // Append is the paper's own control, whose whole point is that *both* arms get run. A preset carrying a value
+  // would put a cell on one side of it and redefine which arm that cell is. Every cell keeps the default, which is
+  // the method - and the contrast is measured by a round that writes the other value in one profile.
+  for (const cell of CELLS) {
+    assert.equal(
+      cellPolicy(cell).tracePlacement,
+      'trace-as-state',
+      `${cell}: the arm is the default method - a cell that opts into the control is a changed ablation`,
+    );
+  }
+
   // Precedence: the cell is the base, an explicit knob in the patch is the deviation, and it wins.
-  const deviated = validatePolicy({ cell: 'C0', deliver: true, xFirst: true });
+  const deviated = validatePolicy({ cell: 'C0', deliver: true, tracePlacement: 'trace-append' });
+  assert.equal(deviated.ok, true, JSON.stringify(deviated.errors));
   assert.equal(deviated.policy.deliver, true, 'a patch may turn delivery on for a cell that leaves it off');
-  assert.equal(deviated.policy.xFirst, true, 'and may reorder a cell it disagrees with');
+  assert.equal(deviated.policy.tracePlacement, 'trace-append', 'and may name the arm for its own round');
   assert.equal(deviated.policy.recall.tier1, 'off', 'while the rest of the cell still applies');
+  // The deleted axis is not a deviation a patch can make: it is an error, and the cell's own policy still runs.
+  const deleted = validatePolicy({ cell: 'C0', questionPlacement: 'first' });
+  assert.equal(deleted.ok, false, 'a profile cannot move the question, because there is no field for it to write');
+  assert.equal(deleted.policy.cell, 'C0', 'and the cell it patched still applies');
+  assert.equal('questionPlacement' in deleted.policy, false);
 
   // A cell that is not a cell is an error, and falls back to C2 rather than to half a cell.
   const bogus = validatePolicy({ cell: 'C9' });

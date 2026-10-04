@@ -10,9 +10,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { defaultPolicy } from '@s1cap/core';
+import type { AssemblyTrigger, StepObservation } from '@s1cap/core';
 import { apply, preStepMiddleware } from '../src/index.ts';
 import type { CommandSpec, PluginContext, PreStepOptions } from '../src/index.ts';
 import { commandPayload } from './command-contract.ts';
+import { deliverContext } from '../src/context-delivery.ts';
+import type { ContextDeliveryResult } from '../src/context-delivery.ts';
 import { createStepObserver } from '../src/step-observer.ts';
 import type { StepObserver } from '../src/step-observer.ts';
 
@@ -395,6 +398,56 @@ test('the middleware asks for an assembly exactly when the decision can receive 
   assert.deepEqual(seen, [true, false], 'only the step with claimed messages is assembled');
 });
 
+/**
+ * The same seam under the permissive value, which is what `policy.assemblyTrigger: 'every-step'` buys.
+ *
+ * The measured defect is the second entry below: a step whose decision claims nothing is *not* a step that sends
+ * no request — round `20261003-2104` made 33 model calls on 33 steps, one `LLM calls` record each — so under this
+ * value the assembly is asked for rather than skipped. What must not move with it is stated in the same test,
+ * because a switch that also assembled rejected, aborted or unreadable steps would be a different, wrong change:
+ * those three still return before the observer is ever called, which is why the `seen` array stays at two entries
+ * for the five steps driven here.
+ */
+test('under every-step the middleware assembles a step that claimed nothing, and only that changes', async () => {
+  const seen: (boolean | undefined)[] = [];
+  const noop = (): undefined => undefined;
+  const spy = {
+    async observe(_payload: unknown, options?: { assemble?: boolean }) {
+      seen.push(options?.assemble);
+      return undefined;
+    },
+    noteSessionEvent: noop,
+    setSystemPrompt: noop,
+    probe: noop,
+    flushUpkeep: () => 0,
+    stats: () => ({}) as never,
+  } as unknown as StepObserver;
+  const middleware = preStepMiddleware(harness().ctx, {
+    observer: spy,
+    cell: 'C2',
+    emit: () => undefined,
+    deliver: () => SKIPPED,
+    assemblyTrigger: 'every-step',
+  });
+
+  await middleware({ messages: MESSAGES, step: 2 }, async () => ({ kind: 'enter', messages: [] }));
+  // Step 1 with nothing claimed is the harness's own turn-boundary guard, and the switch leaves it alone: the
+  // evidence for `every-step` is about the steps after the first, and the host's instructions plugin declines
+  // there too. Assembled: no - but still read, which is the `false` this records.
+  await middleware({ messages: MESSAGES, step: 1 }, async () => ({ kind: 'enter', messages: [] }));
+  // The three cheap classes: rejected, aborted, and a decision whose `messages` is not a list at all. None of
+  // them reaches the observer, so none of them is paid for and none of them can be inserted into.
+  await middleware({ messages: MESSAGES, step: 3 }, async () => ({ kind: 'reject', messages: [{ id: 'b' }] }));
+  await middleware({ messages: MESSAGES, step: 4 }, async () => ({ kind: 'enter', signal: { aborted: true }, messages: [{ id: 'c' }] }));
+  await middleware({ messages: MESSAGES, step: 5 }, async () => ({ kind: 'enter' }));
+
+  assert.deepEqual(
+    seen,
+    [true, false],
+    'the empty decision is assembled, the first step is read but not assembled, and the other three never arrive',
+  );
+});
+
 test('a delivery that returns a list returns it, and a throwing one changes nothing', async () => {
   const records: unknown[] = [];
   const observer = observerWith(records);
@@ -454,6 +507,149 @@ test('a rejected or aborted step is never rewritten', async () => {
   assert.ok(emitted.every((e) => e.delivered === false));
   assert.ok(emitted.some((e) => (e.reason ?? '').includes('rejected')));
   assert.ok(emitted.some((e) => (e.reason ?? '').includes('aborted')));
+});
+
+/**
+ * The switch end to end: the middleware's trigger and the delivery module's insertion, wired the way `index.ts`
+ * wires them (`deliver: (built, decision, payload) => deliverContext({...})`), on the step the switch exists for.
+ *
+ * Three facts are asserted together because each is a way the change could be wrong while looking right:
+ * the empty decision is *assembled* (a middleware that only stopped refusing would deliver nothing, because
+ * `deliverContext` would have no layout to build from); the block lands at the end of the increment rather than
+ * nowhere; and the per-session duplicate guard still bounds it, which is the constraint `DEFECT-GATE.md` records
+ * as Update 5 - `deliverContext`'s own content check scans an empty decision and finds nothing, so on this path
+ * the guard in `index.ts` is the only one there is.
+ */
+const SWITCH_SEGMENT_A = { id: 'h1', kind: 'assistant', text: 'package.json scripts: build, test, dsh:add' };
+const SWITCH_SEGMENT_B = { id: 'h7', kind: 'assistant', text: 'and the loop driver lives in dsh-agent-loop' };
+
+/** An observer that answers with one fixed layout, as a real one does after a walk. Nothing else is exercised. */
+function recallStub(selectionOf: () => { id: string; kind: string; text: string }[]): StepObserver {
+  const noop = (): undefined => undefined;
+  // The one counter a caller reads off the observer besides the assembly: `ingestOnly` advances on the steps that
+  // were read and deliberately not assembled (see `step-observer.ts`), which is what makes `ingested` on a refusal
+  // record mean "the payload reached the graph". A stub that left it at zero would make the flag untestable.
+  let ingestOnly = 0;
+  return {
+    async observe(_payload: unknown, options?: { assemble?: boolean }) {
+      if (options?.assemble !== true) ingestOnly += 1;
+      return {
+        layout: {
+          order: ['pinned', 'stateProxy', 'anchor', 'recalled', 'tail'],
+          recalled: selectionOf(),
+          anchor: { id: 'u2', kind: 'user', text: 'and now the fix' },
+        },
+      };
+    },
+    noteSessionEvent: noop,
+    setSystemPrompt: noop,
+    probe: noop,
+    flushUpkeep: () => 0,
+    stats: () => ({ ingestOnly }) as never,
+  } as unknown as StepObserver;
+}
+
+/** `index.ts`'s own `deliver` callback, with the trigger under test passed in instead of read from a config. */
+function realDeliver(trigger: AssemblyTrigger) {
+  return (built: StepObservation, decision: Record<string, unknown>, payload: unknown): ContextDeliveryResult => {
+    const claimed = (payload as { messages?: unknown } | undefined)?.messages;
+    const step = (payload as { step?: unknown } | undefined)?.step;
+    return deliverContext({
+      enabled: true,
+      trigger,
+      order: built.layout.order,
+      recalled: built.layout.recalled,
+      anchor: built.layout.anchor,
+      messages: Array.isArray(decision['messages']) ? (decision['messages'] as unknown[]) : [],
+      ...(Array.isArray(claimed) ? { claimed: claimed as unknown[] } : {}),
+      ...(typeof step === 'number' ? { step } : {}),
+    });
+  };
+}
+
+test('under every-step an empty decision is given the block, and the per-session guard still bounds the repeats', async () => {
+  const ctx = harness();
+  const emitted: Record<string, unknown>[] = [];
+  let selection = [SWITCH_SEGMENT_A];
+  const middleware = preStepMiddleware(ctx.ctx, {
+    observer: recallStub(() => selection),
+    cell: 'C2',
+    emit: (event) => emitted.push(event as never),
+    assemblyTrigger: 'every-step',
+    deliver: realDeliver('every-step'),
+  });
+  // The payload a step after the first really has: `inbox.claim(target, turn)` returned nothing, so the decision
+  // carries no messages and the payload claims none. Round `20261003-2104` measured 31 such steps against 33
+  // `LLM calls`.
+  const payload = (step: number): unknown => ({ messages: [], step, agent: { session: { id: 'session-switch' } } });
+
+  const first = { kind: 'enter', messages: [] as unknown[] };
+  const returned = await middleware(payload(2), async () => first);
+
+  assert.notEqual(returned, first, 'the step gets a new decision: the block had somewhere to go');
+  const list = (returned as { messages: unknown[] }).messages;
+  assert.equal(list.length, 1, 'an empty increment becomes the one injected message');
+  assert.match(
+    (list[0] as { content: { text: string }[] }).content[0].text,
+    /package\.json scripts: build, test, dsh:add/,
+    'and it carries the recalled text, which only exists because the walk ran',
+  );
+
+  const record = emitted.find((e) => e['type'] === 'context_delivery') as Record<string, unknown>;
+  assert.equal(record['delivered'], true, String(record['reason']));
+  assert.equal(record['assembled'], true, 'the walk ran: that is the whole point of the switch');
+  assert.equal(record['messagesBefore'], 0, 'on a step that claimed nothing at all');
+  assert.equal(record['messagesAfter'], 1);
+  assert.equal(record['inserted'], 1);
+  assert.equal(record['kept'], 0, 'nothing the harness sent was removed, because it sent nothing');
+  assert.equal(record['sessionId'], 'session-switch');
+  assert.match(String(record['reason']), /at the end of the step's increment/);
+
+  // The repeat. The selection is stable, so the digest is the same - and on this path the delivery module's own
+  // content check sees an empty list and cannot fire.
+  const second = { kind: 'enter', messages: [] as unknown[] };
+  const again = await middleware(payload(3), async () => second);
+  assert.equal(again, second, 'the repeat is refused and the harness gets its own decision object back');
+  const repeat = emitted.filter((e) => e['type'] === 'context_delivery')[1] as Record<string, unknown>;
+  assert.equal(repeat['delivered'], false);
+  assert.match(String(repeat['reason']), /already delivered in this session/);
+  assert.equal(repeat['assembled'], true, 'the refusal is about the repeat, not about the step being unreadable');
+  assert.equal(repeat['payloadId'], record['payloadId'], 'and the record names the payload it refused');
+
+  // A changed selection is a changed payload: the guard bounds copies per payload, it is not a one-shot.
+  selection = [SWITCH_SEGMENT_B];
+  const third = { kind: 'enter', messages: [] as unknown[] };
+  const changed = await middleware(payload(4), async () => third);
+  assert.notEqual(changed, third, 'a different selection is delivered');
+  assert.equal(((changed as { messages: unknown[] }).messages).length, 1);
+  const thirdRecord = emitted.filter((e) => e['type'] === 'context_delivery')[2] as Record<string, unknown>;
+  assert.equal(thirdRecord['delivered'], true);
+  assert.notEqual(thirdRecord['payloadId'], record['payloadId'], 'with a digest of its own');
+});
+
+test('the same wiring on claimed-only refuses the empty decision before the walk, as it always did', async () => {
+  // The value every cell runs, through the same two modules: no assembly is asked for, nothing is inserted, and
+  // the recorded reason is the string the report scripts count. This is the default-preservation pin - if the
+  // switch ever leaked into the conservative branch, this test and the delivery module's own test both fail.
+  const ctx = harness();
+  const emitted: Record<string, unknown>[] = [];
+  const middleware = preStepMiddleware(ctx.ctx, {
+    observer: recallStub(() => [SWITCH_SEGMENT_A]),
+    cell: 'C2',
+    emit: (event) => emitted.push(event as never),
+    assemblyTrigger: 'claimed-only',
+    deliver: realDeliver('claimed-only'),
+  });
+
+  const decision = { kind: 'enter', messages: [] as unknown[] };
+  const returned = await middleware({ messages: [], step: 2, agent: { session: { id: 'session-switch' } } }, async () => decision);
+
+  assert.equal(returned, decision, 'identity preserved: the harness sees its own object');
+  const refusal = emitted.find((e) => e['type'] === 'context_delivery') as Record<string, unknown>;
+  assert.equal(refusal['delivered'], false);
+  assert.equal(refusal['reason'], 'the decision carried no messages', 'the sentence the refusal counts are read through');
+  assert.equal(refusal['assembled'], false, 'and it was not paid for: the walk never ran');
+  assert.equal(refusal['ingested'], true, 'while the step was still read into the graph');
 });
 
 test('a payload without a message list is skipped, not guessed at', async () => {

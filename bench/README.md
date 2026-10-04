@@ -2,9 +2,40 @@
 
 The scheme runs **three cells — `C0`, `C1` and `C2` — and it is not a 2×2: two of the three are controls (`C0` the
 baseline, `C1` a second control arm that delivers nothing) and one is the arm under test (`C2`), so the registered
-contrast is `C0` against `C2`.** The design space behind them is the `tas.on`/`xFirst` crossing against S1
-governance, and the full crossing is what a later phase would run. Cell presets live in `cells/`; runners land with
+contrast is `C0` against `C2`.** The design space behind them is the `tas.on`/`tracePlacement` crossing — whether the
+state proxy T exists at all, and which of the paper's two arms its position is — against S1 governance, and the full
+crossing is what a later phase would run. Cell presets live in `cells/`; runners land with
 M2 (the milestone plan is `docs/AGENT_BRIEF.md`'s).
+
+**Correction 2026-10-05 — the question is not an axis, and no switch positions it.** Appended under
+`docs/DOC-CONTRACT.md` §4. Two live sentences in this file named `xFirst` as a current switch, so they were corrected
+in place; the superseded wording is carried here verbatim.
+
+- **What moved.** `AssemblyPolicy.questionPlacement: 'first' | 'last'` is **deleted**, not renamed, and
+  `AssemblyPolicy.tracePlacement: 'trace-as-state' | 'trace-append'` is the only layout axis. The question `q` is last
+  in every layout by construction — the paper (arXiv:2609.02702 §4.1) separates it from the long context and places it
+  "at the end of every input" in every condition, and its two arms are `[T, x, q]` and `[x, T, q]` "with order as the
+  only difference". `xFirst`, and then `questionPlacement`, moved that fixed element instead; `'first'` produced
+  `[T, q, x]`, which is neither arm.
+- **The old spellings are still read, and this file does not restate how.** `LEGACY_LAYOUT_KEYS`
+  (`packages/core/src/config.ts`) owns whether a retired spelling is warned about or refused — the axis is not a
+  setting here, so a value in a preset or a `_meta` note would be a second copy of a code-owned outcome.
+- **What the cells recorded, as evidence.** Round `20261004-0233`'s own `layoutOrder` records, which are data rather
+  than configuration: `C0` `["pinned","recalled","tail","anchor"]`, and `C1`/`C2`
+  `["pinned","stateProxy","anchor","recalled","tail"]` — the question second in the two TAS cells, which is not a
+  paper arm. The orders the build produces now are the table in `packages/core/src/assembler.ts`'s header.
+- **Superseded wording, verbatim.** *"The design space behind them is the `tas.on`/`xFirst` crossing against S1
+  governance, and the full crossing is what a later phase would run."* and *"`tas.on` and `xFirst` are independent
+  switches that the presets happen to move together — `tas.on` decides whether the state proxy T exists at all …,
+  while `xFirst` decides whether the current task x sits before or after the recalled block — so neither name alone
+  tells you where x goes. `xFirst` and `deliver` are supplied by `cellPolicy(cell)` … and are deliberately **not**
+  repeated in the preset files."* The crossing is `tas.on`/`tracePlacement` now, and `deliver` is the delivery switch
+  it always was rather than a third layout name — the presets leave every code-owned switch out for the one reason
+  given below.
+- **No setting in this directory changed with it.** The presets and their `_meta` notes are not this file's to edit,
+  and none carries a layout value before or after the deletion.
+
+---
 
 The per-cell values are **not tabulated here**, because they are not this file's to own: `cells/*.json` are the arm
 definitions (each preset's `_meta` carries the measured reason for its own recipe, and a loader reads its config keys
@@ -24,11 +55,13 @@ a comparison between cells that were actually run. `packages/core/src/types.ts` 
 (`packages/core/src/plan-gate.ts`, `packages/dsh-plugin/src/plan-gate-runtime.ts`, whose only importer is its own
 test) for whichever arm next has a plan source the model writes to. Nothing takes over its role.
 
-`tas.on` and `xFirst` are independent switches that the presets happen to move together — `tas.on` decides
-whether the state proxy T exists at all (the trace-as-state mechanism from paper T), while `xFirst` decides whether
-the current task x sits before or after the recalled block — so neither name alone tells you where x goes. `xFirst`
-and `deliver` are supplied by `cellPolicy(cell)` (`packages/core/src/types.ts`) and are deliberately **not** repeated
-in the preset files, because a value written into a preset would silently override the cell. Each preset also carries
+`tas.on` and `tracePlacement` are independent switches that the presets happen to move together — `tas.on` decides
+whether the state proxy T exists at all (the trace-as-state mechanism from paper T), while `tracePlacement` decides
+which of the paper's two arms positions it: in front of the long context (`trace-as-state`) or behind it
+(`trace-append`) — so neither name alone tells you the recorded order. They are supplied by `cellPolicy(cell)`
+(`packages/core/src/types.ts`) and are deliberately **not** repeated in the preset files, because a value written into
+a preset would silently override the cell. The question is not a third switch and not a preset value either: it is
+last in every layout by construction, so no layout field exists to move it. Each preset also carries
 one non-config key, `_meta`, recording that cell's role and its status in the run set; a loader reads the config keys
 and ignores `_meta`, which `validatePolicy` reports as an unknown key while still returning `ok: true`.
 
@@ -120,3 +153,32 @@ scorer, so "recall scoring is lexical today" describes the fallback rather than 
 designed and **not implemented** — no embedder, `source: 'embed'` never assigned to an edge, `recall.embedModel` read
 by nothing — so no arm can run or deliver an embedding-based recall, and a rename cannot measure it. Implementing it
 touches the assembler's candidate generation only.
+
+---
+
+**Correction 2026-10-05 (second) — the recalled block moved behind the tail, inside the paper's `x`.** Appended under
+`docs/DOC-CONTRACT.md` §4, beside the correction at the head of this file and in place of none of it. The first bullet
+of that correction is the sentence the report names — it states the paper's two arms `[T, x, q]` and `[x, T, q]` "with
+order as the only difference" — and it stands as written. **Nothing in this file printed the old block order**, so
+nothing here was corrected in place, and nothing in `cells/` is edited from this file.
+
+**What moved.** The recalled block now sits **immediately before the anchor**, behind the tail — it used to be third of
+five, with the tail and the anchor behind it. The block order each `tracePlacement` value produces is the table in
+`packages/core/src/assembler.ts`'s header, and `AssemblyLayout.order` (`packages/core/src/types.ts`) is the statement of
+record; neither is restated here, for the reason this file gives for not tabulating the per-cell values.
+
+**Why no arm moved with it.** The paper's variable is where the trace `T` sits relative to the long context `x`, and the
+recalled block is part of that long context (`AssemblyLayout.order`: the anchor is `q`, and the blocks between the
+pinned prefix and it are the long context the trace is placed around;
+`packages/dsh-plugin/src/context-delivery.ts`: "the long context here is the `recalled` block"). A block that moves
+*inside* `x` leaves `T`'s side of it where it was — ahead of every block of `x` under `'trace-as-state'`, behind all of
+them under `'trace-append'` — so the crossing this directory's presets are written on (`tas.on` × `tracePlacement`) is
+unchanged, and no preset carries either field before or after the move.
+
+**Why the block moved.** A prompt cache is a prefix cache: a change at any token breaks the match from that token to the
+end of the prompt, so everything placed behind a block that changes every step is invalidated with it. The recalled
+block is the block a re-selection moves; ending `x` with it means a re-selection costs the question and nothing else.
+**Measured on round `20261004-1458` C2**: the whole-prompt invalidation span per delivered pair fell from **2,539 to
+2,111 tokens** with this move, on top of the ordering change that had already cut it from **6,179 to 2,539**. The
+presets' own `_meta` notes record the move in their own words, as they record every other change to what a cell lays
+out; this file does not restate them.

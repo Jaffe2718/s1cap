@@ -18,7 +18,8 @@
  * Context-lifecycle hooks stay skeletons until M1.
  */
                                                                                                                          
-import { defaultPolicy, validatePolicy, TELEMETRY_SCHEMA_VERSION, UNENFORCED_KNOBS } from '@s1cap/core';
+                                                   
+import { defaultPolicy, mergeCellPreset, validatePolicy, TELEMETRY_SCHEMA_VERSION, UNENFORCED_KNOBS } from '@s1cap/core';
                                                                       
 import {
   DEFAULT_WEIGHTS_CACHE_DIR,
@@ -43,7 +44,18 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { primeSystemPrompt } from './system-prompt.js';
                                                                  
-import { TUNING_REF, parseEnvName, parsePath, parseProvider, parseTuning, parseTuningArgs, readCredential } from './credentials.js';
+import {
+  TUNING_REF,
+  parseEnvName,
+  parsePath,
+  parseProvider,
+  parseTuning,
+  parseTuningArgs,
+  questionFirstRefusal,
+  questionLastNote,
+  questionSlotOutcome,
+  readCredential,
+} from './credentials.js';
                                                
 import { createStepObserver } from './step-observer.js';
                                                        
@@ -106,21 +118,68 @@ const RESERVE_OUTPUT_DEFAULT = 8_000;
 const FIXED_OVERHEAD_DEFAULT = 1_200;
 const DECAY_LAMBDA_MS = 36 * 60 * 60 * 1000;
 /**
- * The most pairs one upkeep tick may offer, across every segment it folds in.
+ * How the association lane is driven: **on demand, since 2026-10-05**.
  *
- * Hoisted out of the observer options so the wiring record can state it (F4). It is a *governance* number - it
- * decides how much work one tick is allowed to ask for, and `deferredPairs` is where a run that hit it shows up -
- * and it appeared in no persisted artifact while it was a literal inside a call.
+ * It used to be eager - upkeep called `scoreNew` for every event it folded in, with `MAX_PAIRS_PER_SWEEP = 2048`
+ * as the per-tick budget across those segments - and that constant is deleted rather than kept, because it bounded
+ * work the build no longer does. What bounds the lane now is the *walk*: a step's recall asks the graph for the
+ * rows it needs (`AssociationGraph.recallDemand`), one level of the walk at a time, and `recall.anchorWaitMs` is
+ * the deadline those demands are issued under. The pair budget that replaces it is not a number at all: a row is
+ * `min(index, w)` pairs, and how many rows a step buys is how far its walk spreads before the deadline.
+ *
+ * It is recorded in the wiring record's `governance` block as a string, so a round can tell which mechanism drove
+ * the lane it is reading - the two produce very different `scoredPairs` for the same session, and nothing in the
+ * artifacts would otherwise say which one ran.
  */
-const MAX_PAIRS_PER_SWEEP = 2048;
+const SCORING_MODE = 'on-demand';
+
+/**
+ * The cell preset this process last resolved, for the wiring record. The same idiom as `appliedTuning` below: the
+ * resolution is pure and the record is written much later by activation, so the provenance travels in a module
+ * binding rather than through every caller.
+ *
+ * It exists because the alternative was measured and failed: `bench/cells/C2.json` was given
+ * `recall.threshold: 0.6` on 2026-10-05 and the round that followed ran **0.55**, since nothing loaded the file —
+ * and no artifact said a value had been written and ignored. A round's `kind:"wiring"` record now names the preset
+ * file it read and which fields that file supplied, so "which JSON produced this run" is readable afterwards.
+ */
+let appliedCellPreset                                                                                               = null;
+
+/** What the last `resolvePluginConfig` read from a cell preset, for the wiring record. */
+export function lastCellPreset()                                                                                               {
+  return appliedCellPreset;
+}
 
 /**
  * Validate and normalise the whole plugin config. Fail-safe: invalid values are reported and
  * the default is kept, so a typo in a profile patch can never break a live session.
+ *
+ * @param preset the parsed `bench/cells/<cell>.json`, and the path it came from. **The preset is a layer of the
+ *   policy, not a description of one** — `mergeCellPreset` folds it under the profile's own keys, so a value written
+ *   in the JSON reaches the session and a value the profile also sets still wins. Precedence:
+ *   `defaultPolicy()` < cell preset < explicit config in the profile patch.
  */
-export function resolvePluginConfig(raw                             )                       {
+export function resolvePluginConfig(
+  raw                             ,
+  preset                                           ,
+)                       {
   const source = (raw ?? {})                           ;
-  const policy = validatePolicy(source, ['laya', 'telemetry', 'enabled', 'observation']);
+  const merged = mergeCellPreset(source, preset?.value, {
+    extraTopLevel: ['laya', 'telemetry', 'enabled', 'observation'],
+  });
+  const policy = validatePolicy(merged.raw, ['laya', 'telemetry', 'enabled', 'observation']);
+  // A preset issue is an **error**, not a warning: the file is this project's own and a path it does not have means
+  // the file and the build disagree about what will run. `validatePolicy` walks only the top level for unknown keys,
+  // so without this a typo inside a section (`recall.thrsehold`) was dropped with nothing said at all.
+  if (merged.issues.length > 0) {
+    for (const issue of merged.issues) {
+      policy.issues.push({ path: issue.path, message: `cell preset: ${issue.message}`, severity: 'error' });
+    }
+    policy.errors = policy.issues.filter((i) => i.severity === 'error');
+    policy.warnings = policy.issues.filter((i) => i.severity === 'warning');
+    policy.ok = policy.errors.length === 0;
+  }
+  appliedCellPreset = { file: preset?.file ?? null, fromPreset: merged.fromPreset, overridden: merged.overridden };
   const laya = validateLayaConfig(source.laya);
 
   const telemetryErrors           = [];
@@ -212,7 +271,15 @@ export function commandError(text        )                                  {
    
                                                        
                                                             
-                                                                  
+     
+                                                                                                              
+                                                                                                               
+                                                                                                               
+                                                                                                                     
+                                                                                                                    
+                                                                                    
+     
+                                                                                             
  
 
 export const name = 'dsh-s1cap';
@@ -388,6 +455,40 @@ let appliedTuning         = {};
  */
 const TUNING_FILE = './.s1cap/tuning.json';
 
+/**
+ * Where a profile says its cell preset is, relative to `DSH_HOME` like every other path this plugin resolves.
+ *
+ * The presets themselves live in the repository (`bench/cells/<cell>.json`) and are **not reachable from a deployed
+ * profile**: `setup.mjs` copies each package into the profile's `node_modules`, and a round's own copy of
+ * `@s1cap/core` resolves to the profile, not to the working tree — measured on round `20261004-1618`, where
+ * `realpath` on `@s1cap/core/lib/config.js` stayed inside `home/C2/profiles/C2test/node_modules`. So the preset is
+ * copied in beside the profile and named here, rather than guessed at by walking up from a module.
+ */
+const CELL_PRESET_FILE = './.s1cap/cell-preset.json';
+
+/**
+ * Read the cell preset a profile names, if it names one.
+ *
+ * The failure shapes are returned rather than thrown, so activation can put them in the same channel every other
+ * configuration problem goes to. A profile that names no preset is **not** a failure — that is every round before
+ * this one, and it keeps the cell and the defaults.
+ */
+export function readCellPresetFile()                                                          {
+  const path = resolveTelemetryPath(CELL_PRESET_FILE);
+  let raw        ;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    // Absent is the ordinary case for every profile written before this change, so it is not reported.
+    return { file: null, value: undefined };
+  }
+  try {
+    return { file: path, value: JSON.parse(raw)            };
+  } catch (err) {
+    return { file: path, value: undefined, error: `${path} could not be read as JSON: ${(err         ).message}` };
+  }
+}
+
 /** the panel's Save route: a prefix on the same server that serves the UI, following dsh-pet's /dsh-pet-7340
  */
 const TUNING_ROUTE = '/s1cap-7340';
@@ -397,12 +498,15 @@ export function readTuningFile()         {
     const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
     const parsed = JSON.parse(raw)                           ;
     const out         = {};
-    if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth > 0) out.depth = parsed.depth;
+    // The panel's bound mirrors `NUMBER_RULES` for `recall.depth` (1..16) rather than being "an integer > 0": the
+    // core validator caps the path, so a file writing 17 would be applied by this reader and refused by the next
+    // profile validation — two surfaces disagreeing about the same knob is the drift this check exists to stop.
+    if (typeof parsed.depth === 'number' && Number.isInteger(parsed.depth) && parsed.depth >= 1 && parsed.depth <= 16) out.depth = parsed.depth;
     // A file written before the rename still carries the old key: read either, so an upgrade does not silently
     // drop a researcher's stored threshold.
     const threshold = typeof parsed.relevanceThreshold === 'number' ? parsed.relevanceThreshold : (parsed                         ).releTao;
     if (typeof threshold === 'number' && threshold >= 0 && threshold <= 1) out.relevanceThreshold = threshold;
-    if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 64) out.window = parsed.window;
+    if (typeof parsed.window === 'number' && Number.isInteger(parsed.window) && parsed.window >= 4) out.window = parsed.window;
     // The bounded anchor wait, read back through the same bounds `parseTuningArgs` applies (0 disables it). The
     // asymmetry with the HTTP route is deliberate: the route answers 400 for a truncated or over-long wait, and this
     // reader - which reads a file a previous version of this plugin may have written - falls back to the default.
@@ -414,11 +518,31 @@ export function readTuningFile()         {
     ) {
       out.anchorWaitMs = parsed.anchorWaitMs;
     }
-    // `false` is a real value here, not an absence, so this tests the type rather than truthiness. The first
-    // version omitted the field from this reader entirely, so the panel wrote it, the route echoed it back from
-    // the in-memory copy, and the layout stayed on its default - a stored setting that looked saved everywhere
-    // except in the prompt it was supposed to change.
-    if (typeof parsed.xFirst === 'boolean') out.xFirst = parsed.xFirst;
+    // **The question's old slot, read only to be reported (2026-10-05).** The setting behind it is deleted — the
+    // paper places the question last in every condition and `q` is now the last block by construction — and a stored
+    // file is the surface where silence would cost the most: a value that resolves to nothing is this project's
+    // most-repeated failure, and a researcher's stored layout reverting without a word is exactly what it looks like
+    // from the outside. So the two spellings a previous panel wrote are read, and what they ask for decides between
+    // a **refusal** (`refused`: the question first, `[T, q, x]`, a layout no setting produces) and a **note**
+    // (`notes`: the question last, which is what every layout does now). Nothing is stored for either, because there
+    // is no field left to store it in, and an unrecognized value is dropped exactly as this reader always dropped
+    // one. The sentences are `credentials.ts`'s own, so the file, the command line and the panel cannot drift apart
+    // on what `true` or `first` means.
+    if (typeof parsed.questionPlacement === 'string' || typeof parsed.xFirst === 'boolean') {
+      const where =
+        typeof parsed.questionPlacement === 'string'
+          ? `questionPlacement: ${JSON.stringify(parsed.questionPlacement)}`
+          : `xFirst: ${String(parsed.xFirst)}`;
+      const value = typeof parsed.questionPlacement === 'string' ? parsed.questionPlacement : String(parsed.xFirst);
+      const asks = questionSlotOutcome(value);
+      if (asks === 'first') out.refused = [questionFirstRefusal(where, value)];
+      else if (asks === 'last') out.notes = [questionLastNote(where, value)];
+    }
+    // And the paper's arm, which is the only layout axis: `tracePlacement` is a closed two-value union, so an
+    // unknown string is dropped rather than clamped - the same rule as every other value in this reader.
+    if (parsed.tracePlacement === 'trace-as-state' || parsed.tracePlacement === 'trace-append') {
+      out.tracePlacement = parsed.tracePlacement;
+    }
     // The Laya fields, read through the same validators the command line uses. A live run found the gap this
     // closes: the panel wrote an interpreter path, the route echoed it back from the in-memory copy, and the
     // session still came up `provider=none` for a missing path — the write half existed and the read half did
@@ -444,12 +568,29 @@ export function readTuningFile()         {
 /**
  * Persist the knobs. The failure reason is returned rather than swallowed: a Save that reports "not persisted"
  * without saying why is the same silent-failure shape this project keeps rejecting, and the panel prints it.
+ *
+ * **Only the settings are written, field by field.** The in-memory `appliedTuning` also carries the *readings* that
+ * are not settings — `refused` and `notes`, the sentences a legacy question-axis spelling earned (`credentials.ts`)
+ * — and those belong in the log and on `/s1`, not in a file the next launch parses as configuration. Writing the
+ * object wholesale is what put them there the first time this file was touched, which is why the projection is
+ * explicit rather than a delete of the two keys.
  */
 function writeTuningFile(values        )                                  {
   const path = resolveTelemetryPath(TUNING_FILE);
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(values) + '\n', 'utf8');
+    const stored         = {
+      ...(values.depth !== undefined ? { depth: values.depth } : {}),
+      ...(values.relevanceThreshold !== undefined ? { relevanceThreshold: values.relevanceThreshold } : {}),
+      ...(values.window !== undefined ? { window: values.window } : {}),
+      ...(values.anchorWaitMs !== undefined ? { anchorWaitMs: values.anchorWaitMs } : {}),
+      ...(values.tracePlacement !== undefined ? { tracePlacement: values.tracePlacement } : {}),
+      ...(values.layaPythonPath !== undefined ? { layaPythonPath: values.layaPythonPath } : {}),
+      ...(values.layaWeightsCacheDir !== undefined ? { layaWeightsCacheDir: values.layaWeightsCacheDir } : {}),
+      ...(values.layaWeightsEnvVar !== undefined ? { layaWeightsEnvVar: values.layaWeightsEnvVar } : {}),
+      ...(values.provider !== undefined ? { provider: values.provider } : {}),
+    };
+    writeFileSync(path, JSON.stringify(stored) + '\n', 'utf8');
     return { ok: true };
   } catch (e) {
     return { ok: false, error: path + ": " + (e instanceof Error ? e.message : String(e)) };
@@ -520,6 +661,15 @@ function readPayloadSessionId(payload         )         {
   return typeof id === 'string' && id !== '' ? id : 'unassigned';
 }
 
+/**
+ * The delivery path's options, plus the switch that decides which steps reach it at all.
+ *
+ * `assemblyTrigger` is `policy.assemblyTrigger` (`packages/core/src/types.ts`): omitted means `'every-step'`, the
+ * value the originating brief requires, so a caller that predates the switch gets the full mechanism. `'claimed-only'`
+ * is the narrow value: the assembly runs only on steps whose decision claims messages, which round `20261004-0205`
+ * measured as 2 assemblies in C2's 53 steps. Nothing in this repository sets it; it exists so that round stays
+ * reproducible and so a single-variable round can flip back to it.
+ */
                                  
                           
                                                                                                                   
@@ -529,6 +679,7 @@ function readPayloadSessionId(payload         )         {
                                                                                                   
      
                                                                                                                     
+                                    
                                     
  
 
@@ -562,6 +713,13 @@ export function preStepMiddleware(
    * consequence would be structural: the same block re-appended to the log on every step, one copy per step, with
    * `ledger.json` and `composition.json` inflating alongside it - the D4 failure mode, arrived at from the fix
    * side. It is invisible today only because delivery fired twice in the whole round, with different payloads.
+   *
+   * **`'every-step'` makes this set the load-bearing guard rather than a safety net.** On the steps that switch
+   * exists for, `decision.messages` is empty, so `deliverContext`'s content check scans nothing and this set is
+   * the only thing standing between a stable selection and one appended copy per step. The consequence
+   * `DEFECT-GATE.md` records (Update 5, item 5) follows from it directly, and belongs in any round that flips
+   * the switch: a stable selection delivers **at most once per distinct payload per session**, so a delivered
+   * total is bounded by distinct payloads and not by delivering steps.
    *
    * Keyed on the digest S1CAP itself computed (`context-delivery.ts`, content-derived and already recorded on
    * every delivery, so this needs no new hashing) and on the session, so cross-session safety falls out of the
@@ -653,9 +811,50 @@ export function preStepMiddleware(
     //
     // A rejected or aborted decision is the same cheap class and is reported in the same place, for the same
     // reason: three fields tell us the answer, and the assembly is downstream of all three.
+    //
+    // **The trigger.** Two values, one knob (`policy.assemblyTrigger`, `packages/core/src/types.ts`), and the
+    // default is the expression this shipped with:
+    //
+    //   - `'claimed-only'`: assemble exactly when the decision itself carries messages — character for
+    //     character the condition the D1 fix introduced. This was the default until 2026-10-04; it is kept as a
+    //     value because round `20261004-0205` ran it and its record has to stay readable.
+    //   - `'every-step'` (default): assemble on every step that will actually issue a request. At this hook the whole of
+    //     that condition is the negation of the two facts already tested below: `record.kind === 'reject'` and
+    //     `record.signal?.aborted === true`. Nothing else observable separates a step that sends no request from
+    //     one that does: the packaged loop appends the decision (`dsh-agent-loop` L1061) and then builds and
+    //     streams the request from the session log whatever `decision.messages` holds (L1063/L1072). The
+    //     evidence is the round that measures the defect this switch exists for — `20261003-2104` made **33 model
+    //     calls on 33 steps, one `LLM calls` record per step**, turn ended `1:completed`, and assembled twice —
+    //     so in that round an empty decision did not mean "no request". `step === 1` with nothing claimed is
+    //     excluded even here: the harness's own `step === 1 && messages.length === 0` is a turn-boundary test,
+    //     the host's instructions plugin declines there too, and that round's evidence is about the steps after
+    //     the first.
+    //
+    // **What is deliberately not overruled.** The empty decision is also how the loop decides the turn is over
+    // (`if (turnEnds && decision.messages.length === 0) break`, L962), and `turnEnds` is a local the payload does
+    // not carry — so a plugin cannot tell a terminal pre-step from an ordinary one, returning a message at a
+    // terminal step prevents the turn from ending, and repeated, that is a livelock. `termination: 'model-owned'`
+    // says no S1CAP output may prolong or veto the model's exit, and `DEFECT-GATE.md` records the refusal on an
+    // empty decision as a design decision rather than a capability limit (D1's correction, Update 2026-10-02).
+    // That is why this is a switch with a conservative default and not a fix: **the round that flips it has to
+    // show that the empty-decision steps it acts on are non-terminal** — the 33-of-33 count shows they issued
+    // requests, which is not the same claim — and the switch is what lets exactly that round be run without
+    // moving any other variable.
     const stepMessages = record.messages;
-    const deliverable = Array.isArray(stepMessages) && stepMessages.length > 0;
+    const everyStep = options?.assemblyTrigger === 'every-step';
+    const requestsModel = record.kind !== 'reject' && record.signal?.aborted !== true;
+    const claimsMessages = Array.isArray(stepMessages) && stepMessages.length > 0;
+    const firstStepWithNothingClaimed = step === 1 && Array.isArray(stepMessages) && stepMessages.length === 0;
+    const deliverable = firstStepWithNothingClaimed
+      ? false
+      : everyStep
+        ? requestsModel && Array.isArray(stepMessages)
+        : claimsMessages;
     if (record.kind === 'reject' || record.signal?.aborted === true || !Array.isArray(stepMessages)) {
+      // These are the only refusals left under `'every-step'`, and they are the reason the switch is safe to
+      // offer: a rejected or aborted step sends no request, and a decision whose `messages` is not a list is a
+      // shape this lane does not understand — inserting a list where the harness had something else would be a
+      // rewrite, not the insertion the delivery module promises.
       report(
         false,
         record.kind === 'reject'
@@ -691,6 +890,11 @@ export function preStepMiddleware(
       // scripts count refusals by `delivered: false` and read this reason, and a new sentence here would make the
       // same event look like a different one. What is new is only that the step no longer paid for it first. The
       // harness's sharper first-step reason is kept ahead of it, exactly as `deliverContext` orders the two.
+      //
+      // Under `'every-step'` this branch is reached by exactly two states, and neither is the measured defect:
+      // `step === 1` with nothing claimed — the harness's own turn-boundary guard, excluded from the trigger
+      // above — and a decision whose `messages` is not a list, which the guard further up already returned on.
+      // The reason strings are unchanged, so a round's refusal count keeps meaning what it meant.
       //
       // The two flags are the whole of the added information, and they are read from the observation's own counters
       // rather than assumed: `ingested` is true exactly when `observeStep` returned the ingest-only shape, i.e. the
@@ -843,7 +1047,12 @@ function applyInner(ctx               , raw                             )       
     else if (earlySessionEvents.length < EARLY_EVENT_LIMIT) earlySessionEvents.push(event);
   });
 
-  const resolved = resolvePluginConfig(raw);
+  // The cell preset, loaded before the policy is resolved so that it is a **layer** of that policy rather than a
+  // note beside it: `setup.mjs` copies `bench/cells/<cell>.json` in beside the profile, and a profile that names
+  // none keeps the cell and the defaults, which is what every round before this change did.
+  const cellPreset = readCellPresetFile();
+  if (cellPreset.error !== undefined) ctx.logger?.error?.(`[s1cap] ${cellPreset.error}`);
+  const resolved = resolvePluginConfig(raw, { file: cellPreset.file, value: cellPreset.value });
   const config = resolved.config;
   const layaConfig = config.laya ?? defaultLayaConfig();
   // The checkpoint cache is anchored, not relative. `./.s1cap/laya-cache` resolves against whatever directory the
@@ -1182,15 +1391,19 @@ function applyInner(ctx               , raw                             )       
         ctx.logger?.warn?.(`[s1cap] s1_call failure record rejected: ${String(nested)}`);
       }
     };
-    // One System-1 call per new segment, scoring the whole window. Both of these are built **unconditionally** and
-    // read the current `client` at call time, rather than being built when a client happens to exist. The previous
-    // shape — `client === undefined ? undefined : createS1Relevance(...)`, handed to the observer as a snapshot — is
-    // what a real three-turn run exposed: the interpreter arrives on the first step and the backend is started by
-    // hand after that, so `client` was defined by the time `/s1` reported it and `relevance` was `undefined` anyway.
-    // The session then reported a working System-1 backend, scored 66 and 78 pairs, and every one of those scores
-    // came from the lexical fallback, with `s1CallRecords: 0`. A delegate that answers `undefined` when there is no
-    // client is the same thing the missing object meant, so behaviour is unchanged when nothing is configured —
-    // `packages/core/src/assoc-graph.ts` treats an `undefined` batch as "score these lexically".
+    // One System-1 call per **demanded row**, since scoring became on demand (2026-10-05): the graph hands this
+    // scorer one level's rows at a time (`step-observer.ts`'s `scoreDemandedRows`) and a row is `min(index, w)`
+    // pairs, i.e. at most `w` = 16 questions against `s1.questionsPerCall` = 20 - one request. The eager reading of
+    // this same object was "one call per new segment, scoring the whole window", and that caller is gone. Both are
+    // built **unconditionally** and read the current `client` at call time, rather than being built when a client
+    // happens to exist. The previous shape — `client === undefined ? undefined : createS1Relevance(...)`, handed to
+    // the observer as a snapshot — is what a real three-turn run exposed: the interpreter arrives on the first step
+    // and the backend is started by hand after that, so `client` was defined by the time `/s1` reported it and
+    // `relevance` was `undefined` anyway. The session then reported a working System-1 backend, scored 66 and 78
+    // pairs, and every one of those scores came from the lexical fallback, with `s1CallRecords: 0`. A delegate that
+    // answers `undefined` when there is no client is the same thing the missing object meant, so behaviour is
+    // unchanged when nothing is configured — `packages/core/src/assoc-graph.ts` treats an `undefined` batch as
+    // "score these lexically" (and the demand walk does so locally).
     //
     // One gate per plugin activation, shared by everything that asks this backend (see `s1-backpressure.ts`). It is
     // built here rather than per scorer because the limit is a property of the *backend*: two scorers each holding
@@ -1277,31 +1490,19 @@ function applyInner(ctx               , raw                             )       
         return relevance === undefined ? Promise.resolve(undefined) : relevance(state, candidates);
       },
       /**
-       * The most pairs one upkeep tick may offer, across every segment it folds in.
+       * The per-sweep pair budget is **gone**, and the measurement that justified it is why it is recorded here
+       * rather than deleted silently.
        *
-       * `scoreNew` scores each segment that arrived since the last call against its whole window, and the upkeep
-       * queue starts several of those per tick, so without a budget the first tick of a session that has already
-       * accumulated history offers `segments x w` pairs in one burst - which the backend refuses.
-       *
-       * The measured run, from its own artifacts rather than from memory (`evidence/C2/control.jsonl` and the
-       * 173 MB graph snapshot `home/C2/.s1cap/rg/rg-session-441e3bc3-…json`): **860 672 pairs offered for 4 152
-       * judgements (0.48 % coverage) over 277 steps**, with **3 859 refused calls** in between. The last assembly
-       * record carries `scoredPairs: 856 576` and the snapshot `860 672`; the difference is scoring that happened
-       * after the last step. The three figures are cumulative for the session (`AssemblyEvent.scoredPairs`), so
-       * they are not to be summed over records. This comment previously quoted "1 976 845 candidate-segment
-       * positions", which matches no quantity in that run - not the offered pairs, not the graded rows
-       * (883 200 `scores`), not the recalled tokens assembled (1 205 029), not the summed `budgetUsed`
-       * (1 917 527), and not the sum of any pair field over the records (84 874 308). It has been replaced with
-       * the numbers a reader can check.
-       *
-       * 2 048 is around a hundred requests at the configured 20 questions per call: enough that steady-state
-       * upkeep (one new segment, a window of `w`) is never cut short, small enough that a cold start or a burst
-       * cannot become the burst the admission limit punishes. A pair the budget holds back is **deferred**, not
-       * scored lexically: the graph does not advance its cursor over it, so the next tick offers it again.
-       *
-       * The value lives in `MAX_PAIRS_PER_SWEEP` so the wiring record can carry it.
+       * `maxPairsPerSweep: 2048` existed because `scoreNew` scored every segment that had arrived since the last
+       * call against its whole window, so the first tick of a session with accumulated history offered
+       * `segments x w` pairs in one burst - which the backend refused. The measured run, from its own artifacts
+       * (`evidence/C2/control.jsonl` and the graph snapshot): **860 672 pairs offered for 4 152 judgements (0.48 %
+       * coverage) over 277 steps**, with **3 859 refused calls** in between. The budget bounded a burst that
+       * on-demand scoring cannot produce: a walk asks for one level of rows at a time, a row is `min(index, w)`
+       * pairs, and the deadline (`recall.anchorWaitMs`) is what bounds how many levels it buys. So the knob is
+       * removed rather than kept as a number nothing reads - the failure this repository keeps finding is a
+       * parameter that composes, appears in every dump and decides nothing.
        */
-      maxPairsPerSweep: MAX_PAIRS_PER_SWEEP,
       emit: (event) => {
         try {
           controlLog.emit(event);
@@ -1380,14 +1581,16 @@ function applyInner(ctx               , raw                             )       
     //     was demoted by a conflict and a C0 that was configured with no lane printed the same row. The two fields
     //     that tell them apart used to exist only on the live `/s1` route, and `logs/*.log` was found to contain
     //     zero `[s1cap]` lines, so the warning at `:823` was durable nowhere.
-    //   - `governance`. `admissionLimit`, the per-sweep pair budget and the breaker's thresholds are the knobs
-    //     this pass added, and none of them appeared in any persisted record: "which knobs actually governed this
-    //     run" was unanswerable from a future round's evidence. They are recorded resolved - the breaker's
-    //     defaults included - so the record is the authority and not a copy of a default read from a source file
-    //     that has since changed.
+    //   - `governance`. `admissionLimit` and the breaker's thresholds are the knobs this pass added, and none of
+    //     them appeared in any persisted record: "which knobs actually governed this run" was unanswerable from a
+    //     future round's evidence. They are recorded resolved - the breaker's defaults included - so the record is
+    //     the authority and not a copy of a default read from a source file that has since changed. **`scoring`
+    //     joined them on 2026-10-05 and `maxPairsPerSweep` left**: a run's `scoredPairs` means something different
+    //     under eager scoring (the session's arrival order) from under on-demand scoring (what a step's walk asked
+    //     for), and nothing else in the artifacts would say which mechanism produced the number.
     const governance = {
       admissionLimit: config.s1.admissionLimit,
-      maxPairsPerSweep: MAX_PAIRS_PER_SWEEP,
+      scoring: SCORING_MODE,
       // The values actually in force, not the ones the caller happened to name: a gate built with no
       // `openAfterRefusals` still ran with one.
       breaker: {
@@ -1421,19 +1624,57 @@ function applyInner(ctx               , raw                             )       
         // its recipe says"; different means a conflict demoted it, and `conflicts` carries the reason. A reader who
         // sees `s1: "none"` must be able to tell which of the two they are looking at without a live instance.
         configuredProvider: config.s1.provider,
+        // **Which JSON this cell's policy came from, and which of its fields the run used.** Before this line a
+        // round that read a preset and a round that read none wrote byte-identical wiring records, which is the
+        // whole reason `recall.threshold: 0.6` could sit in `bench/cells/C2.json` through a round that ran 0.55:
+        // the authority on "what did this cell run" could not see the file the cell was supposed to be configured
+        // by. `fromPreset` is every dotted path the preset supplied; `overridden` is those the profile patch then
+        // replaced, and a non-empty `overridden` is the case where the two layers disagreed on purpose.
+        cellPreset: lastCellPreset(),
         conflicts: resolved.conflicts,
         relevance: client !== undefined,
         // No `planGate` key: the policy field is gone, and a wiring record that still announced one would be the
         // exact artifact this removal exists to stop producing - a run stating a component it does not have.
-        xFirst: config.xFirst,
+        //
+        // **The paper's axis, under the paper's name, and the only layout axis (2026-10-05).** This key was
+        // `xFirst: boolean`, read as "the paper's variable" while it actually moved the question; the recorded
+        // layouts say what that cost - `pinned, stateProxy, anchor, recalled, tail` in every cell, a question in the
+        // middle of the prompt that neither of the paper's arms has. `tracePlacement` is the same statement made
+        // precisely: `'trace-as-state'` (`M([T, x, q])`, the method) or `'trace-append'` (`M([x, T, q])`, the
+        // control). A round read through the old key is still readable - the boolean mapped one-to-one onto the
+        // question's position - but what a round *records* has changed, so a reader comparing this tape with one
+        // from before this date has to compare `tracePlacement`, not `xFirst`.
+        //
+        // **No `questionPlacement` beside it, and that is the deletion rather than a gap.** The question is the last
+        // block of `layoutOrder` in every assembly this build produces (the paper: "place it at the end of every
+        // input"), so a field recording where it sits would record one value forever; the axis itself could produce
+        // `[T, q, x]`, a layout the paper does not have, and it has been removed from the policy rather than renamed.
+        // A tape recorded before 2026-10-05 still carries either spelling, and `layoutOrder` is beside both - the
+        // order is what a reader compares. A profile or a stored file that still spells the old key is read and
+        // reported: `xFirst: true` / `questionPlacement: 'first'` are refused with the sentence that retired them
+        // (`LEGACY_LAYOUT_KEYS`, packages/core/src/config.ts), and the question-last spellings are noted.
+        tracePlacement: config.tracePlacement,
         // `deliver`, because "which cells actually deliver" has to be answerable from a round's own artifacts and
         // nothing else stated it. `verify-wiring.mjs` asserts `tas.on`/`xFirst` and stops there, so a run could not
         // prove its own arms: C0 leaves delivery off by choice (it is the baseline - the harness manages history),
-        // and C1 leaves it off because its channel is structurally empty, while C2 is the only delivering cell. The
+        // and C1 leaves recall selection off and the System-1 lane absent, so its channel carries the state proxy
+        // T alone - the paper's arm - while C2 delivers T ahead of the turns S1 selected. The
         // three are indistinguishable from every other field in this record. Beside `configuredProvider` and
         // `conflicts` for the reason those two are here: the record is the authority for a later reader who has the
-        // cell's recipe and not the process that ran it.
+        // cell's recipe and not the process that ran it. **Note, 2026-10-05: `verify-wiring.mjs` still reads the
+        // renamed `xFirst` key and its replacement, so its layout assertion now finds neither — a `scripts/` file,
+        // reported rather than edited from here.**
         deliver: config.deliver,
+        // `assemblyTrigger`, for the reason `deliver` is here and one more: `deliver` says whose assembled view
+        // reaches the model, and this says *which steps are assembled at all*. The two are the switch pair a
+        // round that flips this value has to be able to read back, and neither is inferable from the other - a
+        // `'claimed-only'` cell and an `'every-step'` cell deliver the same message when they deliver, and differ
+        // in how many steps ever had the chance. It is also the field that makes the flip auditable: no cell sets
+        // it, so a round that reads anything other than the default from here moved a variable on
+        // purpose. `verify-wiring.mjs` asserts `tas.on`/`xFirst`/`deliver` and does not yet assert this one; the
+        // tape is the record either way, and `packages/dsh-plugin/test/config.test.ts` pins the value this
+        // process writes for all three cells.
+        assemblyTrigger: config.assemblyTrigger,
         // `tier1` is in here because leaving it out made the one knob that decides *how* candidates are generated
         // unreadable from every persisted artifact: the startup log line was the only place it appeared, and a
         // round's reader had the cell's recipe and not the value an instance resolved (F6).
@@ -1472,34 +1713,56 @@ function applyInner(ctx               , raw                             )       
         service: (ctx                                       ).get?.('credentials'),
         report: (line) => probeSink?.write(JSON.stringify({ ...line, kind: 'credential-tuning' }) + '\n'),
       });
-      appliedTuning = parseTuning(tuningRead.key);
+      const fromTuning = parseTuning(tuningRead.key);
       const fromFile = readTuningFile();
+      // A stored file (or a stored credential string) that still carries the question's old slot says so here, at
+      // activation, in the loudest channel this plugin has: a refusal is an error line, and a retirement note is a
+      // warning. Silence is the failure mode both sentences exist to prevent — a layout setting that resolves to
+      // nothing looks identical, from the panel, to one that was applied.
+      //
+      // The two readings are *replaced* on every read rather than merged in: they describe the file as it stands, so
+      // a stale refusal must not outlive the file that earned it (that is what `refused: undefined` below does —
+      // `JSON.stringify` drops the key, so `/s1` and the panel report nothing rather than an old sentence).
+      const refusals = [...(fromTuning.refused ?? []), ...(fromFile.refused ?? [])];
+      const notesRead = [...(fromTuning.notes ?? []), ...(fromFile.notes ?? [])];
+      for (const refusal of refusals) ctx.logger?.error?.(`[s1cap] recalled tuning refused: ${refusal.message}`);
+      for (const note of notesRead) ctx.logger?.warn?.(`[s1cap] ${note}`);
+      appliedTuning = {
+        ...fromTuning,
+        refused: refusals.length > 0 ? refusals : undefined,
+        notes: notesRead.length > 0 ? notesRead : undefined,
+      };
       if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
       if (fromFile.relevanceThreshold !== undefined) appliedTuning.relevanceThreshold = fromFile.relevanceThreshold;
       if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
       if (fromFile.anchorWaitMs !== undefined) appliedTuning.anchorWaitMs = fromFile.anchorWaitMs;
-      if (fromFile.xFirst !== undefined) appliedTuning.xFirst = fromFile.xFirst;
+      if (fromFile.tracePlacement !== undefined) appliedTuning.tracePlacement = fromFile.tracePlacement;
       if (fromFile.layaPythonPath !== undefined) appliedTuning.layaPythonPath = fromFile.layaPythonPath;
       if (fromFile.layaWeightsCacheDir !== undefined) appliedTuning.layaWeightsCacheDir = fromFile.layaWeightsCacheDir;
       if (fromFile.layaWeightsEnvVar !== undefined) appliedTuning.layaWeightsEnvVar = fromFile.layaWeightsEnvVar;
       if (fromFile.provider !== undefined) appliedTuning.provider = fromFile.provider;
       // The cell preset values before the volatile layer touches them. A tuning file written during one live test
-      // silently overrode the cell it was not part of: C2 ran with xFirst=false and window=1200 for an entire
-      // verification session - and nothing in any counter said so. The override itself is right (the panel owns
-      // these knobs), but a *silent* one deforms an ablation run invisibly, which is this project's dominant
-      // failure mode. Say it out loud at activation, and tell the reader how to get a cell-pure run.
+      // silently overrode the cell it was not part of: C2 ran with window=1200 for an entire verification session -
+      // and nothing in any counter said so. The override itself is right (the panel owns these knobs), but a
+      // *silent* one deforms an ablation run invisibly, which is this project's dominant failure mode. Say it out
+      // loud at activation, and tell the reader how to get a cell-pure run.
       const cellBefore = {
         depth: config.recall.depth,
         relevanceThreshold: config.recall.threshold,
         window: config.recall.window,
         anchorWaitMs: config.recall.anchorWaitMs,
-        xFirst: config.xFirst,
+        tracePlacement: config.tracePlacement,
       };
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.relevanceThreshold !== undefined) config.recall.threshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
       if (appliedTuning.anchorWaitMs !== undefined) config.recall.anchorWaitMs = appliedTuning.anchorWaitMs;
-      if (appliedTuning.xFirst !== undefined) config.xFirst = appliedTuning.xFirst;
+      // The arm itself, and the only layout setting a stored file can carry. No cell preset carries a
+      // `tracePlacement` (see `cellPolicy`), so this line is the only way a live session can be moved to the paper's
+      // control arm without editing a profile - and it is logged as a deviation below, because that is exactly what
+      // it is. The question's position is not settable here or anywhere: the paper fixes it last, `q` is the last
+      // block by construction, and the spellings that used to write it are refused or noted above.
+      if (appliedTuning.tracePlacement !== undefined) config.tracePlacement = appliedTuning.tracePlacement;
       // The backend the panel's radio selected. Applied to the live config *before* the conflict check and the
       // rebuild below, because those two are what make the choice real: a provider written into the config object
       // alone leaves the session calling the backend the user just switched away from.
@@ -1541,7 +1804,7 @@ function applyInner(ctx               , raw                             )       
         backend = rebuilt.backend;
         client = rebuilt.client;
       }
-      for (const knob of ['depth', 'relevanceThreshold', 'window', 'anchorWaitMs', 'xFirst']         ) {
+      for (const knob of ['depth', 'relevanceThreshold', 'window', 'anchorWaitMs', 'tracePlacement']         ) {
         const after =
           knob === 'depth'
             ? config.recall.depth
@@ -1551,7 +1814,7 @@ function applyInner(ctx               , raw                             )       
                 ? config.recall.window
                 : knob === 'anchorWaitMs'
                   ? config.recall.anchorWaitMs
-                  : config.xFirst;
+                  : config.tracePlacement;
         if (after !== cellBefore[knob]) {
           ctx.logger?.warn?.(
             `[s1cap] tuning overrides the running cell: ${knob} ${String(cellBefore[knob])} -> ${String(after)} ` +
@@ -1559,7 +1822,7 @@ function applyInner(ctx               , raw                             )       
           );
         }
       }
-      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, anchorWaitMs: config.recall.anchorWaitMs, xFirst: config.xFirst, provider: config.s1.provider } }) + '\n');
+      probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, anchorWaitMs: config.recall.anchorWaitMs, tracePlacement: config.tracePlacement, provider: config.s1.provider } }) + '\n');
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
         observer,
@@ -1597,14 +1860,22 @@ function applyInner(ctx               , raw                             )       
   // The only lifecycle hook we register, in the verified middleware shape. `agent/request-error`
   // is deliberately NOT registered: its contract is unverified, and an unverified hook is exactly
   // what took a round down before.
-  // The delivery path, wired once. `config.deliver` is the cell's own switch, and **both control arms leave it
-  // off**: C0 by choice - it is the baseline, and letting the harness manage history is what makes it one - and C1
-  // because its channel is structurally empty (with `recall.tier1: 'off'` nothing is ever selected, so there is
-  // nothing to insert even though the cell delivers in principle). C2 is the only delivering cell. The three are
+  // The delivery path, wired once. `config.deliver` is the cell's own switch, and **the baseline leaves it
+  // off**: C0 by choice - it is the baseline, and letting the harness manage history is what makes it one.
+  // C1 and C2 both deliver. What differs between them is what the one injected message carries: with
+  // `recall.tier1: 'off'` C1 selects no turns, so its message is the state proxy `T` alone, which is the paper's
+  // arm; C2 puts `T` ahead of the turns S1 selected. Note what is *not* claimed: the channel appends, so the
+  // recorded order `T`-before-context is not what either cell delivers - placement is the write-back's job.
+  // The three are
   // stated on the wiring record (`deliver: config.deliver`) precisely because this comment is not evidence: a round
   // has to prove its own arms from its own artifacts. When delivery is off, `deliverContext` answers "not
   // delivered" with the reason, so a cell that assembles a layout nobody receives says so in the control plane
   // instead of looking identical to one that delivers.
+  //
+  // `assemblyTrigger` is the second switch on this path and it comes before `deliver` in the order of effects:
+  // it decides which steps are assembled, `deliver` decides whether what was assembled is inserted. Both are on
+  // the wiring record for the same reason: `assemblyTrigger` defaults to the brief's `'every-step'`, and `deliver`
+  // to `false` unless the cell says otherwise.
   const emitControl = (event                )       => {
     try {
       controlLogRef?.emit(event);
@@ -1618,9 +1889,16 @@ function applyInner(ctx               , raw                             )       
       observer,
       cell: config.cell,
       emit: emitControl,
+      // The other half of the N6 switch pair, and it reaches the delivery module as well: `'every-step'` is what
+      // makes the end-insertion branch reachable for an empty decision (`context-delivery.ts`), so the flag that
+      // decides whether the walk runs and the flag that decides whether the block may land must be one value.
+      // Nothing in this repository sets it to `'every-step'`: no cell, no preset, no profile. A round flips it in
+      // one profile patch, which is what makes the flip one variable.
+      assemblyTrigger: config.assemblyTrigger,
       deliver: (built, decision, payload) =>
         deliverContext({
           enabled: config.deliver,
+          trigger: config.assemblyTrigger,
           order: built.layout.order,
           ...(built.layout.stateProxy !== undefined ? { stateProxy: built.layout.stateProxy } : {}),
           recalled: built.layout.recalled,
@@ -1647,7 +1925,19 @@ function applyInner(ctx               , raw                             )       
    * answer with the effective triple. The `/s1-tune` command and the panel's Save button share it, so the command
    * line and the button cannot drift apart in what they accept or what they report.
  */
-  const applyTuning = (parsed        )                                                                                                                          => {
+  const applyTuning = (parsed        )                                                                                                                                            => {
+    // **A refusal is answered before anything is applied.** `parseTuningArgs` returns `refused` when a spelling asked
+    // for the question in front of the long context — the deleted layout axis — and a save carrying one is refused
+    // whole: coercing it would run a layout nobody asked for, and ignoring it would leave a command line that asks
+    // for a deleted layout beside a session that silently ran another. The sentences are the parser's own
+    // (`credentials.ts`), so the command line, the panel's PUT and the stored file report the same thing. An applied
+    // save carries `notes` back instead: the legacy spellings that asked for the question *last*, which is what
+    // every layout does now, and which are worth one sentence rather than a refusal.
+    if (parsed.refused !== undefined && parsed.refused.length > 0) {
+      const reason = parsed.refused.map((r) => r.message).join(' ');
+      for (const refusal of parsed.refused) ctx.logger?.error?.(`[s1cap] tuning refused: ${refusal.message}`);
+      return { ok: false, reason };
+    }
     const layaOnly =
       parsed.layaPythonPath === undefined &&
       parsed.layaWeightsCacheDir === undefined &&
@@ -1657,17 +1947,19 @@ function applyInner(ctx               , raw                             )       
       parsed.relevanceThreshold === undefined &&
       parsed.window === undefined &&
       parsed.anchorWaitMs === undefined &&
-      parsed.xFirst === undefined &&
+      parsed.tracePlacement === undefined &&
       parsed.provider === undefined &&
       layaOnly
     ) {
       return {
         ok: false,
         reason:
-          'nothing to set: depth d must be an integer > 0, threshold r between 0 and 1, window w an integer >= 64, wait an integer 0..60000 (0 disables the anchor wait), xFirst on/off, provider=jev|laya-serve|none (none makes no System-1 calls), or a Laya field (laya=, weights=, layaWeightsEnvVar=)',
+          'nothing to set: depth d must be an integer 1..16, threshold r between 0 and 1, window w an integer >= 4, wait an integer 0..60000 (0 disables the anchor wait), trace=trace-as-state|trace-append (the paper\'s two arms, and the only layout axis), provider=jev|laya-serve|none (none makes no System-1 calls), or a Laya field (laya=, weights=, layaWeightsEnvVar=). The question\'s position is not settable: the paper places it last in every condition, so q=last / xFirst=off are read and noted, and q=first / xFirst=on are refused',
       };
     }
-    appliedTuning = { ...appliedTuning, ...parsed };
+    // The readings (`refused`/`notes`) are replaced rather than merged: they describe the command line that was just
+    // parsed, and a save that says nothing about the question must clear the sentence an earlier save earned.
+    appliedTuning = { ...appliedTuning, ...parsed, refused: parsed.refused, notes: parsed.notes };
     // A panel value has to take effect now, not at the next start: the field the user just filled in is the one
     // that decides whether System-1 calls happen at all, and a backend that waits for a restart to pick it up
     // reports itself as broken for as long as the panel looks like it did nothing. The launcher reads the live
@@ -1710,12 +2002,15 @@ function applyInner(ctx               , raw                             )       
     if (parsed.relevanceThreshold !== undefined) config.recall.threshold = parsed.relevanceThreshold;
     if (parsed.window !== undefined) config.recall.window = parsed.window;
     if (parsed.anchorWaitMs !== undefined) config.recall.anchorWaitMs = parsed.anchorWaitMs;
-    if (parsed.xFirst !== undefined) config.xFirst = parsed.xFirst;
+    // The arm, and the only layout setting this path can change. `questionPlacement` is deleted, not merely
+    // unsettable here: the spellings that used to write it are refused at the parser (`refused`, above) or noted.
+    if (parsed.tracePlacement !== undefined) config.tracePlacement = parsed.tracePlacement;
     const persist = writeTuningFile(appliedTuning);
     const persisted = persist.ok;
     ctx.logger?.info?.(
-      `[s1cap] recall tuning: provider=${config.s1.provider} depth=${config.recall.depth} relevanceThreshold=${config.recall.threshold} window=${config.recall.window} anchorWaitMs=${config.recall.anchorWaitMs} xFirst=${String(config.xFirst)}${persisted ? '' : ' (not persisted: file write failed)'}`,
+      `[s1cap] recall tuning: provider=${config.s1.provider} depth=${config.recall.depth} relevanceThreshold=${config.recall.threshold} window=${config.recall.window} anchorWaitMs=${config.recall.anchorWaitMs} tracePlacement=${config.tracePlacement}${persisted ? '' : ' (not persisted: file write failed)'}`,
     );
+    for (const note of parsed.notes ?? []) ctx.logger?.warn?.(`[s1cap] ${note}`);
     return {
       ok: true,
       effective: {
@@ -1723,20 +2018,21 @@ function applyInner(ctx               , raw                             )       
         relevanceThreshold: config.recall.threshold,
         window: config.recall.window,
         anchorWaitMs: config.recall.anchorWaitMs,
-        xFirst: config.xFirst,
+        tracePlacement: config.tracePlacement,
         provider: config.s1.provider,
       },
       persisted,
       ...(persist.ok ? {} : { persistError: persist.error }),
+      ...((parsed.notes?.length ?? 0) > 0 ? { notes: parsed.notes } : {}),
     };
   };
   registerCommands(ctx, [
     {
       name: 's1-tune',
       description:
-        'S1CAP: set the recall/layout knobs — BFS depth d, relevance threshold r (0..1), S1 window w (>= 64), anchor wait in ms (0 disables), xFirst on/off — the backend (provider=jev|laya-serve|none, where none turns System-1 off) and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
+        'S1CAP: set the recall/layout knobs — BFS depth d (1..16), relevance threshold r (0..1), S1 window w (>= 4), anchor wait in ms (0 disables), trace=state|append (the paper\'s Trace as State / Trace Append arm, and the only layout axis — the question is last in every layout, so q=/xFirst= are read only to be refused or noted) — the backend (provider=jev|laya-serve|none, where none turns System-1 off) and the Laya fields (laya=, weights=, layaWeightsEnvVar=)',
       input: {
-        hint: 'd r w xFirst   (e.g. "3 0.7 512 on", or "d=3", "r=0.7", "w=512", "wait=10000", "xFirst=off", "provider=laya-serve", "provider=none", or laya="D:/conda/envs/ml/python.exe")',
+        hint: 'd r w   (e.g. "3 0.7 512", or "d=3", "r=0.7", "w=512", "wait=10000", "trace=append", "provider=laya-serve", "provider=none", or laya="D:/conda/envs/ml/python.exe")',
       },
       handler: ({ rawInput }) => {
         const outcome = applyTuning(parseTuningArgs(rawInput));
@@ -1753,12 +2049,17 @@ function applyInner(ctx               , raw                             )       
                 layaConfig.weightsCacheDir ?? '(default)',
               )} var=${String(layaConfig.weightsEnvVar ?? '(default)')}`
             : `depth=${String(eff?.depth)} relevanceThreshold=${String(eff?.relevanceThreshold)} ` +
-              `window=${String(eff?.window)} wait=${String(eff?.anchorWaitMs)} xFirst=${eff?.xFirst === true ? 'on' : 'off'}`;
+              `window=${String(eff?.window)} wait=${String(eff?.anchorWaitMs)} ` +
+              `trace=${String(eff?.tracePlacement)}`;
         return commandSuccess(
           backendPart +
             ' ' +
             layaPart +
-            (outcome.persisted === true ? ' (persisted)' : ` (in effect, NOT persisted: ${outcome.persistError ?? 'unknown'})`),
+            (outcome.persisted === true ? ' (persisted)' : ` (in effect, NOT persisted: ${outcome.persistError ?? 'unknown'})`) +
+            // The retirement notes ride on the answer rather than only in the log: they are about the token the user
+            // just typed (`q=last`, `xFirst=off`), and a note in a log the command line cannot show would be the
+            // silent reinterpretation it exists to prevent.
+            ((outcome.notes?.length ?? 0) > 0 ? ` — ${outcome.notes.join(' ')}` : ''),
         );
       },
     },
@@ -1795,7 +2096,7 @@ function applyInner(ctx               , raw                             )       
               relevanceThreshold: config.recall.threshold,
               window: config.recall.window,
               anchorWaitMs: config.recall.anchorWaitMs,
-              xFirst: config.xFirst,
+              tracePlacement: config.tracePlacement,
               // The provider the radio selected, reported beside the knobs for the same reason they are: it is a
               // value this panel owns now, and "what did the save actually set" must be answerable from `/s1`.
               provider: config.s1.provider,
@@ -1803,7 +2104,18 @@ function applyInner(ctx               , raw                             )       
             keySource: credentialSource,
           },
           tail: config.tail,
-          xFirst: config.xFirst,
+          // The arm, top-level because it is policy rather than panel state: a reader asking "which of the paper's
+          // two conditions is this session running" gets the answer from one place, and `layout.order` on each
+          // assembly says the same thing in the layout's own words. It is the **only** layout field here — the
+          // question's position is not reported because it is not a setting: `q` is the last block of every layout
+          // by construction, and a reader who wants that fact reads it from `layoutOrder`/`layout.order`, which ends
+          // in `anchor` in every assembly this build produces.
+          tracePlacement: config.tracePlacement,
+          // The switch that decides whether the model view reaches the model, and beside it the switch that
+          // decides which steps are assembled at all (`packages/core/src/types.ts`). `/s1` is where a live reader
+          // asks which of the two is in force, and both are on the wiring record as well.
+          deliver: config.deliver,
+          assemblyTrigger: config.assemblyTrigger,
           s1: {
             provider: backend.provider,
             // What the config asks for, next to what the session actually resolved to. The two differ whenever a
@@ -1983,12 +2295,21 @@ function applyInner(ctx               , raw                             )       
   // already held other values - the panel looked unconfigured next to a configuration about to be used.
   {
     const storedNow = readTuningFile();
-    appliedTuning = { ...appliedTuning, ...storedNow };
+    // The stored file is the surface a stale layout setting survives longest on, because it outlives the process
+    // that wrote it: a `tuning.json` from before 2026-10-05 can still carry `questionPlacement` or `xFirst`. Both are
+    // read (`readTuningFile`), and both are said here — a refusal at `error`, a retirement note at `warn` — so a
+    // session that inherits a deleted layout setting says so at activation instead of looking cell-pure. As in
+    // `primeOnce`, the two readings are replaced rather than merged: they describe the file, not the session.
+    appliedTuning = { ...appliedTuning, ...storedNow, refused: storedNow.refused, notes: storedNow.notes };
+    for (const refusal of storedNow.refused ?? []) {
+      ctx.logger?.error?.(`[s1cap] recalled tuning refused: ${refusal.message}`);
+    }
+    for (const note of storedNow.notes ?? []) ctx.logger?.warn?.(`[s1cap] ${note}`);
     if (storedNow.depth !== undefined) config.recall.depth = storedNow.depth;
     if (storedNow.relevanceThreshold !== undefined) config.recall.threshold = storedNow.relevanceThreshold;
     if (storedNow.window !== undefined) config.recall.window = storedNow.window;
     if (storedNow.anchorWaitMs !== undefined) config.recall.anchorWaitMs = storedNow.anchorWaitMs;
-    if (storedNow.xFirst !== undefined) config.xFirst = storedNow.xFirst;
+    if (storedNow.tracePlacement !== undefined) config.tracePlacement = storedNow.tracePlacement;
     // The provider the panel's radio stored, applied here and not only on the first step: this block is what makes
     // a saved backend survive a restart, and the initial `buildBackend()` above ran before the file was read — so
     // the choice is applied and then re-resolved, or the session would run the profile's provider while both the
@@ -2027,20 +2348,24 @@ function applyInner(ctx               , raw                             )       
               // surface invented for the sake of a test.
               // The effective policy is `resolved.policy.policy` — `validatePolicy` returns the *result* object,
               // whose `policy` field is the defaults with every valid override applied. Two wrong paths were taken
-              // here first, and both failed silently or loudly in instructive ways: reading the top-level
-              // `config.xFirst` reported nothing at all for a cell-pure run (the override slot is empty exactly
+              // here first, and both failed silently or loudly in instructive ways: reading a top-level
+              // `config.<field>` reported nothing at all for a cell-pure run (the override slot is empty exactly
               // when the cell is in charge), and reading `config.policy` 500s, because that field belongs to the
               // validation result and not to the config.
               const effective = resolved.policy.policy;
               sendJson(res, 200, {
                 ok: true,
+                // `stored` carries the readings as well as the settings — `refused` and `notes` are what a legacy
+                // question-axis spelling in the file earned (`credentials.ts`), so the panel can show that the file
+                // it just read asked for something this build does not have. They are not settings and are never
+                // written back (`writeTuningFile` projects the value fields only).
                 stored: { ...readTuningFile(), ...appliedTuning },
                 effective: {
                   depth: config.recall.depth,
                   relevanceThreshold: config.recall.threshold,
                   window: config.recall.window,
                   anchorWaitMs: config.recall.anchorWaitMs,
-                  xFirst: effective.xFirst,
+                  tracePlacement: effective.tracePlacement,
                   // The provider the radio selected, so the GET answers the same shape the PUT echoes back and the
                   // panel can fill the radio from the same place it fills the knobs.
                   provider: config.s1.provider,
@@ -2050,7 +2375,11 @@ function applyInner(ctx               , raw                             )       
                   tas: effective.tas.on,
                   tier1: config.recall.tier1,
                   deliver: effective.deliver,
-                  xFirst: effective.xFirst,
+                  assemblyTrigger: effective.assemblyTrigger,
+                  // The arm, and the only layout field: the question's position is not a setting any more, so a
+                  // reader who needs it reads `layoutOrder` from an assembly record — where it ends in `anchor` in
+                  // every record this build writes.
+                  tracePlacement: effective.tracePlacement,
                   s1: { provider: backend.provider, configuredProvider: config.s1.provider, mode: backend.mode, baseUrl: backend.baseUrl },
                   // The Laya half the panel needs in order to render and validate its own fields: what was
                   // supplied, what the plugin resolved it to, and the conflicts that decide whether the backend

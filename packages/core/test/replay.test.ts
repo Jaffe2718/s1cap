@@ -80,7 +80,16 @@ test('the cells behave as the ablation claims: C0 selects nothing, C2 accounts a
   );
   assert.notEqual(c0.digest, c2.digest, 'the cells are distinguishable in the record stream');
   for (const record of c2.records) {
-    assert.ok(record.budgetUsed <= record.budgetTotal);
+    // The identity, not `budgetUsed <= budgetTotal`: that inequality was a consequence of the removed
+    // `recall.budgetRatio` cap (a candidate that cleared r inside d was dropped if it did not fit the allowance),
+    // and selection is decided by r and d now, so a step may legitimately assemble a view larger than
+    // `budgetTotal` (see `AssemblyEvent.budgetUsed`). What a replayed record must satisfy either way is that the
+    // number it reports is the sum of the blocks it reports.
+    assert.equal(
+      record.budgetUsed,
+      Object.values(record.blocks).reduce((sum, tokens) => sum + tokens, 0),
+      'the recorded budget is the assembled view, block for block',
+    );
     assert.ok(record.prefixTokensStable <= record.budgetTotal);
   }
 });

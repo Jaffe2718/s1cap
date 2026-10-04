@@ -122,6 +122,57 @@ function wiringOf(run, cell) {
 }
 
 /**
+ * The layout a wiring record states, read under both spellings because a round directory records what it ran and is
+ * never rewritten.
+ *
+ * **`tracePlacement` is the only axis, and a current record states no question position at all — its absence is the
+ * correction, not a gap.** The paper (arXiv:2609.02702 §4.1) places the question last in every condition, so the
+ * field that used to move it was deleted rather than renamed on 2026-10-05, and the arm follows from
+ * `tracePlacement` alone.
+ *
+ * A record written before that date states neither name: it wrote one boolean, `xFirst`, and no trace axis. That
+ * boolean was the *question's* position, and it is carried here for what it was rather than translated onto an arm.
+ * `xFirst: false` put the question last, which is what every layout does now, so it is harmless; `xFirst: true` asked
+ * for the question **in front of the long context** (`[T, q, x]`), a layout this build cannot produce and
+ * `LEGACY_LAYOUT_KEYS` in `packages/core/src/config.ts` refuses today. Those records also carry no
+ * `stateProxyPosition` and no `tracePlacement`, so their trace axis is genuinely unrecorded - the figure says so
+ * rather than inferring it from `layout.order`, which would be a guess about which of the two arrangements produced
+ * that order.
+ */
+function layoutAxes(w) {
+  const tracePlacement =
+    w.tracePlacement === 'trace-as-state' || w.tracePlacement === 'trace-append' ? w.tracePlacement : null;
+  const legacyXFirst = typeof w.xFirst === 'boolean' ? w.xFirst : null;
+  return { tracePlacement, legacyXFirst };
+}
+
+/** What the record did not state. A layout the figure cannot read is said, never defaulted to the policy's values. */
+const NOT_RECORDED = '(not recorded)';
+
+/**
+ * A pre-rename record's `xFirst: true`, named as what it was: the question in front of the long context, which is
+ * `[T, q, x]` - not one of the paper's two orders, and a layout this build cannot produce. It is reported as no arm
+ * rather than mapped onto one, because there is no arm it corresponds to.
+ */
+const XFIRST_TRUE_NOT_AN_ARM =
+  'not a paper arm (pre-rename `xFirst: true`: the question was in front of the long context)';
+
+/**
+ * The paper's arm, named from `tracePlacement` alone: Trace as State is `M([T, x, q])` and Trace Append is
+ * `M([x, T, q])`, with the question last in both. That fixed point is why no question field is read here - a current
+ * record has none, and a pre-rename one states a position this build no longer has a layout for.
+ *
+ * A record with no trace axis identifies no arm. A pre-rename round wrote the boolean `xFirst` instead, so its trace
+ * axis was never recorded and the cell says that; and `xFirst: true` asked for the question in front of the long
+ * context, so it is named as no paper arm rather than as one of the paper's.
+ */
+function paperArm({ tracePlacement, legacyXFirst }) {
+  if (tracePlacement === null && legacyXFirst === null) return NOT_RECORDED;
+  if (tracePlacement === null) return legacyXFirst ? XFIRST_TRUE_NOT_AN_ARM : 'not identifiable (no trace axis recorded)';
+  return tracePlacement === 'trace-as-state' ? 'Trace as State [T, x, q]' : 'Trace Append [x, T, q]';
+}
+
+/**
  * The report's total rows are `| metric | unit | v0 | v1 | v2 |`, or `| metric | v0 | v1 | v2 |` for a few.
  *
  * The Provenance section is skipped outright. Its table has the same shape as a total row and its keys collide with
@@ -166,7 +217,13 @@ const WANTED = [
   ['uncached input tokens', 'COST'],
   ['output tokens', 'COST'],
   ["System-1 lane's own tokens", 'COST'],
-  ['System-1 coverage', 'DIAGNOSTICS'],
+  // Two rows since 2026-10-05, and both belong in the figure. `docs/FORMULAS.md` §5.1 defines the floor as
+  // **distinct pairs settled over the offered window** and demotes `judgedPairs/scoredPairs` to a secondary
+  // reading; the report prints them as two rows whose labels share the prefix "System-1 coverage", so naming
+  // either one by that prefix alone is ambiguous - `pickRow` throws rather than picking, which is how this was
+  // caught. Name each exactly.
+  ['System-1 coverage over offered', 'DIAGNOSTICS'],
+  ['System-1 coverage, judged/scored', 'DIAGNOSTICS'],
   ['System-1 calls ok / refused / total', 'DIAGNOSTICS'],
   ['context injections delivered', 'DIAGNOSTICS'],
 ];
@@ -184,17 +241,39 @@ const WANTED = [
  * with no exact match throws, so the next collision of this shape is a loud failure rather than a
  * wrong number under a right-looking label.
  */
+/**
+ * Rows this figure asks for under a name the report no longer uses.
+ *
+ * `cell-report.mjs` owns its metric labels (`docs/DOC-CONTRACT.md` §2: a document — or a reader — must not restate
+ * a value the code owns), so this figure follows the report rather than pinning a label of its own. But a round's
+ * `cell-report.md` is a **frozen artifact**: a report generated before the report renamed a row must still render.
+ * Hence both spellings, newest first, resolved by the same exact-then-prefix rule `pickRow` already uses.
+ *
+ * The one entry here is a live mismatch that made the figure unusable on **every** round, old or freshly
+ * generated: the report writes "System-1 lane input tokens (the priced quantity)" (its cost table, beside the
+ * output-token row) while this figure asked for "System-1 lane's own tokens". Neither label may be abbreviated to
+ * "System-1 lane" to bridge them — the report carries a second row starting with those words, and `pickRow` throws
+ * on an ambiguous prefix rather than guessing, which is the right behaviour to keep.
+ */
+const RENAMED_ROWS = new Map([
+  ["System-1 lane's own tokens", ['System-1 lane input tokens (the priced quantity)']],
+]);
+
 function pickRow(rows, want) {
   if (rows.has(want)) return [want, rows.get(want)];
-  const matches = [...rows.entries()].filter(([key]) => key.startsWith(want));
-  if (matches.length === 0) return null;
-  if (matches.length > 1) {
-    throw new Error(
-      `"${want}" matches ${matches.length} rows (${matches.map(([k]) => `"${k}"`).join(', ')}) and none of them exactly - `
-        + 'name the row exactly in WANTED instead of letting the figure pick one of them',
-    );
+  const candidates = [want, ...(RENAMED_ROWS.get(want) ?? [])];
+  for (const candidate of candidates) {
+    if (rows.has(candidate)) return [candidate, rows.get(candidate)];
+    const matches = [...rows.entries()].filter(([key]) => key.startsWith(candidate));
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      throw new Error(
+        `"${candidate}" matches ${matches.length} rows (${matches.map(([k]) => `"${k}"`).join(', ')}) and none of `
+          + 'them exactly - name the row exactly in WANTED instead of letting the figure pick one of them',
+      );
+    }
   }
-  return matches[0];
+  return null;
 }
 
 const CHART_W = 1120;
@@ -260,16 +339,17 @@ function composeFigure({ run, cells, outDir, labelOf, headerHeight }) {
       cell === 'C0'
         ? 'baseline: chronological history, nothing ordered, nothing delivered'
         : cell === 'C1'
-          ? 'second control: the TAS switches are recorded configuration and nothing is delivered, so the model reads the baseline\'s list'
+          ? "the paper's arm: the state proxy T is delivered on its own, with recall selection off and the System-1 lane absent"
           : cell === 'C2'
-            ? 'full configuration: TAS ordering plus System-1 recall selection'
+            ? 'full configuration: the state proxy T ahead of the System-1 recall selection'
             : `(${labelOf.get(cell) ?? 'no role recorded'})`;
+    const axes = layoutAxes(w);
     return {
       cell,
       role,
       tas: yes(w.tas?.on),
       selection: yes(w.relevance),
-      xFirst: yes(w.xFirst),
+      placement: paperArm(axes),
       lane,
     };
   });
@@ -312,8 +392,12 @@ function composeFigure({ run, cells, outDir, labelOf, headerHeight }) {
   const defTable = table(
     // No `plan gate` column: the policy has no such field any more, and a column printed from a key no run writes
     // would be a blank in one cell and a true-looking "yes" in another. See packages/core/src/types.ts.
-    ['cell', 'what it is', 'TAS', 'S1 selection', 'x-first', 'System-1 lane'],
-    definitions.map((d) => [d.cell, d.role, d.tas, d.selection, d.xFirst, d.lane]),
+    // One `placement` column, and not the two layout columns of 2026-10-05: `tracePlacement` is the only layout axis
+    // (the question's position was deleted, not renamed), so the column names the paper's arm from that one value,
+    // and a pre-rename round - which recorded the boolean `xFirst` and no trace axis - is named for what it was
+    // rather than given an arm it never ran.
+    ['cell', 'what it is', 'TAS', 'S1 selection', 'placement', 'System-1 lane'],
+    definitions.map((d) => [d.cell, d.role, d.tas, d.selection, d.placement, d.lane]),
     'defs',
   );
 
@@ -336,7 +420,7 @@ function composeFigure({ run, cells, outDir, labelOf, headerHeight }) {
   <p class="sub">Round <code>${esc(run.split(/[\\/]/).pop())}</code> &middot; <strong>${esc(release)}</strong> &middot; model <strong>${esc(model)}</strong> &middot; one cell at a time, three human messages each, no intervention &middot; snapshot ${esc(snapshot)}</p>
   <div class="note"><strong>Read this before the numbers.</strong> One round, <strong>n&nbsp;=&nbsp;1 per cell</strong>, so these are a direction, not an estimate. The two arms that show <code>0 (no S1 lane)</code> have <em>no System-1 backend at all</em> (<code>s1.provider: none</code> + <code>laya.enabled: false</code>), so their System-1 calls, tokens and time are zero by construction and their coverage is <em>undefined</em>, not 0&nbsp;%. The third arm's lane is live. The two token accounts are separate: the lane's own tokens are the backend's, the cached-hit / uncached / output tokens are the model's.</div>
   ${defTable}
-  <p class="sub">Configuration read from each cell's own <code>wiring</code> record, not from its recipe.</p>
+  <p class="sub">Configuration read from each cell's own <code>wiring</code> record, not from its recipe. The <code>placement</code> column names the paper's arm from <code>tracePlacement</code> alone &mdash; Trace as State is <code>[T, x, q]</code>, Trace Append is <code>[x, T, q]</code>, and the question is last in both, which is why no record states a question position. A round run before 2026-10-05 records no trace axis at all: it wrote the boolean <code>xFirst</code> (the question's position) instead, so its arm is not identifiable, and <code>xFirst: true</code> &mdash; the question in front of the long context, a layout this build cannot produce &mdash; is named as no paper arm rather than mapped onto one.</p>
   ${numTable}
   <p class="sub">Numbers read from <code>cell-report.md</code>; charts from <code>cell-report.mjs</code>. <code>step frame</code> = step/start&rarr;step/end, <code>turn frame</code> = turn/start&rarr;turn/end. System-1 time is <strong>concurrent</strong> with the request and must never be added to LLM time.</p>`;
 
@@ -463,9 +547,12 @@ function fixtureReport() {
     'output tokens': '131 | 132 | 133',
     "System-1 lane's own tokens": '141 | 142 | 143',
   };
-  // These three live only in the mechanism table; there is no cell-total row for them.
+  // These live only in the mechanism table; there is no cell-total row for them. The coverage row split in two
+  // on 2026-10-05 (the floor and the secondary reading), so the fixture carries both - a fixture that still had
+  // the single old label is what made the failure above visible in the first place.
   const mechanism = {
-    'System-1 coverage': '151 | 152 | 153',
+    'System-1 coverage over offered (the floor)': '151 | 152 | 153',
+    'System-1 coverage, judged/scored (the secondary reading)': '154 | 155 | 156',
     'System-1 calls ok / refused / total': '161 | 162 | 163',
     'context injections delivered': '171 | 172 | 173',
   };
@@ -517,7 +604,8 @@ function fixtureReport() {
     '| diagnostic | C0 | C1 | C2 |',
     '| --- | --- | --- | --- |',
     `| System-1 calls ok / refused / total | ${mechanism['System-1 calls ok / refused / total']} |`,
-    `| **System-1 coverage** | ${mechanism['System-1 coverage']} |`,
+    `| **System-1 coverage over offered (the floor)** | ${mechanism['System-1 coverage over offered (the floor)']} |`,
+    `| System-1 coverage, judged/scored (the secondary reading) | ${mechanism['System-1 coverage, judged/scored (the secondary reading)']} |`,
     `| context injections delivered | ${mechanism['context injections delivered']} |`,
     '',
     '## Reconciliation and warnings',
@@ -536,13 +624,27 @@ function writeFixtureReport(outDir) {
   writeFileSync(join(outDir, 'cell-report.md'), fixtureReport().markdown, 'utf8');
 }
 
+/**
+ * One tape per cell, and the three shapes the layout reader has to survive, so the fixture proves the reader rather
+ * than the fixture's own convenience:
+ *
+ *   C0  an old round's record: `xFirst: false` and no trace axis at all (`round-20261004-0233` is written this way)
+ *   C1  an old round's record with the question in front: `xFirst: true`, a layout this build cannot produce
+ *   C2  a current record: `tracePlacement` by name and **no question field at all**, which is the shape every round
+ *       writes now, and the shape the arm has to be read from
+ */
 function writeFixtureRun(root, { dsh, cells }) {
+  const layouts = {
+    C0: { xFirst: false },
+    C1: { xFirst: true },
+    C2: { tracePlacement: 'trace-append' },
+  };
   for (const cell of cells) {
     const dir = join(root, 'home', cell, '.s1cap');
     mkdirSync(dir, { recursive: true });
     const wiring = cell === 'C2'
-      ? { schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true, xFirst: false, tas: { on: true } }
-      : { schema: 0, kind: 'wiring', s1: 'none', relevance: false, xFirst: false, tas: { on: false } };
+      ? { schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true, ...layouts[cell], tas: { on: true } }
+      : { schema: 0, kind: 'wiring', s1: 'none', relevance: false, ...layouts[cell], tas: { on: false } };
     writeFileSync(join(dir, 'tape.jsonl'), `${JSON.stringify(wiring)}\n`, 'utf8');
   }
   if (dsh !== null) writeFileSync(join(root, 'manifest.json'), `${JSON.stringify({ _run: root, _dsh: dsh }, null, 1)}\n`, 'utf8');
@@ -628,6 +730,45 @@ function runSelfTest() {
     }, 'the missing-record wording reaches both files on disk');
 
     // --- everything else the figure promised, unchanged ----------------------------------------
+    // --- the layout: both spellings, and the paper's arms and only those ------------------------
+    check(() => {
+      // The old round's spelling (`round-20261004-0233` and everything before 2026-10-05) is read for what it was -
+      // the question's position - in a record that states no trace axis at all.
+      assertEqual(layoutAxes({ xFirst: false }).legacyXFirst, false, 'legacy xFirst false is read as the question last');
+      assertEqual(layoutAxes({ xFirst: true }).legacyXFirst, true, 'legacy xFirst true is read as the question in front');
+      assertEqual(layoutAxes({ xFirst: true }).tracePlacement, null, 'a legacy record states no trace axis');
+      assertEqual(layoutAxes({}).tracePlacement, null, 'a record with no layout key is not defaulted');
+      assertEqual(layoutAxes({}).legacyXFirst, null, 'and states no question position either');
+      // A current record: the axis by name and no question field to read, which is the shape every round writes now.
+      assertEqual(layoutAxes({ tracePlacement: 'trace-as-state' }).tracePlacement, 'trace-as-state', 'the arm is read by name');
+      assertEqual(layoutAxes({ tracePlacement: 'trace-append' }).legacyXFirst, null, 'a current record states no question position');
+      assertEqual(layoutAxes({ tracePlacement: 'sideways' }).tracePlacement, null, 'a value the policy does not have resolves to nothing');
+      // The arm follows from the trace axis alone, and the deleted question field is not read even if a hand-written
+      // tape still carries it.
+      assertEqual(paperArm(layoutAxes({ tracePlacement: 'trace-as-state' })), 'Trace as State [T, x, q]', 'Trace as State');
+      assertEqual(paperArm(layoutAxes({ tracePlacement: 'trace-append' })), 'Trace Append [x, T, q]', 'Trace Append');
+      assertEqual(paperArm(layoutAxes({ tracePlacement: 'trace-as-state', questionPlacement: 'first' })), 'Trace as State [T, x, q]', 'the deleted question field is not read');
+      assertEqual(paperArm(layoutAxes({ tracePlacement: 'trace-append', xFirst: true })), 'Trace Append [x, T, q]', 'the recorded axis wins over the retired boolean');
+      // A record with no trace axis identifies no arm: a pre-rename round never wrote one, and `xFirst: true` asked
+      // for a layout this build cannot produce, so it is no paper arm rather than one of the paper's.
+      assertEqual(paperArm(layoutAxes({ xFirst: false })), 'not identifiable (no trace axis recorded)', 'a legacy question-last record names no arm');
+      assertEqual(paperArm(layoutAxes({ xFirst: true })), XFIRST_TRUE_NOT_AN_ARM, 'xFirst true is no paper arm');
+      assertEqual(paperArm(layoutAxes({})), NOT_RECORDED, 'a record with no layout key says so');
+    }, 'the layout is read under both spellings, and the arm follows from the trace axis alone');
+
+    check(() => {
+      // The same three cases as rendered, so the table cannot print an arm it did not read: C0 is the old record with
+      // no trace axis, C1 the old record's question-in-front layout, C2 the current record of the Trace Append arm.
+      const svg = withFig.svg;
+      assertTrue(svg.includes('<th>placement</th>'), 'the one placement column carries the arm');
+      assertTrue(!svg.includes('question placement') && !svg.includes('<th>paper arm</th>'), 'the separate question and arm columns are gone');
+      assertTrue(!svg.includes('x-first'), 'the single x-first column is gone');
+      assertTrue(svg.includes('not identifiable (no trace axis recorded)'), 'C0 (legacy, xFirst false) shows no arm rather than a default one');
+      assertTrue(svg.includes('not a paper arm (pre-rename'), 'C1 (legacy, xFirst true) is named as no paper arm');
+      assertTrue(svg.includes('Trace Append [x, T, q]'), 'C2 (current, no question field) is named as the Trace Append arm');
+      assertTrue(svg.includes('xFirst'), 'the reading note says how a pre-rename round spells the layout');
+    }, 'the figure names the arm from the trace axis, and never a default or an invented arm for a record that states none');
+
     check(() => {
       assertTrue(withFig.svg.includes('C0') && withFig.svg.includes('C1') && withFig.svg.includes('C2'), 'all three cells');
       assertTrue(withFig.svg.includes('none (provider: none)'), 'the lane-absent cells say so');
@@ -670,7 +811,9 @@ function runSelfTest() {
         'the fixed picker must land on the total, not the decoy');
 
       // ...and the picker under test must not, for any wanted metric, by label or by value.
-      assertEqual(WANTED.length, 17, 'the wanted list still has 17 metrics');
+      // 18 since 2026-10-05: the coverage row split into the floor and the secondary reading, and the figure
+      // carries both because a reader who sees only one of them cannot tell which question it answers.
+      assertEqual(WANTED.length, 18, 'the wanted list still has 18 metrics');
       for (const [want] of WANTED) {
         const hit = pickRow(rows, want);
         assertTrue(hit !== null, `"${want}" must resolve`);

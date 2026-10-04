@@ -41,14 +41,34 @@
           blockTokens: 64
         tas:
           on: true
-          tMaxChars: 8000
+          # the paper's own truncation: "we truncate them to the first 50,000 characters to keep the
+          # second-pass prompt within the model's context capacity" (arXiv 2609.02702, §4.1)
+          tMaxChars: 50000
           # perTask keeps the state proxy byte-stable inside a task (cache-friendly)
           updatePolicy: perTask
         recall:
           # τ is `recall.threshold`; this line used to spell it `tau`, which is not a config path and warned as an
           # unknown key on every load. 0.55 is the default, so the value is not restated here.
-          depth: 2
-          fanout: 8
+          # d is 16 since 2026-10-05 (it read 2). What a bounded walk reaches is `w x d`, so the reduction of the
+          # window below is paid back at the depth: the default pair is `16 x 16` = 256 segments, against the
+          # `1024 x 2` = 2,048 the previous defaults gave. Raising `d` costs the scoring axis nothing - the lane's
+          # pair count `sum min(i, w)` contains no `d` - which is why it moved from 8 to 16 and not the window. The
+          # validator's cap moved 6 -> 16 to admit it (`packages/core/src/config.ts`, NUMBER_RULES). The cost this
+          # rests on - the window does nothing until it is below the session's segment count - is
+          # `docs/FORMULAS.md` §"Recall window w" and `AssemblyPolicy.recall` (packages/core/src/types.ts).
+          depth: 16
+          # `recall.window` is deliberately absent here, as it always was: this profile inherits the default (16,
+          # since 2026-10-05) rather than pinning a copy of it, on the rule that a value the code owns is pointed at
+          # and not restated (docs/DOC-CONTRACT.md §2). A run's own `kind:"wiring"` tape record is what says which
+          # window it ran with.
+          # `recall.fanout` was here until 2026-10-05 and is absent on purpose: `k`, the per-node expansion cap of
+          # the recall walk, was never in the originating brief, never in the run's `kind:"wiring"` record and never
+          # in the settings panel - its only home was the three cell presets, where the wiring record is documented
+          # as the authority. What bounds the walk now is `recall.threshold` (below/left at its default) and
+          # `recall.depth`. Measured on round `20261004-1239`'s frozen graph, backwards-only at depth 2: `k = 8` and
+          # an unbounded `k` reach identical sets for 63.2% of anchors. A profile or preset that still writes the
+          # key is told it is retired rather than having it dropped in silence
+          # (`packages/core/src/config.ts`, `LEGACY_POLICY_KEYS`).
           # tier1: s1 (one batched `noul` call — the implemented mode) | off. The designed third mode, `embed`
           # (local embedding + ANN top-k), is NOT implemented: no embedder exists and `source: "embed"` is never
           # written to an edge, so `validatePolicy` rejects the literal `embed` rather than reading it as "not off"
@@ -57,7 +77,16 @@
           # "" = not set. Kept because it is the embed mode's model name and that mode is not implemented: a
           # non-empty value here names a model nothing loads, and `validatePolicy` warns about it.
           embedModel: ""
-          budgetRatio: 0.35
+          # `recall.budgetRatio` was here until 2026-10-05 and is deliberately absent now: it capped the recalled
+          # block by tokens, which the originating brief never specifies (its three tunables are d, r and w, and it
+          # mentions tokens only as a cost *metric*). Selection is bounded by `recall.threshold` and `recall.depth`;
+          # overflow is the harness's job - the injected message is committed to the session log as a real surface
+          # node, so `dsh-compaction-basic` sees it like any other. A profile that still sets the key gets no
+          # warning, because `validatePolicy` reports unknown keys only at the top level, which is exactly why the
+          # line was deleted rather than left as a comment. **That last clause is a property of this key and not of
+          # nested keys in general** (2026-10-05): the sibling line above, `recall.fanout`, was deleted *and* added
+          # to `LEGACY_POLICY_KEYS`, so a profile still writing it is told it is retired. `budgetRatio` is not in
+          # that table and remains silent; retiring it the same way is open work, not a claim this file makes.
           # `recall.minRecalledShare` is absent on purpose: the default is 0, and at 0.25 the token-share floor
           # fired on 9 of 9 steps of a live run and replaced every System-1 selection with recency.
         tail:

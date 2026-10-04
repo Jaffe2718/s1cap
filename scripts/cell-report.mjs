@@ -28,10 +28,14 @@
  *      It is an append-only file with one zstd frame per write, so it needs the multi-frame reader
  *      carried below. It supplies turns/steps, per-step token usage and tool-call durations.
  *
- *   3. <run>/home/<cell>/.s1cap/rg/*.json - the association-graph snapshot: scoredPairs/judgedPairs
- *      and the edge list. Derives System-1 *coverage* = judgedPairs / scoredPairs, which is reported
- *      beside every System-1 column: coverage is what tells a reader whether System-1 actually
- *      governed the cell or whether its calls were refused.
+ *   3. <run>/home/<cell>/.s1cap/rg/*.json - the association-graph snapshot: the `scores` map (one entry per
+ *      unordered pair, because the storage is triangular), `order`, the `scored` cursor, the four counters and
+ *      the edge list. Derives System-1 *coverage* as **distinct pairs settled / pairs the arrival order
+ *      offered** = `|scores|` / `sum_{i=1..N-1} min(i, w)`, which is the floor `docs/FORMULAS.md` §5.1 states
+ *      and is reported beside every System-1 column; `judgedPairs / scoredPairs` is the secondary reading beside
+ *      it, and the settled pairs' split by scorer beside that. `w` is NOT in the snapshot: it is read from the
+ *      run's own wiring record (or from the `window:` provenance on its edges), and when neither carries one the
+ *      floor says "not derivable" rather than printing a ratio over a denominator nobody recorded.
  *
  * TWO COUNTING TRAPS, both handled explicitly below:
  *   (a) `user/message` includes records the harness injects at session start (`Current runtime
@@ -499,7 +503,11 @@ function loadCell(runDir, cell, labelMap) {
   const { snapshot, warned } = findRgSnapshot(cellDir, cell, sessionId);
   if (warned) warnings.push(warned);
 
-  const lane = findLaneEvidence(cellDir, cell, control);
+  const tape = readTape(cellDir);
+  const lane = findLaneEvidence(cellDir, cell, control, tape);
+  // The offered window's other half. `w` is the one quantity the floor needs that the snapshot does not carry, so
+  // it is read from the run's own records and its absence is carried as a reason rather than as a zero.
+  const window = findWindowEvidence(tape, snapshot.doc);
 
   return {
     name: cell,
@@ -513,6 +521,7 @@ function loadCell(runDir, cell, labelMap) {
     storeCount,
     rgPath: snapshot.path,
     lane,
+    window,
     // The mtimes are the honest answer to "when was this snapshot taken": the report reads finished
     // artifacts, and a file's own mtime is the only timestamp the artifacts carry about themselves.
     mtimes: {
@@ -533,6 +542,92 @@ function mtimeOf(path) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The cell's own tape, parsed once for both readers: the lane state below, and the scoring window `w`.
+ *
+ * One read, because the two are facts of the same record and a second reader of one file is how two answers to one
+ * question start to drift. A line that does not parse is not a reading and is skipped, exactly as a reader of the
+ * file would skip it.
+ */
+function readTape(cellDir) {
+  const tapePath = join(cellDir, '.s1cap', 'tape.jsonl');
+  const records = [];
+  const exists = existsSync(tapePath);
+  if (exists) {
+    let lines = [];
+    try {
+      lines = readFileSync(tapePath, 'utf8').split('\n');
+    } catch {
+      lines = [];
+    }
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed === '') continue;
+      try {
+        records.push(JSON.parse(trimmed));
+      } catch {
+        /* an unparseable line is not a reading */
+      }
+    }
+  }
+  return { path: tapePath, exists, records };
+}
+
+/**
+ * The System-1 scoring window `w` this run actually used, or a stated reason it cannot be read.
+ *
+ * The floor's denominator is `sum_{i=1..N-1} min(i, w)` and **the rg snapshot does not carry `w`**. Three records
+ * can, and each is a record of the run rather than of today's code:
+ *   1. the cell's `kind:"wiring"` tape record - `recall.w`, the value the plugin resolved at activation and the
+ *      field `scoreNew` is called with (`packages/dsh-plugin/src/step-observer.ts`). `docs/DOC-CONTRACT.md` §3
+ *      names that record the source of truth for what a run was configured as.
+ *   2. the same tape's `kind:"tuning-file"` record - `effective.window`, the value in force after a retune.
+ *   3. every edge's `provenance`, which the graph writes as `window:<w>;<scorer>` where the pair was scored.
+ *
+ * **All candidates must agree, and a disagreement is not resolved in favour of one of them**: a session retuned
+ * mid-run has no single `w`, and a denominator built from either number would be a guess presented as a count.
+ * `{ value: null, why }` is the honest answer then, and every caller renders it as "not derivable" rather than as
+ * a ratio.
+ */
+function findWindowEvidence(tape, rg) {
+  const found = new Map(); // w -> where it was read
+  const note = (value, where) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return;
+    const key = Math.trunc(n);
+    if (!found.has(key)) found.set(key, []);
+    found.get(key).push(where);
+  };
+  for (const o of tape.records) {
+    if (o.kind === 'wiring' && o.recall && typeof o.recall === 'object') {
+      note(o.recall.w, 'the wiring record (recall.w)');
+    }
+    if (o.kind === 'tuning-file' && o.effective && typeof o.effective === 'object') {
+      note(o.effective.window, 'the tuning-file record (effective.window)');
+    }
+  }
+  for (const edge of rg.edges || []) {
+    const m = /(?:^|;)window:(\d+)(?:;|$)/.exec(String(edge.provenance ?? ''));
+    if (m) note(m[1], 'the snapshot\'s edge provenance');
+  }
+  if (found.size === 0) {
+    return {
+      value: null, candidates: [], source: null,
+      why: tape.exists
+        ? 'neither the tape\'s wiring/tuning records nor any edge provenance carries recall.window (w)'
+        : 'the run has no tape.jsonl, and no edge provenance carries recall.window (w)',
+    };
+  }
+  const candidates = [...found.keys()].sort((a, b) => a - b);
+  if (candidates.length > 1) {
+    return {
+      value: null, candidates, source: null,
+      why: `the run's own records disagree about recall.window (w = ${candidates.join(', ')}), so it has no single window to count the offered pairs over`,
+    };
+  }
+  return { value: candidates[0], candidates, source: found.get(candidates[0])[0], why: null };
 }
 
 /**
@@ -565,29 +660,14 @@ function mtimeOf(path) {
  *   4. nothing at all: with no provider evidence anywhere and no call records, the lane was absent -
  *      but that is an inference, and the report says so rather than presenting it as a configuration.
  */
-function findLaneEvidence(cellDir, cell, control) {
-  const tapePath = join(cellDir, '.s1cap', 'tape.jsonl');
+function findLaneEvidence(cellDir, cell, control, tape) {
   const record = {
     state: 'unknown', provider: null, mode: null, baseUrl: null, source: 'no provider evidence in the run directory',
     tapePath: null, configuredProvider: null, conflicts: [],
   };
-  if (existsSync(tapePath)) {
-    record.tapePath = tapePath;
-    let lines = [];
-    try {
-      lines = readFileSync(tapePath, 'utf8').split('\n');
-    } catch {
-      lines = [];
-    }
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed === '') continue;
-      let o;
-      try {
-        o = JSON.parse(trimmed);
-      } catch {
-        continue;
-      }
+  if (tape.exists) {
+    record.tapePath = tape.path;
+    for (const o of tape.records) {
       if (o.kind === 'wiring' && o.s1 !== undefined) {
         // `configuredProvider`/`conflicts` are read on both shapes. A wiring record written before the audit has
         // neither, which stays "unknown" rather than becoming "no conflict": those are different statements.
@@ -636,12 +716,106 @@ function findLaneEvidence(cellDir, cell, control) {
     record.source = `control.jsonl s1_call.provider = ${JSON.stringify(provider)}`;
     return record;
   }
-  if (!existsSync(tapePath)) {
+  if (!tape.exists) {
     record.source = 'no tape.jsonl and no s1_call records: the lane was absent, inferred from the silence';
   } else {
     record.source = 'no wiring/tuning record and no s1_call records: the lane was absent, inferred from the silence';
   }
   return record;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4b. The floor's two quantities, from the snapshot (`docs/FORMULAS.md` §5.1)
+//
+// The floor is  distinct pairs settled / pairs the arrival order offered.  The numerator is the size of the
+// graph's `scores` map - one entry per unordered pair, because a pair is stored once with the older segment first
+// and the storage is therefore triangular. The denominator is `sum_{i=1..N-1} min(i, w)` over the graph's own
+// `order`, with `w` supplied by `findWindowEvidence` because the snapshot does not carry it.
+//
+// Both are three-valued, and the readings are kept apart: a number; "this snapshot cannot say" (no `scores` map,
+// no `order`, no recorded `w`); and "there was nothing to qualify" (an order of one segment offered no pair). A
+// floor printed over a guessed denominator is the defect this correction exists for, so an underivable one prints
+// its reason instead of a ratio.
+// ---------------------------------------------------------------------------------------------
+
+/** `sum_{i=1..N-1} min(i, w)`: the pairs an arrival order of `N` segments offers, windowed at `w`. */
+function offeredWindowPairs(segments, windowN) {
+  let pairs = 0;
+  for (let i = 1; i < segments; i += 1) pairs += Math.min(i, windowN);
+  return pairs;
+}
+
+/**
+ * The distinct pairs a snapshot's `scores` map holds, and the scorer that settled each one.
+ *
+ * `recorded` is false for a snapshot carrying no `scores` map at all (schema 1), which is a different statement
+ * from a map that is present and empty. Keys are normalised to an unordered pair, so a malformed file that wrote
+ * both directions of one pair cannot inflate the numerator: the graph writes one direction only, and a reader must
+ * not be the place that assumption becomes a double count.
+ */
+function settledPairStats(scores) {
+  const stats = { recorded: Array.isArray(scores), distinct: null, byBackend: 0, byFallback: 0, byOther: 0 };
+  if (!stats.recorded) return stats;
+  const seen = new Map(); // canonical unordered-pair key -> the scorer that settled it
+  for (const s of scores) {
+    if (!s || typeof s !== 'object') continue;
+    const a = String(s.from);
+    const b = String(s.to);
+    const key = a <= b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
+    if (!seen.has(key)) seen.set(key, s.source === undefined ? null : String(s.source));
+  }
+  stats.distinct = seen.size;
+  for (const source of seen.values()) {
+    if (source === 's1-noul') stats.byBackend += 1;
+    else if (source === 'lexical') stats.byFallback += 1;
+    else stats.byOther += 1;
+  }
+  return stats;
+}
+
+/**
+ * The first-refusal index `k`, or the reason this snapshot has none.
+ *
+ * `k` is the entry the equation `sum_{i=k}^{N-1} min(i, w) = deferredPairs` names, which round `20261004-1153`'s
+ * own gate pre-registered reporting. **It exists only while the deferral is terminal.** The counter is a tail
+ * counted once from the first refusal and it does not fall when the walk recovers a pair, so after a recovery it is
+ * a suffix of an *earlier, shorter* order - no suffix sum of this one - and a cursor that has reached `N` means
+ * every pair it counts has since been settled. Both cases print the reason: a pre-registered check that cannot be
+ * computed has to say so rather than quietly disappear.
+ */
+function firstRefusalIndex({ segments, windowN, deferredPairs, cursor }) {
+  if (deferredPairs === null) return { value: null, why: 'the snapshot records no `deferredPairs` field' };
+  if (deferredPairs === 0) return { value: null, why: 'nothing was deferred, so there is no first refusal to locate' };
+  if (segments === null || windowN === null) {
+    return {
+      value: null,
+      why: `the offered window is not derivable (${segments === null ? 'the snapshot records no `order` array' : 'no recall.window (w) is recorded for this run'})`,
+    };
+  }
+  if (cursor === null) {
+    return { value: null, why: 'the snapshot records no `scored` cursor, so whether the deferral is still terminal cannot be read' };
+  }
+  if (cursor >= segments) {
+    return {
+      value: null,
+      why:
+        `the cursor reached ${fmtInt(cursor)} of ${fmtInt(segments)}: every deferred pair was recovered and scored, ` +
+        'so the counter is a suffix of an earlier, shorter order and names no index of this one',
+    };
+  }
+  // `sum_{i=k}^{N-1} min(i, w)` grows as k falls, so one descending pass either finds the k or proves there is none.
+  let sum = 0;
+  for (let k = segments - 1; k >= 1; k -= 1) {
+    sum += Math.min(k, windowN);
+    if (sum === deferredPairs) return { value: k, why: null };
+    if (sum > deferredPairs) break;
+  }
+  return {
+    value: null,
+    why:
+      `no integer k solves sum_{i=k}^{${fmtInt(segments - 1)}} min(i, w) = ${fmtInt(deferredPairs)} on this order ` +
+      'and window - the counted tail belongs to an earlier, shorter order, not to this one',
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -719,6 +893,11 @@ function aggregate(cell) {
   let curTurn = null;
   let curStep = null;
   const toolIndex = new Map(); // callId -> { t0, stepKey }
+  // Compaction records. They are what makes the per-step cache chart readable, and they are the one cost in this
+  // report that no total can show: prompt caching is prefix caching, so a record that rewrites the front of the
+  // prompt is paid for by the step that follows it. None of these records carries a turn/step, so each is
+  // attached to the next `assistant/message` by time, below.
+  const compactions = [];
 
   const stepKey = (turn, step) => `${turn}:${step}`;
   const stepMap = new Map();
@@ -791,6 +970,23 @@ function aggregate(cell) {
         s.hitTokens += u.cacheReadTokens || 0;
         s.missTokens += u.inputTokens || 0;
         s.outTokens += u.outputTokens || 0;
+        break;
+      }
+      case 'compaction/prune':
+      case 'compaction/start':
+      case 'compaction/summary':
+      case 'compaction/end': {
+        // `prune` is the tool-result pruner shadowing an oversized result, and it rewrites the prompt front for
+        // exactly the same reason a summary does, which is why both are recorded here and marked alike. The
+        // token count is `shadowedTokenCount` where the record has one (the pruner's per-node records and the
+        // summary's own), and 0 where it does not (`start`/`end` markers).
+        compactions.push({
+          type: e.type,
+          time: e.time,
+          id: e.data?.compactionId ?? null,
+          shadowedTokens: Number(e.data?.shadowedTokenCount ?? 0) || 0,
+          shadowedNodes: Array.isArray(e.data?.shadowedSeqs) ? e.data.shadowedSeqs.length : 0,
+        });
         break;
       }
       case 'tool/call': {
@@ -934,14 +1130,23 @@ function aggregate(cell) {
   /**
    * Pairs the run declined to offer because the System-1 backend was saturated.
    *
-   * Reported beside `judgedPairs / scoredPairs`, never inside it, and the distinction is what keeps the coverage
-   * ratio honest. `scoredPairs` counts the pairs a scorer was shown; a pair the admission gate held back was shown
-   * to nobody, so folding it into the denominator would print coverage over work that never happened, and leaving
-   * it out without saying so would hide the work the run chose not to do. The snapshot carries it; a graph written
-   * before the field existed has none, which reads as 0 and is rendered as "not recorded" rather than as a zero.
+   * Reported beside `judgedPairs / scoredPairs`, never inside it, and the distinction is what keeps that ratio
+   * honest: `scoredPairs` counts the pairs a scorer was shown; a pair the admission gate held back was shown to
+   * nobody, so folding it into a denominator would print coverage over work that never happened, and leaving it out
+   * without saying so would hide the work the run chose not to do. The snapshot carries it; a graph written before
+   * the field existed has none, which is rendered as "not recorded" rather than as a zero.
+   *
+   * **It is a historical fact about the first refusal, never a live coverage term.** `countDeferredSuffix` +
+   * `#deferralCounted` (`packages/core/src/assoc-graph.ts`) count the whole tail from the first refusal, once, and
+   * nothing subtracts a pair that is scored afterwards - so the counter does not fall when the walk recovers, and
+   * it is not the window the arrival order offered. Measured both ways on 2026-10-05: round `20261004-1211` reached
+   * a cursor of 40 of 40 and still reported 212 deferred beside 780 scored against 780 offered (sum 992 > 780,
+   * double-counting the recovered tail), and round `20261004-0233` stopped at 67 of 185 and reported 16 767 beside
+   * 10 157 against 17 020. `docs/FORMULAS.md` §5.1 owns the ratio and `cellReport`'s own rows implement it.
    */
   const rgDeferred = Number(cell.rg.deferredPairs || 0);
   const rgDeferredRecorded = cell.rg.deferredPairs !== undefined;
+  const rgDeferredSegments = cell.rg.deferredSegments === undefined ? null : Number(cell.rg.deferredSegments);
   const edgeSources = {};
   for (const e of cell.rg.edges || []) edgeSources[e.source] = (edgeSources[e.source] || 0) + 1;
   const rgAsOf = (cell.rg.scores || []).reduce((a, s) => Math.max(a, s.at || 0), 0)
@@ -960,13 +1165,62 @@ function aggregate(cell) {
   // that says why.
   const laneAbsent = cell.lane.state === 'none' || (cell.lane.state === 'unknown' && s1Records.length === 0);
   const laneDemoted = cell.lane.state === 'demoted';
-  // The pairs the window would have offered, had the gate not held any back. This is the denominator the
-  // validity floor is defined over (F5, `docs/FORMULAS.md`): `judged/scored` alone *rises* when the run
-  // declines work, because a deferred pair is given back by the graph and never reaches `scoredPairs`.
-  const offeredPairs = rgScored + rgDeferred;
-  // `null` when there is nothing to qualify, and separately `null` when the snapshot predates the field:
-  // "no pair was deferred" and "this snapshot cannot say" are different statements about the same 0.
-  const deferredShare = rgDeferredRecorded ? (offeredPairs > 0 ? rgDeferred / offeredPairs : null) : null;
+
+  // --- the coverage floor, and the two counters that are NOT its denominator ---------------------
+  //
+  // `docs/FORMULAS.md` §5.1: the floor is **distinct pairs settled / pairs the arrival order offered**, and both
+  // halves are read from the snapshot rather than from the counters. The numerator is the `scores` map (one entry
+  // per unordered pair, because the storage is triangular); the denominator is `sum_{i=1..N-1} min(i, w)` over the
+  // graph's own `order`, with `w` from the run's records because the snapshot does not carry it. Neither
+  // `scoredPairs` (a work counter, which counts a re-offer again) nor `scoredPairs + deferredPairs` (two counters
+  // that are not additive in either direction) is a pair count of the offered window.
+  const rgOrderCount = Array.isArray(cell.rg.order) ? cell.rg.order.length : null;
+  const rgCursor = Number.isFinite(Number(cell.rg.scored)) ? Math.trunc(Number(cell.rg.scored)) : null;
+  const offeredWindow = rgOrderCount !== null && cell.window.value !== null
+    ? offeredWindowPairs(rgOrderCount, cell.window.value)
+    : null;
+  const offeredWhy = offeredWindow !== null
+    ? null
+    : rgOrderCount === null
+      ? 'the snapshot records no `order` array'
+      : cell.window.why;
+  const settled = settledPairStats(cell.rg.scores);
+  const floorCoverage = laneAbsent || laneDemoted
+    ? null
+    : (settled.recorded && offeredWindow !== null && offeredWindow > 0 ? settled.distinct / offeredWindow : null);
+  const floorWhy = laneAbsent || laneDemoted
+    ? null
+    : !settled.recorded
+      ? 'this snapshot records no `scores` map (a schema-1 file), so the distinct pairs it settled cannot be counted'
+      : offeredWindow === null
+        ? `the offered window is not derivable: ${offeredWhy}`
+        : offeredWindow === 0
+          ? 'the arrival order holds one segment, so it offered no pair'
+          : null;
+  // The deferral's share, over the honest denominator. `null` in three different situations that must not print
+  // alike: no `deferredPairs` field, an underivable offered window, and an order that offered nothing.
+  const deferredShare = rgDeferredRecorded && offeredWindow !== null && offeredWindow > 0
+    ? rgDeferred / offeredWindow
+    : null;
+  const deferredShareWhy = deferredShare !== null
+    ? null
+    : !rgDeferredRecorded
+      ? 'the snapshot records no `deferredPairs` field'
+      : offeredWindow === null
+        ? `the offered window is not derivable (${offeredWhy})`
+        : 'the arrival order offered no pair';
+  // The pre-registered first-refusal index. Printed as a number only while the deferral is still terminal; see
+  // `firstRefusalIndex` for the two ways this round's shape has none.
+  const firstRefusal = firstRefusalIndex({
+    segments: rgOrderCount,
+    windowN: cell.window.value,
+    deferredPairs: rgDeferredRecorded ? rgDeferred : null,
+    cursor: rgCursor,
+  });
+  // The two counters side by side, which is the number a reader must NOT read as the offered window. Printed with
+  // that label rather than dropped: the falsification is a reading of this sum, and a report that hid it would
+  // leave the next reader to add the two rows up themselves.
+  const scoredPlusDeferred = rgScored + rgDeferred;
   // F9: what `FORMULAS.md:431` requires beside a `w`-lowering run. Three-valued for the same reason the
   // deferral row is: a build that did not write the field and a run in which the event did not happen
   // are different readings, and only the record can tell them apart.
@@ -1015,14 +1269,30 @@ function aggregate(cell) {
     // A cell whose graph predates the field has no deferral *reading*; printing 0 for it would claim the run was
     // never held back, which is a different statement from "this snapshot cannot say".
     deferredRecorded: rgDeferredRecorded,
-    offeredPairs,
+    deferredSegments: rgDeferredSegments,
+    // The counters side by side. NOT the offered window: neither counter is a pair count of it and the two are not
+    // additive, in either direction (`docs/FORMULAS.md` §5.1, the 2026-10-05 corrections).
+    scoredPlusDeferred,
     deferredShare,
+    deferredShareWhy,
+    // The offered window, its two inputs, the settled pairs and the floor built from them.
+    offeredWindow,
+    offeredWhy,
+    offeredSegments: rgOrderCount,
+    windowN: cell.window.value,
+    windowSource: cell.window.source,
+    windowWhy: cell.window.why,
+    settledRecorded: settled.recorded,
+    settledPairs: settled.distinct,
+    settledByBackend: settled.byBackend,
+    settledByFallback: settled.byFallback,
+    settledByOther: settled.byOther,
+    floorCoverage,
+    floorWhy,
+    cursor: rgCursor,
+    firstRefusalK: firstRefusal.value,
+    firstRefusalWhy: firstRefusal.why,
     coverage: laneAbsent || laneDemoted ? null : (rgScored > 0 ? rgJudged / rgScored : null),
-    // The ratio the validity floor is defined over: judged out of everything the arrival order offered, deferrals
-    // included. Printed beside `coverage`, never instead of it, so a run that stopped asking is visible as such.
-    coverageOffered: laneAbsent || laneDemoted
-      ? null
-      : (offeredPairs > 0 && rgDeferredRecorded ? rgJudged / offeredPairs : null),
     fallbackSteps: fallbackSteps.length,
     fallbackRecorded,
     fallbackKinds: [...new Set(fallbackSteps.map((r) => (typeof r.fallback === 'string' ? r.fallback : JSON.stringify(r.fallback))))],
@@ -1054,11 +1324,26 @@ function aggregate(cell) {
   const lastEventTime = events.length > 0 ? events[events.length - 1].time : 0;
   const maxS1Ts = s1Records.reduce((a, r) => Math.max(a, r.ts || 0), 0);
 
+  const stepList = [...stepMap.values()].sort((a, b) => a.turn - b.turn || a.step - b.step);
+  // The step a compaction is *charged to*: the first request assembled after it, because that request is the one
+  // whose cached prefix the rewrite destroyed. `msgTime` is the provider round trip of that step, so the step is
+  // chosen by the same clock the token figures come from.
+  const compactionsAt = compactions.map((c) => {
+    const next = stepList.find((s) => s.msgTime !== null && s.msgTime > c.time) ?? null;
+    return {
+      ...c,
+      step: next === null ? null : `${next.turn}.${next.step}`,
+      stepMiss: next === null ? null : next.missTokens,
+      stepTotal: next === null ? null : next.hitTokens + next.missTokens,
+    };
+  });
+
   return {
     cell,
     totals,
     turnList,
-    steps: [...stepMap.values()].sort((a, b) => a.turn - b.turn || a.step - b.step),
+    steps: stepList,
+    compactions: compactionsAt,
     tail: tailScope,
     pre: preScope,
     idle: idleScope,
@@ -1123,30 +1408,77 @@ function renderS1Value(metric, cell, value, { cellLevel }) {
 }
 
 /**
- * The deferral that qualifies a coverage figure, as a share of the window the run was offered.
+ * The floor, in one clause: the ratio, or the reason the artifacts cannot support one.
  *
- * `null` in two different situations that must not print alike: a snapshot with no `deferredPairs` field at all
- * ("not recorded"), and a graph with no pairs to defer ("0 of 0"). The first is a missing reading; the second is a
- * measured zero share. F5 - the coverage ratio can be *raised* by declining work, because `assoc-graph.ts` gives a
- * deferred pair back to the cursor and it never reaches `scoredPairs`, so the share has to appear beside every
- * coverage figure rather than only in the diagnostics table.
+ * `docs/FORMULAS.md` §5.1: the floor is **distinct pairs settled / pairs the arrival order offered**, the
+ * numerator being the `scores` map's size (one entry per unordered pair) and the denominator
+ * `sum_{i=1..N-1} min(i, w)`. Both halves live in `diagnostics`; this is their rendering, and a ratio the
+ * artifacts cannot support prints its reason rather than a number - which is the whole lesson of the correction
+ * this row exists for.
  */
-function deferredShareText(d) {
-  if (!d.deferredRecorded) return 'deferral share: not recorded by this snapshot';
-  if (d.deferredShare === null) return `deferral share: 0 of 0 pairs (nothing was offered to the gate)`;
+function floorText(d) {
+  // Undefined is not underivable, and the two must not print alike: a lane-absent cell is *excluded* from the floor
+  // (its fallback settles pairs the lane never saw), while a lane-present cell whose offered window cannot be read
+  // is a missing reading. Neither may borrow the other's number.
+  if (d.laneDemoted) return 'coverage over offered: **undefined** (lane demoted by a conflict)';
+  if (d.laneAbsent) {
+    return 'coverage over offered: **undefined** (no S1 lane: its local fallback settles pairs the lane never saw, so the floor is not applied to this cell)';
+  }
+  if (d.floorCoverage !== null) {
+    return (
+      `coverage over offered ${fmtPct(d.floorCoverage)} (the floor: ${fmtInt(d.settledPairs)} distinct pairs ` +
+      `settled of ${fmtInt(d.offeredWindow)} offered = sum min(i, w))`
+    );
+  }
+  return `coverage over offered: **not derivable** (${d.floorWhy})`;
+}
+
+/**
+ * The settled pairs split by the scorer that settled them - the qualification the floor cannot carry itself.
+ *
+ * A pair is settled when the graph holds a score for it, and the score's `source` says whether the backend or the
+ * local lexical fallback produced it. A cell whose backend answered nothing but whose fallback settled every
+ * offered pair has a floor of 100 % *by degradation*; this clause is what makes that visible instead of leaving
+ * the floor to be read as a judgement the lane never made.
+ */
+function settledText(d) {
+  if (!d.settledRecorded) return 'settled pairs by scorer: not recorded by this snapshot (no `scores` map)';
+  const other = d.settledByOther > 0 ? `, ${fmtInt(d.settledByOther)} with no scorer recorded` : '';
   return (
-    `deferral share: ${fmtPct(d.deferredShare)} (${fmtInt(d.deferredPairs)} deferred of ` +
-    `${fmtInt(d.offeredPairs)} offered = scored + deferred)`
+    `settled by scorer: ${fmtInt(d.settledByBackend)} lane / ` +
+    `${fmtInt(d.settledByFallback)} lexical fallback${other}`
   );
 }
 
 /**
- * Coverage beside a System-1 column: a fraction when the lane exists, `undefined` when it does not.
+ * The deferral that qualifies a coverage figure, as a share of the window the run was offered.
  *
- * Two denominators, both printed, because they answer different questions. `judged/scored` is the share of what
- * the backend was *shown* that it answered; the floor `FORMULAS.md` sets for a cell to count as S1-governed is
- * now defined over `judged/(scored+deferred)` - the window the arrival order offered - because the first ratio
- * rises when the gate holds work back, and a floor a run can satisfy by declining work is not a floor.
+ * The denominator is the offered window, not a sum of counters: `deferredPairs` is a historical tail counted once
+ * from the first refusal and it does not fall when the walk recovers a pair, so `deferredPairs / (scoredPairs +
+ * deferredPairs)` was a ratio of one historical count to another counter's work, and on round `20261004-1211` its
+ * denominator (992) was larger than the session's whole pair count (780).
+ *
+ * `null` in three situations that must not print alike - no `deferredPairs` field, an underivable offered window,
+ * and an order that offered no pair - and each prints why. F5's reason still holds for the row's existence: the
+ * secondary ratio can be *raised* by declining work, because `assoc-graph.ts` gives a deferred pair back to the
+ * cursor and it never reaches `scoredPairs`, so the omission appears beside every coverage figure and not only in
+ * the diagnostics table.
+ */
+function deferredShareText(d) {
+  if (d.deferredShare === null) return `deferral share: not derivable (${d.deferredShareWhy})`;
+  return (
+    `deferral share: ${fmtPct(d.deferredShare)} (${fmtInt(d.deferredPairs)} deferred of ` +
+    `${fmtInt(d.offeredWindow)} offered = sum min(i, w))`
+  );
+}
+
+/**
+ * Coverage beside a System-1 column: the floor, the secondary reading, the scorer split and the deferral.
+ *
+ * The floor answers "did the lane's work reach the offered window at all"; `judged/scored` answers "of what the
+ * backend was *shown*, how much did it answer" and is kept as the secondary reading it always was. Neither
+ * replaces the other: the floor can be met over pairs the *fallback* settled (which is why the scorer split is in
+ * the same line), and `judged/scored` alone rises when the run declines work (which is why the floor exists).
  */
 function coverageFor(cell) {
   const d = cell.a.diagnostics;
@@ -1155,21 +1487,19 @@ function coverageFor(cell) {
     return (
       `undefined — **lane demoted** (configured ${d.laneConfiguredProvider}, resolved none by a conflict: ${why}); ` +
       `judged ${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)} by the lexical fallback, which still built ` +
-      `${fmtInt(d.edgeSourceLexical)} edge(s); ${deferredShareText(d)}`
+      `${fmtInt(d.edgeSourceLexical)} edge(s); ${floorText(d)}; ${settledText(d)}; ${deferredShareText(d)}`
     );
   }
   if (d.laneAbsent) {
     return (
       `undefined — no S1 lane (judged ${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)}; the lexical fallback ` +
-      `still built ${fmtInt(d.edgeSourceLexical)} edge(s)); ${deferredShareText(d)}`
+      `still built ${fmtInt(d.edgeSourceLexical)} edge(s)); ${floorText(d)}; ${settledText(d)}; ` +
+      deferredShareText(d)
     );
   }
-  const offered = d.coverageOffered === null
-    ? 'offered-denominator coverage: n/a (deferrals not recorded by this snapshot)'
-    : `judged/(scored+deferred) = ${fmtPct(d.coverageOffered)}`;
   return (
-    `${fmtPct(d.coverage)} (${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)} judged/scored; ${offered}); ` +
-    deferredShareText(d)
+    `${floorText(d)}; judged/scored ${fmtPct(d.coverage)} ` +
+    `(${fmtInt(d.judgedPairs)}/${fmtInt(d.scoredPairs)}); ${settledText(d)}; ${deferredShareText(d)}`
   );
 }
 
@@ -1177,13 +1507,24 @@ function coverageLine(cells) {
   return `coverage beside each System-1 column: ${cells.map((c) => `${c.display} ${coverageFor(c)}`).join(' · ')}`;
 }
 
+/**
+ * The compact mark a bucket cell carries beside its call count.
+ *
+ * Both readings, named, because a single unlabelled percentage is what this correction is about: `floor` is the
+ * ratio over the offered window and `shown` is the share of what the backend was shown that it answered. `n/a`
+ * where the reading does not exist (no lane), and where the floor is underivable for a lane that does exist, the
+ * mark says `n/a` rather than borrowing the other ratio's number.
+ */
+function coverageMark(d) {
+  if (d.laneDemoted) return 'cov n/a (lane demoted)';
+  if (d.laneAbsent) return 'cov n/a (no S1 lane)';
+  return `cov: floor ${d.floorCoverage === null ? 'n/a' : fmtPct(d.floorCoverage)} / shown ${d.coverage === null ? 'n/a' : fmtPct(d.coverage)}`;
+}
+
 /** Render one System-1 bucket cell, annotating the call count with the cell's coverage. */
 function annotateS1(metric, cell, bucket) {
   const v = renderS1Value(metric, cell, valueFor(metric, bucket), { cellLevel: false });
-  const d = cell.a.diagnostics;
-  return metric.key === 's1Calls'
-    ? `${v} (cov ${d.laneAbsent || d.laneDemoted ? 'n/a' : fmtPct(d.coverage)})`
-    : v;
+  return metric.key === 's1Calls' ? `${v} (${coverageMark(cell.a.diagnostics)})` : v;
 }
 
 /** All System-1 bucket sums for a metric, in the order the tables print them. */
@@ -1348,20 +1689,36 @@ function renderMarkdown(analysis) {
   // ---- mechanism diagnostics ----------------------------------------------------------------
   out.push('## Mechanism diagnostics (not cost metrics)');
   out.push('');
-  out.push('System-1 coverage is `judgedPairs / scoredPairs` from the association-graph snapshot: the share of');
-  out.push('scored association pairs the backend actually judged. A cell whose System-1 calls were refused has');
-  out.push('a low coverage and did **not** receive its configured System-1 governance, whatever its call count');
-  out.push('says - which is why coverage is repeated beside every System-1 column below.');
+  out.push('**The floor is `distinct pairs settled / pairs the arrival order offered`** - `docs/FORMULAS.md` §5.1.');
+  out.push('The numerator is the size of the graph\'s `scores` map: one entry per *unordered* pair, because a pair is');
+  out.push('stored once with the older segment first and the storage is triangular. The denominator is the offered');
+  out.push('window, `sum_{i=1..N-1} min(i, w)` over the graph\'s own `order`, and **`w` is not in the snapshot**: it is');
+  out.push('read from the run\'s `kind:"wiring"` record (or from the `window:` provenance on its edges), and where');
+  out.push('neither carries a single value the row says **not derivable**. The secondary reading beside it is');
+  out.push('`judgedPairs / scoredPairs` - the share of what the backend was *shown* that it answered - which is the');
+  out.push('ratio that rises when the run declines work, and the reason the floor is not stated over it.');
   out.push('');
-  out.push('`scoredPairs` is what the backend was *offered* and `judgedPairs` what it answered. Since 2026-10-02 a');
-  out.push('third number sits beside them, because the upkeep now stops asking a backend that is refusing:');
-  out.push('`deferredPairs` is the work the admission gate held back, which was offered to nobody. `judged/scored`');
-  out.push('deliberately leaves it out - a pair that was never shown is not a pair the backend failed to judge - but');
-  out.push('that ratio **rises when the run declines work**, because the graph gives a deferred pair back to its');
-  out.push('cursor and it never reaches `scoredPairs`. The validity floor is therefore stated over the window the');
-  out.push('arrival order offered, `judged / (scored + deferred)`, and both denominators are printed together so a');
-  out.push('cell that looks S1-governed because it stopped asking cannot hide behind the ratio that flatters it.');
-  out.push('Both are `undefined` for a cell that had no lane at all, and that is not the same reading as a low one.');
+  out.push('A settled pair is not always a pair System-1 judged: a window the backend did not answer is settled by the');
+  out.push('local lexical fallback, and the `scores` entry\'s `source` says which. So the floor is printed with the');
+  out.push('settled pairs\' split by scorer beside it - a cell whose every offered pair was settled by the fallback is a');
+  out.push('cell that lost its lane, not one that was governed by it, and the split is what shows the difference.');
+  out.push('');
+  out.push('`scoredPairs` counts what a scorer was offered (and counts a re-offer again) and `judgedPairs` what the');
+  out.push('backend answered. `deferredPairs` sits beside them as what the admission gate held back - and it is **not a');
+  out.push('live term**: it is the whole tail from the first refusal, counted once, it does not fall when the walk');
+  out.push('recovers a pair, and the two counters are **not additive in either direction**. Round `20261004-1211`');
+  out.push('reached a cursor of 40 of 40 and still counted 212 deferred beside 780 scored against 780 offered');
+  out.push('(`780 + 212 = 992 > 780`, the recovered tail double-counted); round `20261004-0233` stopped at 67 of 185 and');
+  out.push('counted 16 767 beside 10 157 against 17 020. The sum is printed as its own row, labelled as what it is, so');
+  out.push('neither round\'s reading can be reconstructed by adding two rows up.');
+  out.push('');
+  out.push('The first-refusal index `k` - the entry `sum_{i=k}^{N-1} min(i, w) = deferredPairs` names - is printed only');
+  out.push('while the deferral is still terminal. A round whose cursor has reached `N` has none, because every pair the');
+  out.push('counter holds has since been settled; the row says so rather than printing an index the equation cannot');
+  out.push('support.');
+  out.push('');
+  out.push('Both readings are `undefined` for a cell that had no lane at all, and that is not the same reading as a low');
+  out.push('one.');
   out.push('');
   out.push('Three readings that look alike are kept apart here, and until the audit two of them did not. A cell');
   out.push('whose lane is switched off has zero System-1 calls, tokens and time *by construction*; a cell with a');
@@ -1405,23 +1762,51 @@ function renderMarkdown(analysis) {
     ['association pairs judged / scored', ...cells.map((c) => ((c.a.diagnostics.laneAbsent || c.a.diagnostics.laneDemoted)
       ? `${fmtInt(c.a.diagnostics.judgedPairs)} / ${fmtInt(c.a.diagnostics.scoredPairs)} (backend never judged)`
       : `${fmtInt(c.a.diagnostics.judgedPairs)} / ${fmtInt(c.a.diagnostics.scoredPairs)}`))],
-    // The third number, and the reason `judged / scored` stays readable when the backend is refusing: a pair the
-    // admission gate held back was never offered to anyone, so it is counted here rather than in the denominator.
-    ['association pairs deferred (not offered)', ...cells.map((c) => (c.a.diagnostics.deferredRecorded
-      ? fmtInt(c.a.diagnostics.deferredPairs)
+    // The numbers that are NOT the offered window, kept and labelled: the falsification of 2026-10-05 is a *reading*
+    // of this sum, so a report that dropped it would leave the next reader to add the two rows up themselves.
+    ['scoredPairs + deferredPairs (not additive, and NOT the offered window)', ...cells.map((c) => (c.a.diagnostics.deferredRecorded
+      ? `${fmtInt(c.a.diagnostics.scoredPlusDeferred)} = ${fmtInt(c.a.diagnostics.scoredPairs)} + ${fmtInt(c.a.diagnostics.deferredPairs)}`
+      : `${fmtInt(c.a.diagnostics.scoredPairs)} + deferred not recorded`))],
+    // The historical tail, with the segments that came with it: it is a count of what was not offered *when the
+    // first refusal landed*, it does not fall when a deferred pair is scored later, and it is never a rate.
+    ['association pairs deferred (a historical tail, never a coverage term)', ...cells.map((c) => (c.a.diagnostics.deferredRecorded
+      ? (c.a.diagnostics.deferredSegments === null
+        ? fmtInt(c.a.diagnostics.deferredPairs)
+        : `${fmtInt(c.a.diagnostics.deferredPairs)} over ${fmtInt(c.a.diagnostics.deferredSegments)} segment(s)`)
       : '— (not recorded by this snapshot)'))],
-    ['association pairs offered (scored + deferred)', ...cells.map((c) => (c.a.diagnostics.deferredRecorded
-      ? fmtInt(c.a.diagnostics.offeredPairs)
-      : '— (not recorded by this snapshot)'))],
+    // The denominator the floor is defined over, and it is a pair count of the arrival order - not a sum of counters.
+    ['association pairs offered (Σ min(i, w) over the arrival order)', ...cells.map((c) => (c.a.diagnostics.offeredWindow === null
+      ? `— (not derivable: ${c.a.diagnostics.offeredWhy})`
+      : `${fmtInt(c.a.diagnostics.offeredWindow)} (${fmtInt(c.a.diagnostics.offeredSegments)} segment(s) at w = ${fmtInt(c.a.diagnostics.windowN)})`))],
+    ['recall window w, and the record it was read from', ...cells.map((c) => (c.a.diagnostics.windowN === null
+      ? `— (not recorded: ${c.a.diagnostics.windowWhy})`
+      : `${fmtInt(c.a.diagnostics.windowN)} (${c.a.diagnostics.windowSource})`))],
     ['deferred share of offered', ...cells.map((c) => (c.a.diagnostics.deferredShare === null
-      ? '— (not recorded by this snapshot)'
+      ? `— (not derivable: ${c.a.diagnostics.deferredShareWhy})`
       : fmtPct(c.a.diagnostics.deferredShare)))],
-    ['**System-1 coverage**', ...cells.map((c) => (c.a.diagnostics.laneDemoted
+    // The floor's numerator, and the scorer split that says whether the lane or the fallback settled those pairs.
+    ['association pairs settled (distinct, in the `scores` map)', ...cells.map((c) => (c.a.diagnostics.settledRecorded
+      ? fmtInt(c.a.diagnostics.settledPairs)
+      : '— (not recorded by this snapshot: no `scores` map)'))],
+    ['settled pairs, by scorer (lane / lexical fallback)', ...cells.map((c) => (c.a.diagnostics.settledRecorded
+      ? `${fmtInt(c.a.diagnostics.settledByBackend)} / ${fmtInt(c.a.diagnostics.settledByFallback)}` +
+        (c.a.diagnostics.settledByOther > 0 ? ` (+${fmtInt(c.a.diagnostics.settledByOther)} with no scorer recorded)` : '')
+      : '— (not recorded by this snapshot)'))],
+    ['**System-1 coverage over offered (the floor)**', ...cells.map((c) => (c.a.diagnostics.laneDemoted
       ? '**undefined** (**lane demoted by a conflict**)'
-      : c.a.diagnostics.laneAbsent ? '**undefined** (no S1 lane)' : `**${fmtPct(c.a.diagnostics.coverage)}**`))],
-    ['System-1 coverage over offered (floor denominator)', ...cells.map((c) => (c.a.diagnostics.coverageOffered === null
-      ? (c.a.diagnostics.laneDemoted ? '— (lane demoted by a conflict)' : c.a.diagnostics.laneAbsent ? '— (no S1 lane)' : '— (deferrals not recorded by this snapshot)')
-      : fmtPct(c.a.diagnostics.coverageOffered)))],
+      : c.a.diagnostics.laneAbsent
+        ? '**undefined** (no S1 lane)'
+        : c.a.diagnostics.floorCoverage === null
+          ? `**not derivable** (${c.a.diagnostics.floorWhy})`
+          : `**${fmtPct(c.a.diagnostics.floorCoverage)}** (${fmtInt(c.a.diagnostics.settledPairs)} / ${fmtInt(c.a.diagnostics.offeredWindow)})`))],
+    ['System-1 coverage, judged/scored (the secondary reading)', ...cells.map((c) => (c.a.diagnostics.laneDemoted
+      ? 'undefined (lane demoted by a conflict)'
+      : c.a.diagnostics.laneAbsent ? 'undefined (no S1 lane)' : fmtPct(c.a.diagnostics.coverage)))],
+    // The pre-registered index, printed as a number only while the deferral is still terminal - see
+    // `firstRefusalIndex`. A check that cannot be computed says so rather than disappearing.
+    ['first-refusal index k (Σ min(i, w) = deferredPairs; only while the deferral is terminal)', ...cells.map((c) => (c.a.diagnostics.firstRefusalK === null
+      ? `— (not derivable: ${c.a.diagnostics.firstRefusalWhy})`
+      : `${fmtInt(c.a.diagnostics.firstRefusalK)} (the equation solves on this order, so the deferral is terminal)`))],
     ['recall block source', ...cells.map((c) => (c.a.diagnostics.fallbackRecorded
       ? `${fmtInt(c.a.diagnostics.assemblySteps - c.a.diagnostics.fallbackSteps)} backend / ${fmtInt(c.a.diagnostics.fallbackSteps)} recency-fallback` +
         (c.a.diagnostics.fallbackKinds.length > 0 ? ` (${c.a.diagnostics.fallbackKinds.join(', ')})` : '')
@@ -1438,13 +1823,14 @@ function renderMarkdown(analysis) {
     ['human messages / harness- or plugin-injected', ...cells.map((c) => `${fmtInt(c.a.diagnostics.humanMessages)} / ${fmtInt(c.a.diagnostics.injectedMessages)}`)],
   ]));
   out.push('');
-  out.push('Coverage is `judgedPairs / scoredPairs` for a cell that had a lane, and `judgedPairs / (scoredPairs +');
-  out.push('deferredPairs)` for the floor `FORMULAS.md` sets at 0.5 - the first says how much of what the backend');
-  out.push('was shown it answered, the second how much of the window the run would have offered it answered. For a');
-  out.push('cell with no lane *or with a lane demoted by a conflict*, coverage is **undefined**, not 0: `judgedPairs`');
-  out.push('is 0 because the backend was never asked, and printing 0/N would describe a backend that judged none of');
-  out.push('what it was shown, which is a different claim about a backend that does not exist in that cell. The');
-  out.push('lexical fallback still scores and still builds edges, which is why the edge row is split by source.');
+  out.push('The floor row is `distinct pairs settled / pairs the arrival order offered`, which `FORMULAS.md` sets at');
+  out.push('0.5: how much of the window the run was offered the graph actually settled. The row below it is the');
+  out.push('secondary reading, `judgedPairs / scoredPairs`: how much of what the backend was *shown* it answered.');
+  out.push('Neither is the other, and a settled pair can have been settled by the local lexical fallback, which is why');
+  out.push('the settled count is split by scorer. For a cell with no lane *or with a lane demoted by a conflict*,');
+  out.push('coverage is **undefined**, not 0 and not 1: `judgedPairs` is 0 because the backend was never asked, and the');
+  out.push('fallback settles pairs there, so a floor over settled pairs would read 100 % for a control arm. The lexical');
+  out.push('fallback still scores and still builds edges, which is why the edge row is split by source.');
   out.push('');
   out.push('The recall rows are `FORMULAS.md`\'s requirement that a run which lowers `w` carries `fallback` and');
   out.push('`unknownAdmitted` beside it, plus the `recallTree` root count. "Recency-fallback" is the event that');
@@ -1472,7 +1858,7 @@ function renderMarkdown(analysis) {
       ...cells.map((c) => {
         const t = c.a.turnList.find((x) => x.turn === idx);
         if (!t) return '-';
-        if (m.key === 's1Calls') return `${renderS1Value(m, c, valueFor(m, t), { cellLevel: false })} (cov ${c.a.diagnostics.laneAbsent || c.a.diagnostics.laneDemoted ? 'n/a' : fmtPct(c.a.diagnostics.coverage)})`;
+        if (m.key === 's1Calls') return `${renderS1Value(m, c, valueFor(m, t), { cellLevel: false })} (${coverageMark(c.a.diagnostics)})`;
         return isS1Metric(m) ? renderS1Value(m, c, valueFor(m, t), { cellLevel: false }) : renderValue(m, valueFor(m, t));
       }),
     ]);
@@ -1593,7 +1979,10 @@ function renderMarkdown(analysis) {
   out.push('');
   out.push('- **Per-turn or per-step coverage.** The association-graph snapshot stores `scoredPairs`/`judgedPairs`');
   out.push('  as running totals with no turn breakdown, so coverage is a single cell-level ratio. The snapshot\'s');
-  out.push('  own as-of time (max `scores[].at`) is printed above.');
+  out.push('  own as-of time (max `scores[].at`) is printed above. The floor\'s denominator needs `w`, which the');
+  out.push('  snapshot does not carry at all: it is read from the run\'s `wiring`/`tuning-file` tape records or from');
+  out.push('  the `window:` provenance on its edges, and when those are absent or disagree the floor prints');
+  out.push('  **not derivable** with the reason instead of a ratio over a denominator nobody recorded.');
   out.push('- **Any quantity for a cell whose evidence is absent.** A missing run directory, `control.jsonl`,');
   out.push('  session store or rg snapshot is a hard error; the script never prints zeros for absent evidence.');
   out.push('- **A cached-hit/miss split for the System-1 lane.** `s1_call` records carry one `inputTokens` field');
@@ -1658,14 +2047,38 @@ function renderCsv(analysis) {
       // absent from it. `deferredPairs` is omitted, not zeroed, when the snapshot predates the field - a 0 would
       // claim the run was never held back.
       ['mechanism', 'association pairs deferred', 'count', d.deferredRecorded ? d.deferredPairs : null],
-      ['mechanism', 'association pairs offered (scored + deferred)', 'count', d.deferredRecorded ? d.offeredPairs : null],
+      ['mechanism', 'association pairs deferred - segments held back', 'count', d.deferredRecorded ? d.deferredSegments : null],
+      // 2026-10-05: the sum is emitted because the falsification is a *reading* of it. It is not the offered
+      // window in either direction: the counters are not additive, and on a recovering round their sum exceeds the
+      // session's own pair count (round `20261004-1211`: 780 + 212 = 992 against 780 offered). The label carries no
+      // comma so the row stays a plain CSV line rather than a quoted field.
+      ['mechanism', 'scoredPairs + deferredPairs (NOT ADDITIVE - not the offered window)', 'count', d.deferredRecorded ? d.scoredPlusDeferred : null],
+      // The floor's denominator, and its two inputs: a pair count of the arrival order, `sum_{i=1..N-1} min(i, w)`.
+      // `w` is not in the rg snapshot, so it comes from the run's own records and its absence is omitted here
+      // rather than written as a number.
+      // Deliberately comma-free, unlike the markdown label: `min(i, w)` would make the CSV writer quote the metric
+      // field, and a downstream consumer matching on a label should not have to know that.
+      ['mechanism', 'association pairs offered (windowed pair count of the arrival order)', 'count', d.offeredWindow],
+      ['mechanism', 'arrival order segments (the denominator\'s N)', 'count', d.offeredSegments],
+      ['mechanism', 'recall window w used by the offered denominator', 'count', d.windowN],
+      ['mechanism', 'recall window w read from', 'flag', d.windowSource],
       ['mechanism', 'deferred share of offered', 'ratio', d.deferredShare],
       ['mechanism', 'deferred pairs recorded by this snapshot', 'flag', d.deferredRecorded ? 1 : 0],
       // omitted rather than written as 0 when the lane is absent: a 0 here would be read as a measurement
-      ['mechanism', 'System-1 coverage (judged/scored)', 'ratio', noLane ? null : d.coverage],
-      // The floor's denominator (`FORMULAS.md`): a deferred pair is given back by the graph and never reaches
-      // `scoredPairs`, so `judged/scored` can be raised by declining work. This ratio cannot.
-      ['mechanism', 'System-1 coverage (judged/(scored+deferred))', 'ratio', d.coverageOffered],
+      ['mechanism', 'System-1 coverage (judged/scored - the secondary reading)', 'ratio', noLane ? null : d.coverage],
+      // The floor (`FORMULAS.md` §5.1): distinct pairs settled over the offered window. `settled` is the `scores`
+      // map, one entry per unordered pair; a settled pair may have been settled by the local lexical fallback,
+      // which is why the split below is emitted beside it.
+      ['mechanism', 'association pairs settled (distinct)', 'count', d.settledPairs],
+      ['mechanism', 'association pairs settled by the lane', 'count', d.settledRecorded ? d.settledByBackend : null],
+      ['mechanism', 'association pairs settled by the lexical fallback', 'count', d.settledRecorded ? d.settledByFallback : null],
+      ['mechanism', 'System-1 coverage over offered (THE FLOOR)', 'ratio', noLane ? null : d.floorCoverage],
+      // The pre-registered index. Omitted when the equation has no solution on this order and window, so a reader
+      // of the CSV cannot mistake its absence for a zero; the flag below carries the reason.
+      ['mechanism', 'first-refusal index k (deferral terminal only)', 'count', d.firstRefusalK],
+      ['mechanism', 'first-refusal index k state', 'flag', d.firstRefusalK !== null
+        ? 'derivable (the deferral is terminal)'
+        : `not derivable (${d.firstRefusalWhy})`],
       ['mechanism', 'System-1 coverage state', 'flag', d.laneDemoted
         ? 'undefined (lane demoted by a conflict)'
         : d.laneAbsent ? 'undefined (no S1 lane)' : 'defined'],
@@ -1934,9 +2347,14 @@ function styleFontSizes(text) {
  *     The marker is decisive and nothing else is: an SVG that merely resembles the matrix, or that
  *     carries no marker, is still 'unknown' and still fails — a chart the audit cannot place is
  *     exactly what it must not wave through.
+ *   - this tool's own per-step input-cache chart (`cacheStepsSvg`, `cache-steps.svg`): one row per step with two
+ *     stacked token segments, which is not bands of panels and bars on one axis. It carries
+ *     `data-chart="cache-steps"` for the same reason and is skipped with a note; its rows, its marks and its
+ *     labels are asserted in `--self-test` against the fixture's own step and compaction records.
  */
 function classifySvg(text) {
   if (/<svg[^>]*\sdata-chart="s1-activity"/.test(text)) return 'activity';
+  if (/<svg[^>]*\sdata-chart="cache-steps"/.test(text)) return 'cache-steps';
   // A composition is tested for next, and decisively: it embeds whole chart documents, so it contains
   // their `class="panels"` wrappers too. Only a `foreignObject` plus nested `<svg>` children rules it
   // out as a chart, and no metric chart this tool writes has either.
@@ -1967,6 +2385,23 @@ function auditSvg(text) {
       legacy: false,
       reason: 'a recall-activity matrix (data-chart="s1-activity"): rows are segments and columns are recall '
         + 'invocations, a grid audited by `node scripts/s1-activity.mjs --self-test`, not bands of bars on one axis',
+    };
+  }
+  if (kind === 'cache-steps') {
+    return {
+      docHeight,
+      docWidth,
+      origin: null,
+      bands: [],
+      violations: [],
+      ok: true,
+      skipped: true,
+      kind,
+      texts: 0,
+      legacy: false,
+      reason: 'a per-step input-cache chart (data-chart="cache-steps"): rows are steps and each row is two stacked '
+        + 'token segments with a shared axis, not panels of bars - its rows, compaction marks and labels are '
+        + 'asserted by `node scripts/cell-report.mjs --self-test`',
     };
   }
   if (kind === 'composition') {
@@ -2167,6 +2602,181 @@ function formatAudit(name, audit) {
   return lines.join('\n');
 }
 
+/**
+ * The per-step input cache with the compactions marked — the reading `cost.svg` says outright it does not carry.
+ *
+ * Why it earns a chart of its own: prompt caching is PREFIX caching, so a hit reaches only as far as the prompt
+ * stays byte-identical from the front. A compaction — and equally a tool-result prune — replaces content AT THE
+ * FRONT with a summary, so every step the rewrite lands on re-reads the whole prompt uncached. The price of one
+ * summary is one prompt, and no cell total can show that: round `20261004-1458`'s two rewrite steps carried
+ * 63 374 and 50 361 uncached tokens above the cell's median step, 33.6 % of that cell's entire uncached input,
+ * and in `cost.svg` they are two unremarkable bars inside a total.
+ *
+ * One row per step, one panel per cell, one token scale shared by every panel: cached-hit tokens
+ * (`usage.cacheReadTokens`) stacked with the uncached remainder (`usage.inputTokens`). A red mark at the left of a
+ * row is a compaction or prune record, and the row is labelled with what that rewrite cost against the cell's own
+ * median step. A row whose hit rate falls under half is labelled with its rate whether or not a record explains
+ * it — an unexplained collapse is a finding, not something to leave unmarked. The rows are drawn in step order,
+ * so the recovery is visible too: the step after a rewrite is back to a high hit rate, which is why the cost is
+ * one step's worth of prompt rather than a permanent change in the cell's cache behaviour.
+ */
+function cacheStepsSvg({ cells, sub, prov, snapshotAt, width }) {
+  // The two SEGMENTS get a fixed pair rather than the cell's palette colour, because a stacked bar must be
+  // readable as "hit then uncached" at a glance and one palette entry (`#c2703a`, cell 2) is close enough to the
+  // uncached orange to be misread. Cell identity is carried by a swatch beside each panel title instead.
+  const HIT_COLOUR = '#2f6fb2';
+  const MISS_COLOUR = '#e8813a';
+  const MARK_COLOUR = '#b03030';
+  const ROW_H = 13;
+  const BAR_H = 8;
+  const ML = 92;      // step labels, right-aligned against the axis
+  const MR = 210;     // the rewrite / low-hit label of the widest row
+  const PANEL_HEAD = 34;
+  const PANEL_FOOT = 20;
+  const PANEL_GAP = 24;
+
+  const panels = cells.map((c, i) => {
+    const steps = c.a.steps;
+    const display = c.label !== c.name ? `${c.label} (${c.name})` : c.name;
+    const colour = CELL_COLOURS[i % CELL_COLOURS.length];
+    const misses = steps.map((s) => s.missTokens).slice().sort((a, b) => a - b);
+    const medianMiss = misses.length === 0 ? 0
+      : misses.length % 2 === 1 ? misses[(misses.length - 1) / 2]
+        : Math.round((misses[misses.length / 2 - 1] + misses[misses.length / 2]) / 2);
+    const at = new Map();
+    for (const k of c.a.compactions) {
+      if (k.step === null) continue;
+      if (!at.has(k.step)) at.set(k.step, []);
+      at.get(k.step).push(k);
+    }
+    const rewriteSteps = [...at.keys()];
+    const rewriteMiss = steps.reduce((n, s) => (at.has(`${s.turn}.${s.step}`) ? n + s.missTokens : n), 0);
+    const uncached = steps.reduce((n, s) => n + s.missTokens, 0);
+    const excess = steps.reduce((n, s) => (at.has(`${s.turn}.${s.step}`) ? n + (s.missTokens - medianMiss) : n), 0);
+    return {
+      display, colour, steps, at, rewriteSteps, rewriteMiss, uncached, excess, medianMiss,
+      records: c.a.compactions.length,
+    };
+  });
+
+  const maxTotal = Math.max(1, ...panels.flatMap((p) => p.steps.map((s) => s.hitTokens + s.missTokens)));
+  const plotW = width - ML - MR;
+  const scale = plotW / maxTotal;
+  const subtitleGroups = [
+    sub(),
+    ...prov(),
+    `group: mechanism · one row per step, one panel per cell · one token scale for every panel · snapshot ${snapshotAt}`,
+    'cache hit is a prefix hit: a compaction (or a tool-result prune) rewrites the front of the prompt, so the step it lands on re-reads everything after the rewrite uncached',
+    'a red mark is a compaction/prune record; a row under 50 % hit is labelled with its rate, and a rewrite row with what it cost against the cell\'s median step',
+    ...panels.map((p) => {
+      const share = p.uncached > 0 ? `${((100 * p.rewriteMiss) / p.uncached).toFixed(1)} %` : 'n/a';
+      return `${p.display}: ${p.steps.length} step(s), ${p.records} compaction record(s) on ${p.rewriteSteps.length} step(s)`
+        + ` - ${fmtInt(p.rewriteMiss)} uncached on those step(s) = ${share} of the cell's ${fmtInt(p.uncached)},`
+        + ` of which ${p.excess >= 0 ? '+' : ''}${fmtInt(p.excess)} is above a median step of ${fmtInt(p.medianMiss)}`;
+    }),
+  ];
+  const subLines = subtitleGroups.flatMap((g) => wrapCaption(g, 138));
+  const HEAD = 52 + (subLines.length - 1) * 15;
+  const rowCount = panels.reduce((n, p) => n + Math.max(1, p.steps.length), 0);
+
+  // The legend names each panel's own hit colour rather than one shared swatch: the hit segment is drawn in the
+  // cell's colour, the way every other chart in this file identifies a cell, so a single blue swatch would
+  // contradict the picture beside it. Cells wrap onto further legend rows instead of running off the page.
+  const legendY = HEAD + 14;
+  const legend = [
+    `  <rect x="30" y="${legendY - 9}" width="11" height="11" fill="${HIT_COLOUR}"/>`,
+    `  <text x="46" y="${legendY}" class="legend">cache hit (usage.cacheReadTokens)</text>`,
+    `  <rect x="290" y="${legendY - 9}" width="11" height="11" fill="${MISS_COLOUR}"/>`,
+    `  <text x="306" y="${legendY}" class="legend">uncached input (usage.inputTokens)</text>`,
+    `  <text x="30" y="${legendY + 16}" class="legend-warn">a compaction rewrites the prompt front, so its step is uncached from the rewrite onward - each panel below is titled in its cell's colour</text>`,
+  ];
+  const LEGEND_H = 50;
+  const height = HEAD + LEGEND_H + panels.length * (PANEL_HEAD + PANEL_FOOT + PANEL_GAP) + rowCount * ROW_H + 40;
+
+  const style = `<style>
+    text { font-family: ${SVG_FONT}; }
+    .doc-title { fill: #171a1f; font-size: 19px; font-weight: 600; }
+    .doc-sub { fill: #5c6675; font-size: 12px; }
+    .panel-title { fill: #171a1f; font-size: 12px; font-weight: 600; }
+    .panel-note { fill: #5c6675; font-size: 11px; }
+    .legend { fill: #3b4553; font-size: 11.5px; }
+    .legend-warn { fill: ${MARK_COLOUR}; font-size: 11.5px; }
+    .tick { fill: #5c6675; font-size: 9.5px; }
+    .step { fill: #8794a5; font-size: 9.5px; }
+    .mark { fill: ${MARK_COLOUR}; font-size: 9.5px; font-weight: 600; }
+    .grid { stroke: #e3e8ef; stroke-width: 1; }
+    .grid-faint { stroke: #f0f3f7; stroke-width: 1; }
+    .axis { stroke: #9aa5b4; stroke-width: 1.2; }
+  </style>`;
+  const out = [];
+  out.push('<!-- generated by scripts/cell-report.mjs (S1CAP cell report); self-contained, no script, no external font -->');
+  out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" data-chart="cache-steps">`);
+  out.push(`  <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`);
+  out.push(style);
+  out.push(`  <text x="30" y="34" class="doc-title">${escapeXml('S1CAP cell report - input cache, step by step')}</text>`);
+  subLines.forEach((ln, i) => out.push(`  <text x="30" y="${54 + i * 15}" class="doc-sub">${escapeXml(ln)}</text>`));
+  out.push(...legend);
+
+  let y = HEAD + LEGEND_H + 6;
+  for (const p of panels) {
+    const rows = Math.max(1, p.steps.length);
+    const rowsTop = y + PANEL_HEAD;
+    // The grid and the axis are drawn once per panel, behind the rows, so two panels' bars are read on one scale.
+    for (let g = 0; g <= 4; g += 1) {
+      const v = (maxTotal / 4) * g;
+      const x = ML + v * scale;
+      out.push(`  <line x1="${x.toFixed(1)}" y1="${rowsTop}" x2="${x.toFixed(1)}" y2="${rowsTop + rows * ROW_H}" class="${g === 0 ? 'axis' : 'grid'}"/>`);
+      out.push(`  <text x="${x.toFixed(1)}" y="${rowsTop + rows * ROW_H + 13}" text-anchor="middle" class="tick">${v >= 1000 ? `${Math.round(v / 1000)}k` : Math.round(v)}</text>`);
+    }
+    out.push(`  <rect x="30" y="${y + 3}" width="9" height="9" fill="${p.colour}"/>`);
+    out.push(`  <text x="45" y="${y + 12}" class="panel-title">${escapeXml(p.display)}</text>`);
+    out.push(`  <text x="30" y="${y + 26}" class="panel-note">${escapeXml(
+      `${p.steps.length} step(s) · ${p.records} compaction record(s) on ${p.rewriteSteps.length} step(s) · `
+      + `those step(s) re-read ${fmtInt(p.rewriteMiss)} uncached (${p.uncached > 0 ? ((100 * p.rewriteMiss) / p.uncached).toFixed(1) : 'n/a'} % of the cell's ${fmtInt(p.uncached)}), `
+      + `${p.excess >= 0 ? '+' : ''}${fmtInt(p.excess)} of it above a median step of ${fmtInt(p.medianMiss)}`,
+    )}</text>`);
+    p.steps.forEach((s, i) => {
+      const rowY = rowsTop + i * ROW_H;
+      const total = s.hitTokens + s.missTokens;
+      const hitW = s.hitTokens * scale;
+      const missW = s.missTokens * scale;
+      const pct = total > 0 ? (100 * s.hitTokens) / total : 0;
+      const marks = p.at.get(`${s.turn}.${s.step}`) ?? null;
+      out.push(`  <text x="${ML - 8}" y="${rowY + BAR_H}" text-anchor="end" class="step">${escapeXml(`${s.turn}.${s.step}`)}</text>`);
+      if (hitW > 0) out.push(`  <rect x="${ML}" y="${rowY}" width="${hitW.toFixed(1)}" height="${BAR_H}" fill="${HIT_COLOUR}"/>`);
+      if (missW > 0) out.push(`  <rect x="${(ML + hitW).toFixed(1)}" y="${rowY}" width="${missW.toFixed(1)}" height="${BAR_H}" fill="${MISS_COLOUR}"/>`);
+      // A row label is drawn after the bar, and pulled back inside the document when the bar is long: a label that
+      // runs off the right edge is silently clipped, which is the one failure a reader cannot see. The underlay
+      // keeps it readable where it has to overlap the tail of the bar.
+      const rowLabel = (text) => {
+        // `.mark` is 9.5px semibold; 5.6px per character is an upper bound on its advance, measured against the
+        // longest label this chart has drawn ("compaction x3 · +63,374 uncached over the median · 17,269 tok
+        // shadowed" reached 376px where 4.9px/char had predicted 349 and let it clip by 27).
+        const w = text.length * 5.6 + 8;
+        const after = ML + total * scale + 8;
+        const x = after + w <= width - 8 ? after : width - 8 - w;
+        out.push(`  <rect x="${(x - 4).toFixed(1)}" y="${rowY - 1}" width="${w.toFixed(1)}" height="${BAR_H + 2}" fill="#ffffff" fill-opacity="0.88"/>`);
+        out.push(`  <text x="${x.toFixed(1)}" y="${rowY + BAR_H}" class="mark">${escapeXml(text)}</text>`);
+      };
+      if (marks !== null) {
+        out.push(`  <rect x="${ML - 4}" y="${rowY}" width="3" height="${BAR_H}" fill="${MARK_COLOUR}"/>`);
+        const shadowed = marks.reduce((n, k) => n + k.shadowedTokens, 0);
+        rowLabel(`compaction x${marks.length} · ${s.missTokens - p.medianMiss >= 0 ? '+' : ''}${fmtInt(s.missTokens - p.medianMiss)} uncached`
+          + ` over the median${shadowed > 0 ? ` · ${fmtInt(shadowed)} tok shadowed` : ''}`);
+      } else if (pct < 50) {
+        rowLabel(`${pct.toFixed(0)} % hit · ${fmtInt(s.missTokens)} uncached`);
+      }
+    });
+    if (p.steps.length === 0) out.push(`  <text x="${ML}" y="${rowsTop + BAR_H}" class="panel-note">no step in this cell's store</text>`);
+    y = rowsTop + rows * ROW_H + PANEL_FOOT + PANEL_GAP;
+  }
+  out.push(`  <text x="30" y="${height - 16}" class="doc-sub">${escapeXml(
+    'source: home/<cell>/sessions/**/session.v4.jsonl.zstd - assistant/message usage, plus the compaction/* records, which carry no turn/step and are charged to the next request by time',
+  )}</text>`);
+  out.push('</svg>');
+  return `${out.join('\n')}\n`;
+}
+
 function renderSvgs(analysis) {
   const { cells, runDir, snapshotAt, dsh } = analysis;
   const width = 1120;
@@ -2294,21 +2904,21 @@ function renderSvgs(analysis) {
       sub(),
       ...prov(),
       `group: mechanism · one group per metric, one bar per cell · snapshot ${snapshotAt}`,
-      `coverage = judgedPairs / scoredPairs; the floor is defined over judgedPairs / (scoredPairs + deferredPairs)`,
+      `the floor is distinct pairs settled / pairs offered (sum min(i, w)); judged/scored is the secondary reading`,
       laneSummary,
     ],
     width,
     panels: [
       {
         title: 'System-1 governance',
-        note: 'coverage is the share of scored association pairs the backend actually judged; "over offered" adds the deferred pairs the gate held back, which is the denominator FORMULAS.md sets the 0.5 floor over. A cell with no lane has no coverage at all - not a coverage of zero - so its bar is absent, and a cell whose lane was demoted by a conflict is absent for a different reason.',
+        note: 'the floor is the share of the pairs the arrival order offered (sum_{i=1..N-1} min(i, w)) that the graph settled - one `scores` entry per unordered pair, whichever scorer produced it, and the report splits that count by scorer beside it. `judged/scored` is the secondary reading: the share of what the backend was SHOWN that it answered. A cell with no lane has no coverage at all - not a coverage of zero - so its bar is absent; a lane demoted by a conflict is absent for a different reason; and a floor that the artifacts cannot support (no `scores` map, no recorded `w`) is absent too, rather than drawn from a guessed denominator.',
         unit: 'ratio',
         metrics: [
-          { key: 'coverage', label: 'System-1 coverage (judged/scored)' },
-          // F5: the floor's denominator drawn beside the ratio it qualifies. `judged/scored` *rises* when the gate
-          // holds work back, so a chart showing only it can make a cell that stopped asking look healthier than one
-          // that kept asking and was refused. This series cannot be raised by declining work.
-          { key: 'coverageOffered', label: 'coverage over offered (judged/(scored+deferred))' },
+          // The floor, drawn first: it is the reading `FORMULAS.md` sets at 0.5, and the one the old
+          // `judged/(scored+deferred)` row got wrong (round `20261004-1211` printed 78.6 % where the honest ratio
+          // was 100 %). Not raised by declining work, unlike the secondary reading beside it.
+          { key: 'floorCoverage', label: 'coverage over offered (the floor: distinct settled / sum min(i, w))' },
+          { key: 'coverage', label: 'System-1 coverage (judged/scored, secondary)' },
           { key: 'deferredShare', label: 'deferred share of the offered window' },
           { key: 's1SuccessRate', label: 'System-1 call success rate' },
           { key: 'cacheHitRate', label: 'cache hit rate (diagnostic only)' },
@@ -2322,15 +2932,15 @@ function renderSvgs(analysis) {
           const cell = cells.find((x) => x.name === name);
           if (raw === null || raw === undefined) {
             if (!cell) return 'n/a';
-            if (cell.a.diagnostics.laneDemoted && (key === 'coverage' || key === 's1SuccessRate')) {
+            if (cell.a.diagnostics.laneDemoted && (key === 'coverage' || key === 's1SuccessRate' || key === 'floorCoverage')) {
               return 'n/a (lane demoted)';
             }
-            if (cell.a.diagnostics.laneAbsent && (key === 'coverage' || key === 's1SuccessRate')) {
+            if (cell.a.diagnostics.laneAbsent && (key === 'coverage' || key === 's1SuccessRate' || key === 'floorCoverage')) {
               return 'n/a (no lane)';
             }
-            // A coverage over the offered window that is absent because the snapshot predates `deferredPairs` and
-            // one that is absent because there were no pairs at all are different readings. Both draw as `n/a`; the
-            // markdown and the CSV carry which one it is.
+            // Three reasons a bar can be absent, and all three draw as `n/a`: no `scores` map, no recorded `w`, and
+            // an order that offered no pair. The markdown and the CSV carry which one it is - a chart cannot, and
+            // inventing a number for it is exactly what this row was corrected for.
             return 'n/a';
           }
           return text;
@@ -2339,7 +2949,12 @@ function renderSvgs(analysis) {
     ],
   });
 
-  return { 'time.svg': timeSvg, 'cost.svg': costSvg, 's1-governance.svg': governanceSvg };
+  return {
+    'time.svg': timeSvg,
+    'cost.svg': costSvg,
+    's1-governance.svg': governanceSvg,
+    'cache-steps.svg': cacheStepsSvg({ cells, sub, prov, snapshotAt, width }),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2602,6 +3217,13 @@ function buildSyntheticRun(root) {
   ev('step/start', 1150, { turn: 1, step: 2 });
   ev('assistant/message', 1350, { turn: 1, step: 2, message: { role: 'assistant', content: [] }, usage: { inputTokens: 20, cacheReadTokens: 200, outputTokens: 6, totalTokens: 226 } });
   ev('step/end', 1355, { turn: 1, step: 2 });
+  // A rewrite with no turn/step of its own, and the collapse it causes: the records precede step 2.1's request, so
+  // the per-step cache chart must charge them to that step. `prune` and `summary` are both here because both
+  // rewrite the front of the prompt, which is the thing the chart exists to make visible.
+  ev('compaction/prune', 1360, { shadowedRange: { start: 2, end: 2 }, shadowedSeqs: [2], shadowedTokenCount: 900 });
+  ev('compaction/start', 1365, { compactionId: 'compact-a1', turn: 1 });
+  ev('compaction/summary', 1370, { compactionId: 'compact-a1', turn: 1, shadowedRange: { start: 1, end: 2 }, shadowedSeqs: [1, 2], shadowedTokenCount: 1500 });
+  ev('compaction/end', 1375, { compactionId: 'compact-a1', turn: 1 });
   ev('turn/end', 1400, { turn: 1, reason: { kind: 'completed' } });
   ev('turn/start', 1500, { turn: 2 });
   ev('user/message', 1501, { content: [{ type: 'text', text: 'human two' }], source: { kind: 'user' } });
@@ -2704,13 +3326,15 @@ function buildSyntheticRun(root) {
   };
   const tapeF = [{ schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true }];
 
-  // --- cell G: a lane whose coverage is *raised* by the work it declined -----------------------------
+  // --- cell G: a lane whose secondary ratio is *raised* by the work it declined --------------------
   //
-  // The hazard F5 is about, made arithmetic. The gate holds 10 pairs back; `assoc-graph.ts` gives them to the
-  // cursor again, so they never reach `scoredPairs`, which stays 10 while `judgedPairs` is 6. `judged/scored` is
-  // therefore 0.60 - above the 0.5 validity floor - while the run only ever answered 6 of the 20 pairs the arrival
-  // order offered. The second denominator is 6/20 = 0.30, below the floor. Without `deferredPairs` in the
-  // machine-readable export, this cell reads as S1-governed.
+  // The hazard F5 is about, made arithmetic under the corrected floor. The gate holds the last two segments back,
+  // so they never reach `scoredPairs` (10) while `judgedPairs` is 6: `judged/scored` is 0.60 - above the 0.5
+  // validity floor - and the run answered only 6 of the **15** pairs the arrival order offered (6 segments,
+  // w = 1024, so `sum min(i, w)` = 1+2+3+4+5). The floor is 6/15 = 0.40, below it. `scoredPairs +
+  // deferredPairs` = 19 > 15, which is the sum the old denominator used and which is not a pair count of anything.
+  // The cursor is 4 of 6, so the deferral is still terminal and the first-refusal index solves: k = 4
+  // (`sum_{i=4}^{5} i` = 9 = deferredPairs).
   const G = [];
   const evG = (type, time, data) => G.push({ type, time, seq: G.length, data });
   G.push({ type: 'session', version: 4, id: 'session-gggg', createdAt: 900 });
@@ -2729,12 +3353,77 @@ function buildSyntheticRun(root) {
     { type: 's1_call', schema: 1, ts: 1012, sessionId: 'session-gggg', provider: 'laya-serve', role: 'assoc', kind: 'noul', questions: 5, inputTokens: 100, outputTokens: 0, ms: 10, ok: true },
     { type: 's1_call', schema: 1, ts: 1014, sessionId: 'session-gggg', provider: 'laya-serve', role: 'assoc', kind: 'noul', questions: 5, inputTokens: 0, outputTokens: 0, ms: 0, ok: false, error: 'S1HttpError: systemone 503: server busy' },
   ];
+  const gOrder = ['g0', 'g1', 'g2', 'g3', 'g4', 'g5'];
+  const gScores = [];
+  for (let i = 0; i < 4; i += 1) {
+    for (let j = i + 1; j < 4; j += 1) {
+      // Four of the six settled pairs by the lane, two by the local fallback: the split row has to be exercised by a
+      // fixture, not only by prose.
+      const source = gScores.length < 4 ? 's1-noul' : 'lexical';
+      gScores.push({ from: gOrder[i], to: gOrder[j], w: 0.4, source, at: 1030 });
+    }
+  }
   const rgG = {
-    schema: 2, sessionId: 'session-gggg', scoredPairs: 10, judgedPairs: 6, deferredPairs: 10, order: ['a', 'b'], segments: [],
-    edges: [{ from: 'a', to: 'b', w: 0.3, source: 's1-noul', verifiedAt: 1030 }],
-    scores: [{ from: 'a', to: 'b', w: 0.3, source: 's1-noul', at: 1030 }],
+    schema: 2, sessionId: 'session-gggg', scored: 4, scoredPairs: 10, judgedPairs: 6,
+    deferredPairs: 9, deferredSegments: 2, order: gOrder, segments: [],
+    edges: [{ from: gOrder[0], to: gOrder[1], w: 0.3, source: 's1-noul', verifiedAt: 1030 }],
+    scores: gScores,
   };
-  const tapeG = [{ schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true, configuredProvider: 'laya-serve', conflicts: [] }];
+  const tapeG = [{
+    schema: 0,
+    kind: 'wiring',
+    s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' },
+    relevance: true,
+    configuredProvider: 'laya-serve',
+    conflicts: [],
+    recall: { d: 2, r: 0.55, w: 1024 },
+  }];
+
+  // --- cell J: a deferral that was RECOVERED - this round's shape, in miniature ------------------------
+  //
+  // Round `20261004-1211`, scaled down to eight segments: the gate holds the last segment back (7 pairs,
+  // `sum_{i=7}^{7} min(i, w)`), the walk then catches up completely (cursor 8 of 8) and every one of those pairs is
+  // settled - while `deferredPairs` still counts all 7. So `scoredPairs + deferredPairs` = 28 + 7 = **35 against 28
+  // offered**: the sum exceeds the session's whole pair count, which is the falsification this fixture exists to
+  // keep visible. The floor is 28/28 = 100 % and the first-refusal index is **not derivable**, because a cursor
+  // that reached N means every pair the counter holds has since been settled - even though `sum_{i=7}^{7} i` = 7
+  // does solve the equation, which is exactly the reading the cursor rule has to overrule.
+  const J = [];
+  const evJ = (type, time, data) => J.push({ type, time, seq: J.length, data });
+  J.push({ type: 'session', version: 4, id: 'session-jjjj', createdAt: 900 });
+  evJ('turn/start', 1000, { turn: 1 });
+  evJ('user/message', 1001, { content: [{ type: 'text', text: 'human' }], source: { kind: 'user' } });
+  evJ('step/start', 1010, { turn: 1, step: 1 });
+  evJ('assistant/message', 1030, { turn: 1, step: 1, message: { role: 'assistant', content: [] }, usage: { inputTokens: 2, cacheReadTokens: 10, outputTokens: 1, totalTokens: 13 } });
+  evJ('step/end', 1035, { turn: 1, step: 1 });
+  evJ('turn/end', 1040, { turn: 1, reason: { kind: 'completed' } });
+  const controlJ = [
+    { type: 'assembly', schema: 1, ts: 1005, sessionId: 'session-jjjj', seq: 0, candidates: 2, selected: 1 },
+    { type: 'context_delivery', schema: 1, ts: 1006, sessionId: 'session-jjjj', cell: 'J', delivered: true, reason: 'inserted', blocks: ['recalled'] },
+    { type: 's1_call', schema: 1, ts: 1012, sessionId: 'session-jjjj', provider: 'laya-serve', role: 'assoc', kind: 'noul', questions: 28, inputTokens: 500, outputTokens: 0, ms: 30, ok: true },
+  ];
+  const jOrder = ['j0', 'j1', 'j2', 'j3', 'j4', 'j5', 'j6', 'j7'];
+  const jScores = [];
+  for (let i = 0; i < jOrder.length; i += 1) {
+    for (let j = i + 1; j < jOrder.length; j += 1) {
+      jScores.push({ from: jOrder[i], to: jOrder[j], w: 0.5, source: 's1-noul', at: 1030 });
+    }
+  }
+  const rgJ = {
+    schema: 2, sessionId: 'session-jjjj', scored: 8, scoredPairs: 28, judgedPairs: 28,
+    deferredPairs: 7, deferredSegments: 1, order: jOrder, segments: [],
+    edges: [{ from: jOrder[0], to: jOrder[1], w: 0.5, source: 's1-noul', verifiedAt: 1030 }],
+    scores: jScores,
+  };
+  const tapeJ = [{
+    schema: 0,
+    kind: 'wiring',
+    s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' },
+    relevance: true,
+    configuredProvider: 'laya-serve',
+    conflicts: [],
+    recall: { d: 2, r: 0.55, w: 1024 },
+  }];
 
   // --- cell H: a lane CONFIGURED and then demoted by a configuration conflict -------------------------
   //
@@ -2788,7 +3477,7 @@ function buildSyntheticRun(root) {
     { type: 'context_delivery', schema: 1, ts: 1006, sessionId: 'session-iiii', cell: 'I', delivered: false, reason: 'the decision carried no messages', blocks: [] },
   ];
   const rgI = {
-    schema: 1, sessionId: 'session-iiii', scoredPairs: 4, judgedPairs: 2, order: ['a'], segments: [], edges: [], scores: [],
+    schema: 1, sessionId: 'session-iiii', scoredPairs: 4, judgedPairs: 2, order: ['a'], segments: [], edges: [],
   };
   const tapeI = [{ schema: 0, kind: 'wiring', s1: { provider: 'laya-serve', mode: 'local', baseUrl: 'http://127.0.0.1:8008' }, relevance: true }];
 
@@ -2820,6 +3509,7 @@ function buildSyntheticRun(root) {
   mkCell('G', G, controlG, rgG, tapeG);
   mkCell('H', H, controlH, rgH, tapeH);
   mkCell('I', I, controlI, rgI, tapeI);
+  mkCell('J', J, controlJ, rgJ, tapeJ);
   // The round's software identity, exactly as the harness writes it, including the plugin that does
   // *not* declare this release as supported - the case that motivated recording it at all.
   writeFileSync(join(root, 'manifest.json'), `${JSON.stringify({
@@ -2898,7 +3588,7 @@ function runSelfTest() {
       assertTrue(full.text.includes('turn/end'), 'the multi-frame walk should reach the last frame');
     }, 'multi-frame zstd walk reaches every frame (naive decode does not)');
 
-    const analysis = analyseRun(root, ['A', 'B', 'E', 'F', 'G', 'H', 'I'], new Map([['A', 'alpha'], ['E', 'never'], ['F', 'refused'], ['G', 'shrinkable'], ['H', 'demoted'], ['I', 'predeferral']]), '2026-01-01T00:00:00.000Z');
+    const analysis = analyseRun(root, ['A', 'B', 'E', 'F', 'G', 'H', 'I', 'J'], new Map([['A', 'alpha'], ['E', 'never'], ['F', 'refused'], ['G', 'shrinkable'], ['H', 'demoted'], ['I', 'predeferral'], ['J', 'recovered']]), '2026-01-01T00:00:00.000Z');
     const A = analysis.cells.find((c) => c.name === 'A');
     const B = analysis.cells.find((c) => c.name === 'B');
     const E = analysis.cells.find((c) => c.name === 'E');
@@ -2906,6 +3596,7 @@ function runSelfTest() {
     const G = analysis.cells.find((c) => c.name === 'G');
     const H = analysis.cells.find((c) => c.name === 'H');
     const I = analysis.cells.find((c) => c.name === 'I');
+    const J = analysis.cells.find((c) => c.name === 'J');
 
     check(() => {
       assertEqual(A.a.totals.turns, 2, 'A turns');
@@ -3069,7 +3760,13 @@ function runSelfTest() {
       assertTrue(md2.includes('0 (lane present; 0 ok of 3)'), 'lane-present zeros carry the failure split');
       assertTrue(md2.includes('undefined — no S1 lane'), 'coverage is printed as undefined for a lane-absent cell');
       assertTrue(md2.includes('never (E) undefined'), 'the coverage line marks E as undefined');
-      assertTrue(md2.includes('refused (F) 0.0%'), 'the coverage line prints F\'s measured 0%');
+      assertTrue(md2.includes('coverage over offered: **undefined** (no S1 lane'),
+        'and its floor is undefined for a reason of its own, not "not derivable" and not a number');
+      // F's secondary ratio is still a measured 0, and its floor is *not derivable* - no wiring record on its tape
+      // carries `recall.w` and no edge names one - so the line states the reason instead of a ratio.
+      assertTrue(md2.includes('refused (F) coverage over offered: **not derivable**'),
+        'the coverage line says F\'s floor is not derivable rather than borrowing a number');
+      assertTrue(md2.includes('judged/scored 0.0% (0/8)'), 'the coverage line prints F\'s measured 0% as the secondary reading');
       const headerLine = md2.split('\n').find((l) => l.startsWith('- System-1 lane:')) || '';
       assertTrue(headerLine.includes('had a System-1 lane'), 'the header line names the cells that had a lane');
       assertTrue(headerLine.includes('had **no** System-1 lane'), 'the header line names the cells that did not');
@@ -3093,27 +3790,50 @@ function runSelfTest() {
       assertTrue(lines.some((l) => l.startsWith('E,never,mechanism,System-1 lane absent (zero by construction),flag,diagnostic,,,,1')), 'csv flags E as lane-absent');
       assertTrue(lines.some((l) => l.startsWith('F,refused,mechanism,System-1 lane absent (zero by construction),flag,diagnostic,,,,0')), 'csv flags F as lane-present');
       assertTrue(lines.some((l) => l.startsWith('E,never,mechanism,System-1 coverage state,flag,diagnostic,,,,undefined (no S1 lane)')), 'csv marks E coverage undefined');
-      assertTrue(!lines.some((l) => l.startsWith('E,never,mechanism,System-1 coverage (judged/scored)')), 'csv omits a numeric coverage for E rather than writing 0');
-      assertTrue(lines.some((l) => l.startsWith('F,refused,mechanism,System-1 coverage (judged/scored),ratio,diagnostic,,,,0')), 'csv writes F\'s measured coverage 0');
+      assertTrue(!lines.some((l) => l.startsWith('E,never,mechanism,System-1 coverage (judged/scored - the secondary reading)')), 'csv omits a numeric secondary coverage for E rather than writing 0');
+      assertTrue(lines.some((l) => l.startsWith('F,refused,mechanism,System-1 coverage (judged/scored - the secondary reading),ratio,diagnostic,,,,0')), 'csv writes F\'s measured secondary coverage 0');
+      // F has a lane and no derivable floor: the floor ratio must be absent from the CSV (not 0), because its
+      // denominator is unrecorded - and that absence is the whole point of the correction.
+      assertTrue(!lines.some((l) => l.startsWith('F,refused,mechanism,System-1 coverage over offered (THE FLOOR)')),
+        'csv omits the floor rather than writing 0 for a cell whose offered window cannot be derived');
     }, 'csv is long-format, keeps the cache hit rate out of the cost group, and distinguishes the two System-1 zeros');
 
     check(() => {
-      // F5. The cell whose coverage is raised by the work it declined: 6 judged of 10 scored is 0.60, above the 0.5
-      // floor, while only 6 of the 20 pairs the arrival order offered were ever answered. The second denominator is
-      // the one the floor is defined over, and both must be readable from the report *and* from the CSV.
+      // F5, under the corrected floor. The cell whose *secondary* ratio is raised by the work it declined: 6 judged
+      // of 10 scored is 0.60, above the 0.5 floor, while the graph settled only 6 of the **15** pairs the arrival
+      // order offered. The floor is 6/15 = 0.40 and is the ratio the validity floor is defined over; the sum
+      // `scoredPairs + deferredPairs` = 19 is larger than the whole order's pair count and is *not* a denominator.
+      // The cursor is 4 of 6, so the deferral is still terminal and `k` solves at 4.
       assertEqual(G.a.diagnostics.scoredPairs, 10, 'G scored pairs');
-      assertEqual(G.a.diagnostics.deferredPairs, 10, 'G deferred pairs');
-      assertEqual(G.a.diagnostics.offeredPairs, 20, 'G offered = scored + deferred');
+      assertEqual(G.a.diagnostics.deferredPairs, 9, 'G deferred pairs');
+      assertEqual(G.a.diagnostics.deferredSegments, 2, 'G deferred segments');
+      assertEqual(G.a.diagnostics.offeredWindow, 15, 'G offered window = sum min(i, w) over 6 segments');
+      assertEqual(G.a.diagnostics.windowN, 1024, 'G reads w from its own wiring record');
+      assertEqual(G.a.diagnostics.settledPairs, 6, 'G settled six distinct pairs');
+      assertEqual(G.a.diagnostics.settledByBackend, 4, 'G settled four of them with the lane');
+      assertEqual(G.a.diagnostics.settledByFallback, 2, 'G settled two with the local fallback');
       assertEqual(G.a.diagnostics.coverage, 0.6, 'G judged/scored, raised by declining work');
-      assertEqual(G.a.diagnostics.coverageOffered, 0.3, 'G judged/(scored+deferred), the floor denominator');
-      assertTrue(G.a.diagnostics.coverage > 0.5 && G.a.diagnostics.coverageOffered < 0.5,
+      assertEqual(G.a.diagnostics.floorCoverage, 0.4, 'G distinct settled / offered, the floor');
+      assertTrue(G.a.diagnostics.coverage > 0.5 && G.a.diagnostics.floorCoverage < 0.5,
         'the fixture must actually straddle the 0.5 floor, or it proves nothing');
-      assertEqual(G.a.diagnostics.deferredShare, 0.5, 'G deferred share = 10/20');
+      assertEqual(G.a.diagnostics.scoredPlusDeferred, 19, 'G scored + deferred, the non-additive sum');
+      assertTrue(G.a.diagnostics.scoredPlusDeferred > G.a.diagnostics.offeredWindow,
+        'and the sum must exceed the offered window, which is what makes it unusable as a denominator');
+      assertEqual(G.a.diagnostics.deferredShare, 0.6, 'G deferred share = 9/15, over the offered window');
+      assertEqual(G.a.diagnostics.firstRefusalK, 4, 'G first-refusal index k = 4 (the deferral is terminal)');
 
       const mdG = renderMarkdown(analysis);
-      assertTrue(mdG.includes('judged/(scored+deferred) = 30.0%'), 'the offered denominator is printed beside coverage');
-      assertTrue(mdG.includes('deferral share: 50.0% (10 deferred of 20 offered = scored + deferred)'),
-        'the deferral share and its denominator are printed beside every coverage figure');
+      assertTrue(mdG.includes('coverage over offered 40.0% (the floor: 6 distinct pairs settled of 15 offered = sum min(i, w))'),
+        'the floor and both of its halves are printed beside every coverage figure');
+      assertTrue(mdG.includes('settled by scorer: 4 lane / 2 lexical fallback'),
+        'and the settled count is split by the scorer that produced it');
+      assertTrue(mdG.includes('deferral share: 60.0% (9 deferred of 15 offered = sum min(i, w))'),
+        'the deferral share is taken over the offered window, not over a sum of counters');
+      assertTrue(mdG.includes('19 = 10 + 9'), 'the non-additive sum is printed and labelled as itself');
+      assertTrue(mdG.includes('first-refusal index k'), 'the pre-registered k row is printed');
+      assertTrue(mdG.includes('4 (the equation solves on this order, so the deferral is terminal)'),
+        'and it carries the index when the equation solves on a terminal deferral');
+      assertTrue(!mdG.includes('judged/(scored+deferred)'), 'the superseded denominator appears nowhere in the output');
 
       // F9. The recency fallback is the event that silently replaces the System-1 selection with the last-N window.
       assertEqual(G.a.diagnostics.fallbackSteps, 1, 'G records one step on the recency fallback');
@@ -3124,6 +3844,33 @@ function runSelfTest() {
       assertTrue(mdG.includes('1 backend / 1 recency-fallback'), 'the recall block source row names the fallback');
       assertTrue(mdG.includes('unjudged pairs admitted (`unknownAdmitted`)'), 'the unknownAdmitted row exists');
       assertTrue(mdG.includes('recall structure recorded (steps / nodes placed)'), 'the recall tree row exists');
+
+      // The recovery case: round `20261004-1211`'s shape in miniature, and the reading this whole correction is
+      // about. The walk caught up (cursor 8 of 8), every deferred pair was settled, and the counter still holds all
+      // 7 of them - so the sum exceeds the offered window, and `k` has no meaning even though 7 solves the equation
+      // at k = 7. The cursor rule has to overrule it.
+      assertEqual(J.a.diagnostics.cursor, 8, 'J cursor reached N');
+      assertEqual(J.a.diagnostics.offeredWindow, 28, 'J offered window = sum min(i, w) over 8 segments');
+      assertEqual(J.a.diagnostics.settledPairs, 28, 'J settled every offered pair');
+      assertEqual(J.a.diagnostics.floorCoverage, 1, 'J floor is 100 % - the honest ratio, not 78.6 %');
+      assertEqual(J.a.diagnostics.deferredPairs, 7, 'J still counts the recovered deferral');
+      assertEqual(J.a.diagnostics.scoredPlusDeferred, 35, 'J scored + deferred = 35');
+      assertTrue(J.a.diagnostics.scoredPlusDeferred > J.a.diagnostics.offeredWindow,
+        'the sum exceeds the session\'s own pair count, exactly as round `20261004-1211`\'s did');
+      assertEqual(J.a.diagnostics.firstRefusalK, null, 'J has no first-refusal index');
+      assertTrue(String(J.a.diagnostics.firstRefusalWhy).includes('the cursor reached 8 of 8'),
+        'because the cursor reached N, which the row has to say rather than print 7');
+      const mdJ = renderMarkdown(analysis);
+      assertTrue(mdJ.includes('coverage over offered 100.0% (the floor: 28 distinct pairs settled of 28 offered'),
+        'the recovering cell prints the honest 100 %');
+      assertTrue(mdJ.includes('the cursor reached 8 of 8'), 'and says why k is not derivable');
+
+      // The counter-check: a lane that exists with a snapshot whose offered window cannot be derived (cell A has no
+      // tape at all). The floor must say so - a ratio over a guessed denominator is what this row was corrected for.
+      assertEqual(A.a.diagnostics.windowN, null, 'A records no w');
+      assertEqual(A.a.diagnostics.floorCoverage, null, 'A has no floor');
+      assertTrue(renderMarkdown(analysis).includes('alpha (A) coverage over offered: **not derivable**'),
+        'and the coverage line says so rather than printing a ratio');
 
       // F3. The demoted lane, which used to print exactly as the no-lane control.
       assertEqual(H.a.diagnostics.laneState, 'demoted', 'H lane state is demoted, not none');
@@ -3141,21 +3888,26 @@ function runSelfTest() {
       assertTrue(mdH.includes('demoted (H)'), 'the demoted cell appears in the coverage line');
 
       // F5/I: a snapshot that predates `deferredPairs` must say "not recorded", never 0 - the property the audit
-      // verified and this change must not lose.
+      // verified and this change must not lose. I is a schema-1 file, so it carries no `scores` map either and the
+      // floor says *that* rather than blaming the window.
       assertEqual(I.a.diagnostics.deferredRecorded, false, 'I predates the deferral field');
-      assertEqual(I.a.diagnostics.coverageOffered, null, 'I has no offered denominator');
+      assertEqual(I.a.diagnostics.settledRecorded, false, 'I predates the `scores` map');
+      assertEqual(I.a.diagnostics.floorCoverage, null, 'I has no floor');
+      assertTrue(String(I.a.diagnostics.floorWhy).includes('no `scores` map'), 'and the reason is the missing numerator');
       assertEqual(I.a.diagnostics.coverage, 0.5, 'but I still has judged/scored');
       assertEqual(I.a.diagnostics.recallTreeRecorded, false, 'I recorded no recall tree');
       assertEqual(I.a.diagnostics.unknownAdmittedTotal, null, 'I recorded no unknownAdmitted');
       const mdI = renderMarkdown(analysis);
-      assertTrue(mdI.includes('deferral share: not recorded by this snapshot'), 'I says the deferral is unrecorded');
-      assertTrue(mdI.includes('offered-denominator coverage: n/a (deferrals not recorded by this snapshot)'),
-        'and so is the offered denominator');
+      assertTrue(mdI.includes('deferral share: not derivable (the snapshot records no `deferredPairs` field)'),
+        'I says the deferral share is not derivable and why');
+      assertTrue(mdI.includes('coverage over offered: **not derivable**'),
+        'and so does the floor');
       const iRows = renderCsv(analysis).split('\n').filter((l) => l.startsWith('I,'));
       assertTrue(iRows.some((l) => l.includes('deferred pairs recorded by this snapshot,flag,diagnostic,,,,0')),
         'the CSV flags the missing deferral field');
       assertTrue(!iRows.some((l) => l.includes('association pairs deferred,')), 'and omits the count rather than zeroing it');
-      assertTrue(!iRows.some((l) => l.includes('System-1 coverage (judged/(scored+deferred))')), 'and omits the ratio');
+      assertTrue(!iRows.some((l) => l.includes('System-1 coverage over offered (THE FLOOR)')), 'and omits the floor');
+      assertTrue(!iRows.some((l) => l.includes('association pairs settled (distinct)')), 'and omits the settled count');
       assertTrue(mdI.includes('undefined — no S1 lane'), 'E keeps the no-lane wording');
     }, 'F3/F5/F9: a demoted lane prints as demoted, coverage carries its deferral denominator, and the recall rows are reported or marked unrecorded');
 
@@ -3163,14 +3915,41 @@ function runSelfTest() {
       // The CSV is the machine-readable half: every field the markdown states must be readable from it, because a
       // downstream consumer never sees the prose (F5's second half).
       const lines = csv.trim().split('\n');
-      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs deferred,count,diagnostic,,,,10')),
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs deferred,count,diagnostic,,,,9')),
         'csv carries deferredPairs');
-      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs offered (scored + deferred),count,diagnostic,,,,20')),
-        'csv carries the offered denominator');
-      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,deferred share of offered,ratio,diagnostic,,,,0.5')),
-        'csv carries the deferral share');
-      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,System-1 coverage (judged/(scored+deferred)),ratio,diagnostic,,,,0.3')),
-        'csv carries the floor denominator');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs deferred - segments held back,count,diagnostic,,,,2')),
+        'csv carries the segments that came with the deferral');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,scoredPairs + deferredPairs (NOT ADDITIVE - not the offered window),count,diagnostic,,,,19')),
+        'csv carries the non-additive sum, labelled so it cannot be read as the offered window');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs offered (windowed pair count of the arrival order),count,diagnostic,,,,15')),
+        'csv carries the offered window');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,recall window w used by the offered denominator,count,diagnostic,,,,1024')),
+        'csv carries the window the denominator was counted at, and where it came from');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,recall window w read from,flag,diagnostic,,,,the wiring record (recall.w)')),
+        'csv names the record w was read from');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,deferred share of offered,ratio,diagnostic,,,,0.6')),
+        'csv carries the deferral share over the offered window');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs settled (distinct),count,diagnostic,,,,6')),
+        'csv carries the floor numerator');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs settled by the lane,count,diagnostic,,,,4')),
+        'csv splits the numerator by scorer');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,association pairs settled by the lexical fallback,count,diagnostic,,,,2')),
+        'both halves of the split are in the file');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,System-1 coverage over offered (THE FLOOR),ratio,diagnostic,,,,0.4')),
+        'csv carries the floor');
+      assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,first-refusal index k (deferral terminal only),count,diagnostic,,,,4')),
+        'csv carries the pre-registered index when it is derivable');
+      assertTrue(!lines.some((l) => l.includes('judged/(scored+deferred)')), 'the superseded denominator is nowhere in the CSV');
+      // The recovering cell: a floor of 1 over a counter that still holds its recovered deferral, and no k - the
+      // index row is *omitted* and the state row says why, so absence cannot be read as a zero.
+      assertTrue(lines.some((l) => l.startsWith('J,recovered,mechanism,System-1 coverage over offered (THE FLOOR),ratio,diagnostic,,,,1')),
+        'csv carries the honest 100 % for the recovering cell');
+      assertTrue(lines.some((l) => l.startsWith('J,recovered,mechanism,scoredPairs + deferredPairs (NOT ADDITIVE - not the offered window),count,diagnostic,,,,35')),
+        'and the sum that exceeds its offered window');
+      assertTrue(!lines.some((l) => l.startsWith('J,recovered,mechanism,first-refusal index k (deferral terminal only),count')),
+        'the k count is omitted, not written as 0');
+      assertTrue(lines.some((l) => l.includes('J,recovered,mechanism,first-refusal index k state,flag,diagnostic') && l.includes('the cursor reached 8 of 8')),
+        'and the state row says why');
       assertTrue(lines.some((l) => l.startsWith('H,demoted,mechanism,System-1 lane demoted by a configuration conflict,flag,diagnostic,,,,1')),
         'csv flags the demoted lane');
       assertTrue(lines.some((l) => l.startsWith('E,never,mechanism,System-1 lane demoted by a configuration conflict,flag,diagnostic,,,,0')),
@@ -3187,9 +3966,9 @@ function runSelfTest() {
         'csv carries unknownAdmitted');
       assertTrue(lines.some((l) => l.startsWith('G,shrinkable,mechanism,recall structure nodes placed,count,diagnostic,,,,3')),
         'csv carries the recall tree node count');
-      assertTrue(!lines.some((l) => l.startsWith('E,never,mechanism,System-1 coverage (judged/(scored+deferred))')),
-        'the offered denominator is omitted, not zeroed, for a cell with no lane');
-    }, 'F3/F5/F9 in the CSV: the deferredPairs family, the demotion flags and the recall rows are all machine-readable');
+      assertTrue(!lines.some((l) => l.startsWith('E,never,mechanism,System-1 coverage over offered (THE FLOOR)')),
+        'the floor is omitted, not zeroed, for a cell with no lane');
+    }, 'F3/F5/F9 in the CSV: the floor and its inputs, the non-additive sum, the demotion flags and the recall rows are all machine-readable');
 
     const svgs = renderSvgs(analysis);
 
@@ -3201,7 +3980,11 @@ function runSelfTest() {
         assertTrue(s.includes('xmlns="http://www.w3.org/2000/svg"'), `${name} is a standalone svg`);
         assertTrue(!/<script/i.test(s), `${name} has no script`);
         assertTrue(!/https?:\/\//.test(s.replace('http://www.w3.org/2000/svg', '')), `${name} references no external URL`);
-        assertTrue(s.includes('>3,000<') || s.includes('>1,200<') || /class="value"/.test(s), `${name} prints numbers on the bars`);
+        // A chart that prints no number is not a reading. The three metric charts label every bar `class="value"`;
+        // the per-step cache chart labels its token axis instead, because one value per row over a hundred rows is
+        // unreadable and the rows that matter carry their own label.
+        assertTrue(s.includes('>3,000<') || s.includes('>1,200<') || /class="value"/.test(s) || /class="tick">[^<]*\d/.test(s),
+          `${name} prints numbers on the bars`);
         assertTrue((s.match(/<rect/g) || []).length > 3, `${name} draws bars`);
       }
       assertTrue(svgs['time.svg'].includes('>count<') || svgs['time.svg'].includes('count</text>'), 'time.svg labels the count axis');
@@ -3217,13 +4000,54 @@ function runSelfTest() {
       assertTrue(svgs['s1-governance.svg'].includes('never (E)'), 'the governance chart names the lane-absent cell');
     }, 'svg charts distinguish a lane-absent zero from a refused-lane zero');
 
+    check(() => {
+      // The per-step cache chart: the reading the cost chart states outright that it does not carry. Its shape is
+      // rows of steps rather than panels of bars, so it declares itself and the band audit skips it - which is why
+      // its own rows, marks and labels are asserted here instead.
+      const text = svgs['cache-steps.svg'];
+      assertTrue(typeof text === 'string' && text.length > 0, 'cache-steps.svg exists');
+      assertEqual(classifySvg(text), 'cache-steps', 'the chart declares itself with data-chart="cache-steps"');
+      const audit = auditSvg(text);
+      assertTrue(audit.skipped && audit.ok, 'the band audit skips it rather than failing a chart it cannot place');
+      assertTrue(audit.reason.includes('per-step input-cache chart'), 'and the skip carries a readable reason');
+      const labels = [...text.matchAll(/class="step">([^<]+)</g)].map((m) => m[1]);
+      const expected = analysis.cells.flatMap((c) => c.a.steps.map((s) => `${s.turn}.${s.step}`));
+      assertEqual(labels.join(','), expected.join(','), 'one row per step, per cell, in step order');
+      // The fixture's four compaction records precede step 2.1's request and carry no turn/step of their own, so
+      // the chart must charge them to 2.1 and say what they cost there.
+      assertTrue(text.includes('compaction x4'), 'the rewrite step is marked with how many records landed on it');
+      assertTrue(text.includes('2,400 tok shadowed'), 'and with the tokens those records shadowed');
+      assertTrue(text.includes('4 compaction record(s) on 1 step(s)'), 'the panel header counts records and steps');
+      assertTrue(text.includes('median step of 20'), 'and names the median step the excess is measured against');
+      assertTrue(text.includes('prefix hit'), 'the caption states the prefix-caching mechanism it is a reading of');
+      // A step that collapses with no record to explain it must still be marked: the chart is a diagnostic, not a
+      // receipt for compactions. Drawn directly, because no fixture cell has an unexplained collapse.
+      const lone = cacheStepsSvg({
+        cells: [{
+          name: 'Z', label: 'Z',
+          a: {
+            steps: [
+              { turn: 1, step: 1, hitTokens: 1000, missTokens: 10 },
+              { turn: 1, step: 2, hitTokens: 5, missTokens: 95 },
+            ],
+            compactions: [],
+          },
+        }],
+        sub: () => 'run fixture', prov: () => [], snapshotAt: '2026-01-01T00:00:00.000Z', width: 1120,
+      });
+      assertTrue(lone.includes('5 % hit · 95 uncached'), 'an unexplained collapse is labelled with its rate');
+      assertTrue(!lone.includes('compaction x'), 'and is not dressed up as a compaction');
+    }, 'the per-step cache chart marks every compaction and labels the step it is charged to');
+
     // GEOMETRY. The arithmetic was right the first time and the drawing was not: every panel after
     // the first was translated twice, so its body landed in the next panel's band and the last
     // panel's body fell off the canvas entirely. Nothing above can see that, so the finished files
     // are read back and every bar and every value label is required to lie inside the band of the
     // panel that owns it.
     check(() => {
-      const audits = Object.entries(svgs).map(([name, text]) => [name, auditSvg(text)]);
+      // `cache-steps.svg` is a skipped kind (rows of steps, not panels of bars) and its geometry is asserted by
+      // its own check above; the band audit owns the three metric charts.
+      const audits = Object.entries(svgs).filter(([name]) => name !== 'cache-steps.svg').map(([name, text]) => [name, auditSvg(text)]);
       for (const [name, audit] of audits) {
         assertTrue(audit.violations.length === 0, `${name} geometry: ${audit.violations.slice(0, 4).join(' | ')}`);
         assertTrue(audit.ok, `${name} audit not ok`);

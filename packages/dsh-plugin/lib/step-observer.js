@@ -10,18 +10,33 @@
  * *after* the harness's own middleware chain produced its decision.
  *
  * Upkeep does not *start* inside `observe()`: new session events go into a bounded queue and are folded into the
- * graph on a later tick. It can, however, be *advanced* there, and that is deliberate. A measured System-1 call
- * takes a median of 15.3 s, so a step can arrive before the segment it recalls from has been scored at all, and
- * BFS from an unscored anchor returns nothing while the block is silently refilled from the recency window.
- * `waitForAnchorRow` therefore drains already-queued upkeep, bounded by `recall.anchorWaitMs` and skipped
- * entirely when the row is complete or when nothing is queued or in flight. The bounded wait is the exception
- * path; the fail-open rule in `assemble()` is what runs when it expires. Both outcomes are recorded, and
- * differently: a wait that ran out of time and a wait that was never worth starting are not the same event, and
- * the tape line for each says which one it was (`waited`).
+ * graph on a later tick, where today they are folded in **and not scored** - see `step-observer.ts`'s queue handler
+ * for why the eager sweep is gone.
+ *
+ * **Scoring is on-demand (2026-10-05): a pair is bought because a step's recall asked for the row that holds it.**
+ * `waitForAnchorRow` no longer waits on a sweep somebody else is running; it *starts* the walk
+ * (`AssociationGraph.recallDemand`) and watches the anchor's own row, which is that walk's first level. The walk
+ * expands level by level and asks for the rows of the nodes each level stands on, so a node with no neighbour above
+ * `tau` is never expanded and its neighbours' rows are never scored - the branch is not computed. `recall.anchorWaitMs`
+ * keeps its meaning (the bound on how long the *step* waits, `0` disables the wait) and the fail-open rule in
+ * `assemble()` keeps its own (what the step reads when the row did not arrive); what changed is that the rows behind
+ * the anchor are now bought by the walk rather than by the arrival order.
+ *
+ * **Waiting alone was not enough, and the round that shows it is `20261004-1239`.** Its tape carries 26
+ * `anchor-wait` lines: steps 2-8 `completed`, steps **9-26 `gave-up`** after the full 10 s each - because upkeep
+ * walked the append order from its *oldest* unsettled entry and the anchor is the newest, so the row the step is
+ * rooted on was never offered at all (the cursor had reached 106 of 228; `scores` was a complete triangle over
+ * segments 0..105 and nothing above it). Every one of those 18 steps then fail-opened: `candidates` 0,
+ * `unknownAdmitted` = `selected`, 21,755 recalled tokens on the last assembly. Naming the anchor to a sweep was the
+ * first half (`scoreNew`'s `anchorId`, `packages/core/test/anchor-priority.test.ts`); on-demand scoring is the
+ * second, and it removes the reason the first was needed: the walk no longer waits for a sweep to reach its end of
+ * the session, it asks for that end first.
  */
-import { AssociationGraph, CONTENT_EVENT_TYPES, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
+import { AssociationGraph, CONTENT_EVENT_TYPES, S1_DEFERRED, adaptSessionEvent, createUpkeepQueue, estimateTokens, extractSystemPrompt, observeStep, segmentEvent } from '@s1cap/core';
              
                  
+               
+            
            
           
              
@@ -43,12 +58,11 @@ import { isS1capInjected } from '@s1cap/core';
                                                                                             
                        
      
-                                                                                                       
-    
-                                                                                                                 
-                                                                                                              
-                                                                                                               
-                                                             
+                                                                                                             
+                                                                                                                   
+                                                                                                                   
+                                                                                                                  
+                                
      
                             
      
@@ -139,7 +153,15 @@ import { isS1capInjected } from '@s1cap/core';
                                                         
      
                             
-                                                                 
+     
+                                                                              
+    
+                                                                                                                 
+                                                                                                                   
+                                                                                                               
+                                                                                                                  
+                                                                                        
+     
                             
      
                                                                                                                   
@@ -149,9 +171,23 @@ import { isS1capInjected } from '@s1cap/core';
      
                             
      
+                                                                                             
+    
+                                                                                                                 
+                                                                                                                  
+                                                                                                                 
+                                                                                                              
+            
+     
+                            
+     
                                                                                                                   
                                                                                                                
                                                                                                      
+    
+                                                                                                                   
+                                                                                                               
+                                                                                                          
      
                               
                                                       
@@ -251,7 +287,7 @@ const ANCHOR_MISMATCH_LINES = 4;
  * so every wait that won was silent and the mechanism's effectiveness could not be measured from a round's
  * artifacts, only its failures. Driving that branch through a real observer needs a scoring call that returns
  * while the wait is inside a `drain()`, which a unit fixture cannot produce (the drain is synchronous and the row
- * is read in the same tick); the record it writes is a pure function of five values, so it is tested as one, and
+ * is read in the same tick); the record it writes is a pure function of six values, so it is tested as one, and
  * the integration tests around it cover the three branches that *are* reachable from the loop.
  *
  * `step` is the number the wait was for, which the line never carried: a tape of `anchor-wait` lines with no step
@@ -263,6 +299,7 @@ export function anchorWaitLine(
   waitMs        ,
   polls        ,
   unknown        ,
+  started         ,
 )                                                     {
   const waited = outcome !== 'not-started';
   return {
@@ -276,18 +313,33 @@ export function anchorWaitLine(
       waited,
       gaveUp: !waited || outcome === 'gave-up',
       outcome,
+      // Whether this wait **started** the sweep that scores the anchor's row, as opposed to waiting on a sweep
+      // someone else had already started (`step-observer.ts`, `startAnchorSweep`). The field exists because the
+      // distinction did not, and the wait could once only hope: round `20261004-1239` waited its full 10 000 ms at
+      // 18 consecutive steps and gave up at every one, because upkeep walks the *oldest* unsettled entry and the
+      // anchor is the newest. A round reading this can now count how often the priority path engaged and how often
+      // it won, instead of inferring it from `polls`.
+      started,
     },
     message:
-      unknown === 0
+      // **Keyed on the outcome, not on `unknown`.** It used to be `unknown === 0 ? completed-sentence : …`, so a
+      // wait that never started and found nothing to admit reported itself as a *completed* wait with no polls -
+      // the one thing it cannot be, and the same shape of defect the comment above records for the tape line
+      // (`{ms:10000, polls:0, unknown:2}` reading as a completed wait). A stand-down is a stand-down whether or
+      // not there was anything left to admit.
+      outcome === 'completed'
         ? // The wait did its job. Worth a line and not worth a warning: nothing is wrong, and the number that
           // matters is `polls` - how many drains it took to get the anchor's row judged.
           `[s1cap] anchor wait completed after ${waitMs}ms (${polls} drain(s)): the anchor's row is judged, ` +
-          'so the fail-open rule admits nothing on this step'
+          'so the fail-open rule admits nothing on this step' +
+          (started ? ' (the wait named the anchor to a sweep of its own)' : '')
         : waited
           ? `[s1cap] anchor wait gave up after ${waitMs}ms (${polls} drain(s)): ` +
-            `${unknown} pair(s) inside the window still unjudged; the fail-open rule admits them`
+            `${unknown} pair(s) inside the window still unjudged; the fail-open rule admits them` +
+            (started ? " (the wait named the anchor to a sweep of its own, which had not answered by the deadline)" : '')
           : `[s1cap] anchor wait not started (${waitMs}ms available): nothing queued and no scoring call in flight, ` +
-            `so the anchor's own row cannot be completed by waiting; the fail-open rule admits its ${unknown} pair(s)`,
+            'and no batch scorer to start one, so the anchor\'s own row cannot be completed by waiting; ' +
+            `the fail-open rule admits its ${unknown} pair(s)`,
   };
 }
 
@@ -357,6 +409,29 @@ export function createStepObserver(opts                     )               {
   };
   /** T's one-entry memo, alive for as long as the observer is. The anchor id is a segment id, and a new session's task has a new one. */
   const proxyCache = { id: '', text: '' };
+  /**
+   * The recalled block's order, one array per session, alive for as long as the observer is. `assemble()` mutates
+   * the array in place to the order the block was laid out in, so what is stored here is the *previous step's*
+   * order, which is exactly what the next step reads (`AssembleInput.recallOrder`).
+   *
+   * **Per session, unlike `proxyCache` directly above, and the difference is not tidiness.** A T memo is keyed on
+   * the task segment's id, so another session's task cannot match it; a block order is a bare list of segment ids
+   * with nothing in it that says which session it came from, so one array shared by two sessions would hand one
+   * session's block order to the other. This map is keyed on the same id the graph map above is, so the two cannot
+   * disagree about what a session is.
+   *
+   * Nothing persists it. A restart loses the order and the next step lays the block out in the deterministic
+   * fallback order (`assembler.ts`, `AssembleInput.recallOrder`); what it costs is one step of ordering stability,
+   * not a segment, and a store for it would have to be another file in the profile for a cache-only quantity.
+   */
+  const recallOrders = new Map                  ();
+  const recallOrderFor = (sessionId        )           => {
+    const known = recallOrders.get(sessionId);
+    if (known !== undefined) return known;
+    const created           = [];
+    recallOrders.set(sessionId, created);
+    return created;
+  };
   let systemPrompt                    ;
   let systemPromptTokens = 0;
   let scheduled = false;
@@ -384,6 +459,7 @@ export function createStepObserver(opts                     )               {
     upkeepSelfDropped: 0,
     upkeepScoredPairs: 0,
     upkeepJudgedPairs: 0,
+    upkeepMissedPairs: 0,
     upkeepDeferredPairs: 0,
     graphSegments: 0,
     graphEdges: 0,
@@ -460,10 +536,134 @@ export function createStepObserver(opts                     )               {
     waitMs        ,
     polls        ,
     unknown        ,
+    started         ,
   )       => {
-    const { line, message } = anchorWaitLine(outcome, step, waitMs, polls, unknown);
+    const { line, message } = anchorWaitLine(outcome, step, waitMs, polls, unknown, started);
     probe(line);
     opts.onWarn?.(message);
+  };
+
+  /**
+   * The on-demand walk's scorer: the rows one level of the walk needs in, one weight list per row out.
+   *
+   * **One call per row, and that is the honest reading at this build's numbers.** A row is `min(index, w)` pairs,
+   * so at the default `w = 16` it is at most 16 questions against `s1.questionsPerCall = 20` - one System-1
+   * request, which is why the walk's cost is counted in rows and its latency in calls. Several rows *could* be
+   * packed into one request, and the graph hands this function a whole level at a time so that a scorer which can
+   * pack them is free to (the request body is a state plus one question per candidate); what packing buys at
+   * `w = 16` is nothing, because two full rows are 32 questions - past the server's cap and, at 41 questions,
+   * past the 5-6x latency cliff `s1.questionsPerCall` records. Raising `w` would make packing the lever and would
+   * put the walk's latency back to one call per *level*; at this window the level and the row are the same thing.
+   *
+   * A row the scorer does not answer is reported as `undefined` and the graph releases it **unsettled** - no
+   * lexical row is written in its place - so a later step's walk asks for it again. That is the one deliberate
+   * difference from the eager sweep's fallback: the sweep had to keep the session's cursor moving, while a walk
+   * that loses its backend only loses reach, and the fail-open rule in `assemble()` is what covers the step's own
+   * anchor. `S1_DEFERRED` - the admission gate's "not now" - is reported the same way, and is counted by the graph
+   * as a demanded pair that got no answer rather than as `deferredPairs` (which is the eager path's accounting).
+   */
+  const scoreDemandedRows = async (
+    rows                      ,
+  )                                                      => {
+    const out                                    = [];
+    for (const row of rows) {
+      try {
+        const weights = opts.scoreBatch === undefined ? undefined : await opts.scoreBatch(row.current, row.candidates);
+        out.push(weights === undefined || weights === S1_DEFERRED ? undefined : weights);
+      } catch (err) {
+        // Contained, like every other call on this path: a scorer that throws costs the row, never the step.
+        stats.errors += 1;
+        stats.lastError = `demand scoring for ${row.id}: ${String(err)}`;
+        out.push(undefined);
+      }
+    }
+    return out;
+  };
+
+  /**
+   * **The whole of on-demand scoring, from the plugin's side**: the step's anchor is handed to the graph's walk,
+   * which asks for the rows it needs level by level - the anchor's own first, then the rows of what the anchor
+   * found, and so on, backwards - and stops where a node has no neighbour above `tau`. A pair is scored because
+   * this walk asked for the row that holds it, and for no other reason.
+   *
+   * **Not awaited.** The walk is multi-round-trip by construction (one level, one call), so `recall.anchorWaitMs`
+   * is what bounds how long the *step* waits for it - the loop in `waitForAnchorRow` watches the anchor's own row,
+   * and everything the walk buys after that lands in the background for the steps that follow. A step that awaited
+   * the whole walk would sit for as many calls as the walk has levels, which is minutes at the measured median.
+   *
+   * The tape line is written **when the walk settles**, tagged with the step that started it, because the numbers
+   * a round needs to read are the walk's own: how many rows it asked for, how many pairs those were, how many the
+   * backend judged, how many got no answer, and why it stopped. Without it the saving this whole design exists for
+   * would be visible only as a smaller `scoredPairs` on the next assembly record, with nothing saying where it
+   * went. `stats.upkeep*Pairs` are updated from the same result, where the anchor sweep's used to be counted -
+   * same scorer, same graph, same policy, so a panel that counted one lane and not the other would make the
+   * coverage ratio depend on which mechanism happened to reach a pair.
+   */
+  const demandWalk = (
+    graph                  ,
+    sessionId        ,
+    anchorId        ,
+    probe                                         ,
+    step        ,
+    waitMs        ,
+  )                                    => {
+    const started = opts.now();
+    const deadline = started + waitMs;
+    return graph
+      .recallDemand(
+        [anchorId],
+        {
+          threshold: opts.policy.recall.threshold,
+          depth: opts.policy.recall.depth,
+          lambdaMs: opts.lambdaMs,
+          now: opts.now(),
+          window: opts.policy.recall.window,
+        },
+        opts.scoreBatch === undefined ? undefined : scoreDemandedRows,
+        // The budget is the same deadline the wait is bounded by, and it is asked **between levels** - so a level
+        // that has been claimed is always answered and kept, and the walk never starts a row it cannot finish
+        // inside the step's own bound. `anchorWaitMs = 0` disables the *wait*, not the recall: the walk then runs
+        // unbounded in the background, which is exactly "scoring starts when the BFS recall is called" with no
+        // step waiting on it. With no batch scorer the walk is local and synchronous and the budget is moot.
+        opts.scoreBatch !== undefined && waitMs > 0 ? () => opts.now() < deadline : undefined,
+      )
+      .then(
+        (result) => {
+          stats.upkeepScoredPairs += result.pairs - result.missedPairs;
+          stats.upkeepJudgedPairs += result.judged;
+          stats.upkeepMissedPairs += result.missedPairs;
+          // **The walk is a writer, so it is a persistence point.** It settles rows *after* the step that started
+          // it has returned (that is what "not awaited" means), and the step's own `persistGraph` has already run by
+          // then - so a process that died between the two would leave the snapshot without the pairs it had just
+          // paid for, and the next start would buy them again. Measured on the restart fixture: the first process
+          // settled its rows and its snapshot held none of them.
+          persistGraph(sessionId);
+          probe({
+            schema: 0,
+            kind: 'recall-demand',
+            step,
+            anchor: anchorId,
+            ms: Math.max(0, opts.now() - started),
+            levels: result.levels.length,
+            rows: result.rows,
+            pairs: result.pairs,
+            judged: result.judged,
+            missed: result.missed,
+            missedPairs: result.missedPairs,
+            skipped: result.skipped,
+            stop: result.stop,
+          });
+          return result;
+        },
+        (err) => {
+          // `recallDemand` releases every claim it holds on the way out, so a failed walk leaves no entry owned;
+          // what it costs is the walk's own accounting and the record says so.
+          stats.errors += 1;
+          stats.lastError = `demand walk: ${String(err)}`;
+          probe({ schema: 0, kind: 'recall-demand', step, anchor: anchorId, error: String(err) });
+          return undefined;
+        },
+      );
   };
 
   const waitForAnchorRow = async (
@@ -473,30 +673,59 @@ export function createStepObserver(opts                     )               {
     anchorId        ,
   )                => {
     const waitMs = opts.policy.recall.anchorWaitMs;
-    // `0`, or anything below it, disables the wait: the panel sets this, and a researcher turning it off must get
-    // the step's own timing back rather than a small wait. Nothing is admitted on this path either - the fail-open
-    // rule in `assemble()` still is - but the wait is not asked for, so it reports nothing.
-    if (!(waitMs > 0)) return;
     const graph = graphFor(sessionId);
-    // The common case, and the reason this is an exception path rather than a per-step cost: the anchor's row has
-    // already been judged by the backend, so this check is one `indexOf` plus a map lookup per pair inside `w`.
-    // Returns without saying anything, because there is nothing to report.
-    //
-    // It asks for a *judgement*, not for a row: a row written by the lexical fallback after a failed System-1 call
-    // is a row there is still something to wait for, and treating it as complete is how the wait would stand down
-    // through a round of backend failures with the fail-open rule none the wiser.
-    const unknownBefore = graph.unjudgedWithin(anchorId, opts.policy.recall.window).length;
-    if (unknownBefore === 0) return;
-    // Nothing queued and nothing in flight means there is no scoring call to wait for, so waiting could only be
-    // answered by time passing. That is not a hypothetical saving: it is what a step should do in a session whose
-    // upkeep has not been asked for anything yet, and it is what keeps a caller with a clock that does not advance (a
-    // deterministic test) from holding a step open for the whole deadline over a queue nobody is going to fill. The
-    // line is still written - the fail-open rule is about to admit these pairs, and the record has to say so - with
-    // `waited: false`, which is what makes it distinguishable from a wait that ran out of time.
-    if (queue.stats().pending === 0 && scoringInFlight === 0) {
-      reportAnchorWait(probe, step, 'not-started', waitMs, 0, unknownBefore);
+    const windowN = opts.policy.recall.window;
+    // **A cell that never recalls never scores.** With `recall.tier1: 'off'` the assembler builds no recall block
+    // at all (`assembler.ts`), so a walk here would buy rows nothing reads - which is the eager path's defect
+    // arrived at from the other side. The old wiring did start a sweep on this path regardless, because upkeep was
+    // scoring the whole session anyway and one more sweep changed the order rather than the cost; with demand-driven
+    // scoring the walk *is* the cost, so it follows the knob that decides whether there is a recall to serve.
+    // C0 and C1 in this build resolve that way (and have no lane either), so their graphs now record the arrival
+    // order and no pairs - which is what a cell whose whole design is "no recall selection" should cost.
+    if (opts.policy.recall.tier1 === 'off') return;
+    // The graph has to hold every segment the walk is about to ask about, and the session-event stream is the lane
+    // most segments arrive on. Under eager scoring this drain was what let the queue's in-flight `scoreNew`
+    // finish; under on-demand scoring the queue's handler no longer scores, and what the drain is for is that the
+    // newest events are *nodes* before the walk looks for them.
+    queue.drain();
+    const canJudge = opts.scoreBatch !== undefined;
+    // Read once, before the walk: it is what the *report* is about, and it is the old early-return's question
+    // ("was there anything to wait for?"). The walk itself is not conditional on it - the rows behind the anchor
+    // are as unscored as they ever were, and asking for them is the mechanism - but a step whose anchor is already
+    // judged and whose walk found nothing unknown has nothing to report, and the silent case is the ordinary one.
+    const unknownBefore = graph.unjudgedWithin(anchorId, windowN).length;
+    // Whether this wait can *cause* the anchor's row, as opposed to only waiting for it. A batch scorer is the
+    // difference: without one, every row the walk writes is lexical, and `unjudgedWithin` counts a lexical row as
+    // unjudged - correctly, since a failed System-1 call writes one too - so no amount of time could complete it.
+    // This used to be spelled "no batch scorer *and* an empty queue *and* nothing in flight", which was a proxy for
+    // the same fact while the queue was where scoring happened; the fact itself is this one line.
+    if (!canJudge) {
+      // Nothing in this process can judge a pair, so there is nothing to wait for - but the *recall* still
+      // happens, and so does the graph it scores. The walk is local, synchronous and free here: running it is what
+      // keeps a session with no System-1 lane working, which is what the queue's own lexical fallback used to do
+      // as segments arrived. The outcome is `not-started`, and the remainder it reports is re-read *after* the
+      // walk, because that is the number the fail-open rule will actually see.
+      await demandWalk(graph, sessionId, anchorId, probe, step, 0);
+      const unknownAfter = graph.unjudgedWithin(anchorId, windowN).length;
+      if (unknownBefore > 0 || unknownAfter > 0) {
+        reportAnchorWait(probe, step, 'not-started', waitMs, 0, unknownAfter, false);
+      }
       return;
     }
+    // `0`, or anything below it, disables the wait: the panel sets this, and a researcher turning it off must get
+    // the step's own timing back rather than a small wait. The walk is still started - scoring begins when the
+    // recall is called, which is what on-demand scoring means - but the step does not wait for a single row of it,
+    // and nothing is reported, because the wait was not asked for.
+    if (!(waitMs > 0)) {
+      void demandWalk(graph, sessionId, anchorId, probe, step, waitMs);
+      return;
+    }
+    // The walk is scoring the anchor's row as its first level, so the loop below no longer starts a sweep of its
+    // own - it watches the one the design requires, and the deadline is the same deadline the walk's budget is
+    // bounded by. `started: true` says exactly that: the wait is the walk's, and the row it is waiting for is being
+    // bought.
+    const walk = demandWalk(graph, sessionId, anchorId, probe, step, waitMs);
+    if (unknownBefore === 0) return;
     const deadline = opts.now() + waitMs;
     // A poll ceiling as well as a deadline, because the deadline came from the injected clock: a caller whose `now()`
     // does not advance would otherwise spin on a resolved sleep until something else stopped it. At the documented
@@ -505,17 +734,18 @@ export function createStepObserver(opts                     )               {
     let polls = 0;
     let unknown = 0;
     for (;;) {
-      // Draining is what makes the wait able to succeed at all: the System-1 calls happen in the queue's handler, so
-      // a loop that only slept would hold the step for the full deadline and learn nothing. It is synchronous, which
-      // is why the loop needs the sleep below: a drain cannot await a call that is still in flight.
+      // Draining keeps the graph's node set current while the walk is in flight - the walk is asking for rows of
+      // segments, and a segment still queued is not a node yet. It no longer *drives* the scoring: the walk does
+      // that itself, which is why the sleep below is now the only thing this loop needs and the poll count is a
+      // count of round trips the row took rather than of drains that happened to find it.
       queue.drain();
       polls += 1;
       // Re-read after the drain, because the row may have completed inside it.
-      unknown = graph.unjudgedWithin(anchorId, opts.policy.recall.window).length;
+      unknown = graph.unjudgedWithin(anchorId, windowN).length;
       // The success is an outcome and belongs on the tape: without this line the only waits anyone can count are
       // the ones that failed, so "the wait works" was unfalsifiable from a round's own artifacts.
       if (unknown === 0) {
-        reportAnchorWait(probe, step, 'completed', waitMs, polls, 0);
+        reportAnchorWait(probe, step, 'completed', waitMs, polls, 0, true);
         return;
       }
       // The deadline is tested *before* the sleep, not after it, so that the row is re-read between the last sleep
@@ -527,17 +757,13 @@ export function createStepObserver(opts                     )               {
       await sleep(50);
     }
     // Giving up is not a failure: assembly carries on, and the pairs it could not wait for are counted as
-    // `unknownAdmitted`. The wait makes the fail-open rule rarer; it does not replace it.
-    reportAnchorWait(probe, step, 'gave-up', waitMs, polls, unknown);
+    // `unknownAdmitted`. The wait makes the fail-open rule rarer; it does not replace it - and the walk it started
+    // is not cancelled here, so the rows it named are still being bought while the step assembles and are there for
+    // the next step that recalls from them. `walk` is deliberately not awaited here: the deadline is the step's,
+    // not the walk's, and the walk's own tape line is written when it settles.
+    void walk;
+    reportAnchorWait(probe, step, 'gave-up', waitMs, polls, unknown, true);
   };
-
-  // How many upkeep scoring calls are in flight right now.
-  //
-  // The queue cannot answer this: it counts an event as `applied` the moment its handler is entered, and the handler is
-  // `async`, so a System-1 call that will take fifteen seconds is indistinguishable from one that has already
-  // returned. The anchor wait has to tell those apart - waiting is only worth anything while a call is actually
-  // running - so the count is kept here, around the one `scoreNew` call upkeep makes.
-  let scoringInFlight = 0;
 
   // The queued unit is an event *plus the session it belongs to*. The id is captured at enqueue time, in the
   // handler that received the event, and travels with the item: reading `stats.sessionId` at drain time attributed
@@ -613,34 +839,18 @@ export function createStepObserver(opts                     )               {
           }
         }
       }
-      // Upkeep is where most pairs are scored now, so it is also where most S1 calls happen. It stays off the
-      // critical path: the queue already defers this to a timer, and a failure here must cost the edges, not
-      // the session - so a backend that is down degrades to no edges for that segment rather than throwing.
-      let scored                                                                = { scoredPairs: 0, edges: 0, deferredPairs: 0 };
-      scoringInFlight += 1;
-      try {
-        scored = await graph.scoreNew({
-          windowN: opts.policy.recall.window,
-          threshold: opts.policy.recall.threshold,
-          ...(opts.scoreBatch !== undefined ? { scoreBatch: opts.scoreBatch } : {}),
-          ...(opts.maxPairsPerSweep !== undefined ? { maxPairsPerSweep: opts.maxPairsPerSweep } : {}),
-        });
-      } catch (err) {
-        stats.errors += 1;
-        stats.lastError = `upkeep scoring: ${String(err)}`;
-        opts.onWarn?.(`[s1cap] upkeep scoring failed for a new ${segments.length}-segment batch: ${String(err)}`);
-      } finally {
-        scoringInFlight -= 1;
-      }
+      // **Upkeep no longer scores, and that is the design rather than a saving on top of it.** It used to call
+      // `scoreNew` here, once per event, which is what made scoring *eager*: every segment was scored against its
+      // window as it arrived, oldest-first, whatever any walk would later need - and on a lane that settles pairs
+      // slower than the session produces them (round `20261004-1239`: 15.1 pairs/s against 70.1/s) the segments a
+      // step actually recalls from were the last to be offered, which is why 19 of that round's 26 assemblies
+      // found nothing. Demoting this call - keeping it for the anchor only, say - would leave the lane's throughput
+      // where it was and the saving would be a fraction of the volume; removing it is what makes the scoring
+      // demand-driven. The ingestion above is deliberately *not* removed: a segment belongs to the session from the
+      // moment it arrives, and the step's walk asks the graph for rows of segments, so the queue is still the lane
+      // that keeps the graph's node set current - off the step's critical path, which is what it is for.
       stats.upkeepEvents += 1;
       stats.upkeepSegments += segments.length;
-      stats.upkeepScoredPairs += scored.scoredPairs;
-      stats.upkeepJudgedPairs += scored.judgedPairs;
-      // Pairs the backend was too busy to be asked about. Counted apart from `upkeepScoredPairs` rather than inside
-      // it: they were never offered to a scorer, so a coverage ratio computed over them would be a ratio over work
-      // the run declined to do. This is the counter that makes "we stopped asking" visible next to "it answered
-      // little", which are otherwise the same two numbers on a `/s1` panel.
-      stats.upkeepDeferredPairs += scored.deferredPairs;
       // The graph changed here and nowhere else on this path, so this is the point to make it survive. Written
       // per upkeep event rather than per step: a step only reads.
       persistGraph(sessionId);
@@ -748,11 +958,28 @@ export function createStepObserver(opts                     )               {
           // The anchor id is computed inside `observeStep` and the queue that drains scoring lives here, so the wait
           // has to travel back out as a callback. It is called after the anchor is chosen and before `assemble()`,
           // and it never throws: a wait that gave up is reported and the fail-open rule covers the rest.
-          beforeAssemble: (anchorId        ) => waitForAnchorRow(writeProbe, step, sessionId, anchorId),
+          //
+          // **The wrapper is not decoration.** `observeStep` contains this call in a silent `catch` (`a throw here
+          // is a caller bug`), which is right for the step and wrong for this mechanism: a walk that threw on the
+          // way in - a claim path, a scorer lookup, a bad option - would look exactly like a step that assembled
+          // from an empty graph, and the tape would say nothing at all. Every exit now leaves a line, the failure
+          // included.
+          beforeAssemble: async (anchorId        ) => {
+            try {
+              await waitForAnchorRow(writeProbe, step, sessionId, anchorId);
+            } catch (err) {
+              stats.errors += 1;
+              stats.lastError = `anchor wait: ${String(err)}`;
+              writeProbe({ schema: 0, kind: 'anchor-wait', step, anchor: anchorId, error: String(err) });
+            }
+          },
           // One slot for the whole observer, so T survives between steps. It is created here rather than inside
           // observeStep because that function is pure: a per-call cache would rebuild T every step, and T's
           // stability across steps is the property the whole block placement rests on.
           proxyCache,
+          // The recalled block's order for this session, mutated in place by the assembly below. Per session for
+          // the reason `recallOrders` above states: it is a list of ids and carries no session of its own.
+          recallOrder: recallOrderFor(sessionId),
         });
         seq += messages.length;
         // The step added its own segments to the graph even though it did not score them, so this is a change

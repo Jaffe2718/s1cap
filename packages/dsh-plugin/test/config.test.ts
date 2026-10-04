@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,6 +8,10 @@ import { DEFAULT_TELEMETRY, apply, readTuningFile, resolvePluginConfig } from '.
 import type { PluginContext } from '../src/index.ts';
 import { parseTuning, parseTuningArgs } from '../src/credentials.ts';
 import { commandPayload, commandKind, commandText } from './command-contract.ts';
+// The cell policy is the authority for every governance number asserted below. Imported from source rather than
+// restated, because this file used to assert `admissionLimit === 8` as a literal and silently became a test of a
+// number the build no longer used when the policy moved to 2 on 2026-10-05.
+import { cellPolicy } from '../../core/src/types.ts';
 
 interface Harness {
   ctx: PluginContext;
@@ -59,7 +63,7 @@ async function withEmptyHomeAsync<T>(body: () => Promise<T>): Promise<T> {
 }
 
 test('the reader picks up every field the writer can store, Laya included', () => {
-  // The gap this closes was invisible from the outside and identical in shape to the xFirst one: the panel wrote
+  // The gap this closes was invisible from the outside and identical in shape to the layout-key one: the panel wrote
   // an interpreter path, the route echoed it back out of the in-memory copy, and the session still started with
   // `provider=none` and "fill in the interpreter path in the settings panel" — a file that existed, was readable,
   // and was not being read. Testing the parser alone would never have found it; the reader is the half that broke.
@@ -72,7 +76,7 @@ test('the reader picks up every field the writer can store, Laya included', () =
         depth: 4,
         relevanceThreshold: 0.4,
         window: 1600,
-        xFirst: false,
+        tracePlacement: 'trace-append',
         layaPythonPath: 'D:\\conda_store\\envs\\ml\\python.exe',
         layaWeightsCacheDir: 'D:/hf-cache',
         layaWeightsEnvVar: 'HF_HOME',
@@ -86,7 +90,8 @@ test('the reader picks up every field the writer can store, Laya included', () =
   assert.equal(stored.depth, 4);
   assert.equal(stored.relevanceThreshold, 0.4);
   assert.equal(stored.window, 1600);
-  assert.equal(stored.xFirst, false, 'false is a value, not an absence');
+  assert.equal(stored.tracePlacement, 'trace-append', 'a stored arm is a value, not an absence');
+  assert.equal('questionPlacement' in stored, false, 'and the deleted question axis is not a field of the reader');
   assert.equal(stored.layaPythonPath, 'D:\\conda_store\\envs\\ml\\python.exe');
   assert.equal(stored.layaWeightsCacheDir, 'D:/hf-cache');
   assert.equal(stored.layaWeightsEnvVar, 'HF_HOME');
@@ -95,6 +100,46 @@ test('the reader picks up every field the writer can store, Laya included', () =
   // choice, the radio shows it, and the next start comes up on the profile's provider instead.
   assert.equal(stored.provider, 'laya-serve');
 
+  // **A file written before 2026-10-05 still carries the question's old slot, and the two values are treated
+  // differently on purpose.** `xFirst: false` meant "the question last", which is now simply the only order this
+  // build lays out: it is read, reported (`notes`) and otherwise ignored. `xFirst: true` meant the question *first*
+  // — `[T, q, x]` — which no setting produces any more, so it is refused (`refused`, with the sentence that retired
+  // it) and nothing is applied. Neither is silent, which is the property this block exists to pin: a stored layout
+  // setting that resolves to nothing is this project's most-repeated failure.
+  const legacy = withEmptyHome(() => {
+    const dir = join(process.env['DSH_HOME'] as string, '.s1cap');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'tuning.json'), JSON.stringify({ depth: 3, xFirst: false }), 'utf8');
+    return readTuningFile();
+  });
+  assert.equal(legacy.depth, 3, 'the knobs beside it still load');
+  assert.equal(legacy.tracePlacement, undefined, 'and the arm was not stored, so the default stands');
+  assert.equal(legacy.refused, undefined, 'the question-last spelling is not a refusal');
+  assert.equal(legacy.notes?.length, 1, 'it is a retirement note');
+  assert.match(legacy.notes?.[0] ?? '', /xFirst: false/, 'which names the spelling that was read');
+  assert.match(legacy.notes?.[0] ?? '', /end of every input/, 'and the paper sentence behind the retirement');
+
+  const refused = withEmptyHome(() => {
+    const dir = join(process.env['DSH_HOME'] as string, '.s1cap');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'tuning.json'), JSON.stringify({ xFirst: true }), 'utf8');
+    return readTuningFile();
+  });
+  assert.equal(refused.refused?.length, 1, 'the question-first spelling is refused');
+  assert.equal(refused.notes, undefined, 'and is not also noted as harmless');
+  assert.match(refused.refused?.[0]?.message ?? '', /xFirst: true/, 'the refusal names the key and the value');
+  assert.match(refused.refused?.[0]?.message ?? '', /\[T, q, x\]/, 'and the layout it asked for');
+  assert.match(refused.refused?.[0]?.message ?? '', /end of every input/, 'and the paper sentence');
+
+  // The same two outcomes for the spelling the rename introduced, which lived for one day.
+  const renamed = withEmptyHome(() => {
+    const dir = join(process.env['DSH_HOME'] as string, '.s1cap');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'tuning.json'), JSON.stringify({ questionPlacement: 'first' }), 'utf8');
+    return readTuningFile();
+  });
+  assert.match(renamed.refused?.[0]?.message ?? '', /questionPlacement: "first"/, 'named as it was stored');
+
   // The same validators the command line uses, so a hand-edited file cannot smuggle in a value the Save button
   // would have refused: an unusable entry is dropped and the default stands.
   const partial = withEmptyHome(() => {
@@ -102,7 +147,7 @@ test('the reader picks up every field the writer can store, Laya included', () =
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, 'tuning.json'),
-      JSON.stringify({ layaPythonPath: 'python', layaWeightsEnvVar: 42, depth: 0, provider: 'openai' }),
+      JSON.stringify({ layaPythonPath: 'python', layaWeightsEnvVar: 42, depth: 0, provider: 'openai', tracePlacement: 'append' }),
       'utf8',
     );
     return readTuningFile();
@@ -111,27 +156,54 @@ test('the reader picks up every field the writer can store, Laya included', () =
   assert.equal(partial.layaWeightsEnvVar, undefined, 'a number is not a variable name');
   assert.equal(partial.depth, undefined, 'and the numeric rules still hold');
   assert.equal(partial.provider, undefined, 'and a provider no policy allows is dropped rather than guessed at');
+  assert.equal(partial.tracePlacement, undefined, 'and an arm outside the paper\'s two is dropped, not clamped');
 });
 
-test('the layout switch survives both wire formats, and a typo never flips a layout', () => {
-  // The credential string is the four-field form the host writes; the command line is what a human types.
-  assert.equal(parseTuning('2 0.55 1024 on').xFirst, true);
-  assert.equal(parseTuning('2 0.55 1024 off').xFirst, false);
-  assert.equal(parseTuning('2 0.55 1024 1').xFirst, true);
-  assert.equal(parseTuning('2 0.55 1024 0').xFirst, false);
-  assert.equal(parseTuning('2 0.55 1024').xFirst, undefined, 'absent means: leave the policy default alone');
+test('the arm survives both wire formats, and the retired question spellings are refused or noted', () => {
+  // The credential string is the four-field form the host writes (`d r w <question>`); the command line is what a
+  // human types. The paper's arm is keyed (`trace=`), because it has no legacy positional slot: it did not exist
+  // when the four-token form was defined.
+  //
+  // **The question's own token is no longer a setting either way.** It is read so that an older saved command line
+  // is never silently reinterpreted, and what it asks for decides the outcome: `last`/`off` asks for what every
+  // layout does (`notes`), `first`/`on` asks for `[T, q, x]`, which no setting produces (`refused`, with the paper
+  // sentence). The parser no longer returns a question value at all, because there is no field to return it for.
+  assert.equal('questionPlacement' in parseTuning('2 0.55 1024 last'), false);
+  assert.equal(parseTuning('2 0.55 1024 last').notes?.length, 1, 'the question-last spelling is noted');
+  assert.equal(parseTuning('2 0.55 1024').notes, undefined, 'absent means: nothing was written and nothing to say');
+  assert.equal(parseTuning('2 0.55 1024 first').refused?.length, 1, 'and the question-first spelling is refused');
+  assert.match(parseTuning('2 0.55 1024 first').refused?.[0]?.message ?? '', /end of every input/);
+  // The old boolean spellings are read through core's own table for *which* of the two they mean, so an older write
+  // keeps its meaning: `on` was "question first" (now unproducible) and `off` was "question last" (now the only
+  // layout). A misspelling is dropped: `first` and `frist` are one transposition apart, and guessing here would
+  // refuse a save nobody asked to refuse.
+  assert.equal(parseTuning('2 0.55 1024 on').refused?.length, 1, 'the legacy question-first spelling is refused');
+  assert.equal(parseTuning('2 0.55 1024 off').notes?.length, 1, 'the legacy question-last spelling is noted');
+  assert.equal(parseTuning('2 0.55 1024 1').refused?.length, 1);
+  assert.equal(parseTuning('2 0.55 1024 0').notes?.length, 1);
+  assert.equal(parseTuning('2 0.55 1024 frist').refused, undefined, 'a typo is dropped, not refused');
+  assert.equal(parseTuning('2 0.55 1024 frist').notes, undefined);
 
-  // A misspelling must be dropped rather than guessed at. `off` and `on` are one character apart, so a guess
-  // here would silently reorder the prompt, which is the one thing an ablation must never do by accident.
-  assert.equal(parseTuning('2 0.55 1024 of').xFirst, undefined);
-  assert.equal(parseTuning('2 0.55 1024 maybe').xFirst, undefined);
-
-  assert.equal(parseTuningArgs('xFirst=on').xFirst, true);
-  assert.equal(parseTuningArgs('xf=off').xFirst, false);
-  assert.equal(parseTuningArgs('3 0.7 512 off').xFirst, false, 'fourth positional is the switch');
-  assert.equal(parseTuningArgs('xFirst=perhaps').xFirst, undefined);
-  // A dropped switch must not take the other three fields down with it.
-  assert.deepEqual(parseTuningArgs('3 0.7 512 of'), { depth: 3, relevanceThreshold: 0.7, window: 512 });
+  assert.equal(parseTuningArgs('q=first').refused?.length, 1);
+  assert.equal(parseTuningArgs('q=first').refused?.[0]?.key, 'q=first', 'the refusal names the spelling');
+  assert.equal(parseTuningArgs('q=last').notes?.length, 1);
+  assert.equal(parseTuningArgs('questionPlacement=first').refused?.length, 1, 'the newer name is the same request');
+  assert.equal(parseTuningArgs('3 0.7 512 last').notes?.length, 1, 'fourth positional is the question slot');
+  assert.equal(parseTuningArgs('xFirst=on').refused?.length, 1, 'the old key is read, and refused for its meaning');
+  assert.equal(parseTuningArgs('xf=off').notes?.length, 1);
+  assert.equal(parseTuningArgs('q=perhaps').refused, undefined, 'and a value the slot never had is still dropped');
+  // The arm, under the paper's names and only those: `state`/`append` are not values of `TracePlacement`, and a
+  // parser that accepted them would let a round record an arm the policy validator would reject.
+  assert.equal(parseTuningArgs('trace=trace-append').tracePlacement, 'trace-append');
+  assert.equal(parseTuningArgs('tracePlacement=trace-as-state').tracePlacement, 'trace-as-state');
+  assert.equal(parseTuningArgs('trace=append').tracePlacement, undefined, 'the mechanism word is not an arm name');
+  assert.equal(parseTuningArgs('trace=after-context').tracePlacement, undefined, 'nor is the retired value');
+  // A dropped token must not take the other three fields down with it - and a *refused* one travels beside them
+  // rather than replacing them, so the host can name the other fields it would have applied.
+  assert.deepEqual(parseTuningArgs('3 0.7 512 frist'), { depth: 3, relevanceThreshold: 0.7, window: 512 });
+  const withRefusal = parseTuningArgs('d=3 xFirst=on');
+  assert.equal(withRefusal.depth, 3, 'the knobs are still parsed');
+  assert.equal(withRefusal.refused?.length, 1, 'and the refusal rides with them');
 });
 
 function harness(): Harness {
@@ -515,10 +587,24 @@ test('the wiring record makes a demoted lane distinguishable from a cell with no
   // F4: the governance block, resolved.
   const g = wiring['governance'] as Record<string, unknown>;
   assert.ok(g, 'the wiring record must state the governance that ran');
-  assert.equal(g['admissionLimit'], 8, 'C2 policy default admission limit');
-  assert.equal(g['maxPairsPerSweep'], 2048, 'the per-sweep pair budget, which was a literal in a call');
-  assert.deepEqual(g['breaker'], { maxInFlight: 8, openAfterRefusals: 5, windowMs: 15_000, cooldownMs: 15_000 },
-    'the breaker thresholds actually in force, defaults included');
+  assert.equal(g['admissionLimit'], cellPolicy('C2').s1.admissionLimit,
+    'the limit the C2 policy resolves to, read from the policy rather than restated, so a policy change cannot leave '
+      + 'this test asserting a number the build no longer uses');
+  assert.equal(g['scoring'], 'on-demand',
+    'how the association lane was driven: the per-sweep pair budget that used to sit here bounded a burst the '
+      + 'eager sweep could produce, and on-demand scoring cannot');
+  assert.equal('maxPairsPerSweep' in g, false,
+    'the removed knob is not recorded as if it governed this run');
+  assert.deepEqual(g['breaker'], {
+    // Wired straight from the admission limit (`packages/dsh-plugin/src/index.ts`, `maxInFlight:
+    // config.s1.admissionLimit`), which is why this is read from the policy: before 2026-10-05 the literal `8` here
+    // and the literal `8` above were the same number asserted twice, so moving the limit left this test passing
+    // against a breaker the build no longer built.
+    maxInFlight: cellPolicy('C2').s1.admissionLimit,
+    openAfterRefusals: 5,
+    windowMs: 15_000,
+    cooldownMs: 15_000,
+  }, 'the breaker thresholds actually in force, defaults included');
   assert.equal(g['contextWindow'], 128_000);
   assert.equal(g['reserveOutputTokens'], 8_000);
   const recall = g['recall'] as Record<string, number>;
@@ -547,6 +633,22 @@ test('the wiring record says which cells deliver, and which recall tier they res
   const record = (raw: Record<string, unknown>): Record<string, unknown> => {
     const h = harness();
     const tape = withEmptyHome(() => {
+      // Stage the cell preset the way a round does: `setup.mjs` copies `bench/cells/<cell>.json` to
+      // `<DSH_HOME>/.s1cap/cell-preset.json`, and `readCellPresetFile()` reads it there.
+      //
+      // **Without this the assertions below would be about the defaults, not about the cells.** `deliver` moved out
+      // of `cellPolicy()` and into the preset on 2026-10-05 (see `packages/core/src/types.ts`), so a home with no
+      // preset is a cell with no configuration — and C1/C2 would read `deliver: false`, which is what this test
+      // caught when the move landed. The preset is part of what a cell *is* now, so a test about the wiring record
+      // has to stage it.
+      const cell = String(raw['cell'] ?? 'C2');
+      const home = process.env['DSH_HOME'] as string;
+      mkdirSync(join(home, '.s1cap'), { recursive: true });
+      writeFileSync(
+        join(home, '.s1cap', 'cell-preset.json'),
+        readFileSync(new URL(`../../../bench/cells/${cell}.json`, import.meta.url), 'utf8'),
+        'utf8',
+      );
       apply(h.ctx, { enabled: true, observation: 'tape', ...raw });
       return readFileSync(join(process.env['DSH_HOME'] as string, '.s1cap', 'tape.jsonl'), 'utf8');
     });
@@ -564,22 +666,59 @@ test('the wiring record says which cells deliver, and which recall tier they res
   assert.equal((c0['recall'] as Record<string, unknown>)['tier1'], 'off', 'and it selects nothing');
 
   const c1 = record({ cell: 'C1', s1: { provider: 'none' }, laya: layaIdle });
-  assert.equal(c1['deliver'], false, 'C1 does not deliver either: with tier1 off its block is always empty');
-  assert.equal((c1['recall'] as Record<string, unknown>)['tier1'], 'off');
+  // C1 delivers now: with `tier1: off` its recall selects nothing, but `tas.on: true` means the state proxy
+  // alone is a complete delivery, so the channel carries the paper's trace and nothing else.
+  assert.equal(c1['deliver'], true, 'C1 delivers the state proxy alone: with tier1 off the recalled block is empty by construction, but T is not');
+  assert.equal((c1['recall'] as Record<string, unknown>)['tier1'], 'off', 'and it selects no turns');
 
   const c2 = record({ cell: 'C2', s1: { provider: 'none' }, laya: layaIdle });
-  assert.equal(c2['deliver'], true, 'C2 is the only delivering cell');
+  assert.equal(c2['deliver'], true, 'C2 delivers: the state proxy ahead of the turns S1 selected');
   assert.equal((c2['recall'] as Record<string, unknown>)['tier1'], 's1', 'and the tier it runs is the System-1 one');
 
-  // The three readings together are what `verify-wiring.mjs` can now assert: `false, false, true`.
+  // The three readings together are what `verify-wiring.mjs` can now assert: `false, true, true`.
   assert.deepEqual(
     [c0['deliver'], c1['deliver'], c2['deliver']],
-    [false, false, true],
-    'the delivery arm of the ablation, stated by the run rather than by the recipe',
+    [false, true, true],
+    'the delivery arm of the ablation: C0 nothing, C1 the trace alone, C2 the trace plus the recall',
   );
   assert.ok(
-    'deliver' in c2 && 'xFirst' in c2,
-    'and it sits beside the layout field, so the two axes of the ablation are read from one place',
+    'deliver' in c2 && 'tracePlacement' in c2,
+    'and it sits beside the layout field, so the delivery arm and the layout arm are read from one place',
+  );
+  // **The tape's layout keys changed on 2026-10-05, twice.** The key was `xFirst: boolean`, which moved the question
+  // while reading like the paper's variable; it was renamed to `questionPlacement`, and then deleted, because the
+  // paper fixes the question last in every condition and a field that can only ever say `'last'` is not a setting.
+  // `tracePlacement` now names which of the paper's two conditions the cell lays out, and `layoutOrder` on every
+  // assembly says where the question is — last — in the layout's own words. A round compared against one recorded
+  // before this date has to compare the new key *and* read the order, because the old key is gone from both sides.
+  for (const [name, cellRecord] of [['C0', c0], ['C1', c1], ['C2', c2]] as const) {
+    assert.equal(cellRecord['tracePlacement'], 'trace-as-state', `${name}: the record names the arm, not a mechanism`);
+    assert.equal('questionPlacement' in cellRecord, false, `${name}: no record states a question position`);
+    assert.equal('xFirst' in cellRecord, false, `${name}: and the imprecise key is long gone`);
+  }
+  // A layout the profile overrides is recorded as what ran, so the round can be read back without its profile.
+  const overridden = record({ cell: 'C2', s1: { provider: 'none' }, laya: layaIdle, tracePlacement: 'trace-append' });
+  assert.equal(overridden['tracePlacement'], 'trace-append', 'the control arm is recordable too');
+  assert.equal('questionPlacement' in overridden, false, 'and moving the trace does not state a question position');
+
+  // `assemblyTrigger` is on the same record for the same reason, and it is a *different* question from `deliver`:
+  // `deliver` says whose assembled view reaches the model, this says which steps were assembled at all. Round
+  // `20261003-2104` is why the second question needed an answer in the artifacts - 33 model calls, 2 assemblies,
+  // and nothing in the record said the lane had skipped 31 steps by design. Every cell must state the value it
+  // ran: a round that flips this switch moves one variable, so a profile or preset that moved it silently would
+  // confound that round, and this assertion is where the flip would show up first in the suite.
+  //
+  // The value is `every-step` since 2026-10-04. `'claimed-only'` assembled on 2 of C2's 53 steps in round
+  // `20261004-0205`, leaving the model's own self-directed input without recall - see `defaultPolicy`.
+  assert.deepEqual(
+    [c0['assemblyTrigger'], c1['assemblyTrigger'], c2['assemblyTrigger']],
+    ['every-step', 'every-step', 'every-step'],
+    'all three cells assemble on every model-requesting step: the narrow value is a per-round switch, not a preset',
+  );
+  assert.equal(
+    record({ cell: 'C2', s1: { provider: 'none' }, laya: layaIdle, assemblyTrigger: 'every-step' })['assemblyTrigger'],
+    'every-step',
+    'and the record carries whatever the profile resolved, so the round that flips it can be read back',
   );
 });
 
@@ -704,30 +843,163 @@ test('activation can never throw: a hostile context leaves the plugin inert and 
   assert.doesNotThrow(() => apply(brokenLogger, { enabled: true }));
 });
 
-test('a stored xFirst=false reaches the config: the write, the read and the apply agree', () => {
-  // This is the test whose absence cost a live debugging round. `parseTuning` handling `off` was verified, the
-  // route echoed `xFirst: false` back, the file on disk held `false` - and the layout still ran on its default,
-  // because the reader between the file and the config never looked at the field at all. Asserting the parser
-  // alone could not see that, so this drives the real path: write the file, activate, read the config.
+test('a stored layout setting reaches the config: the write, the read and the apply agree', () => {
+  // This is the test whose absence cost a live debugging round. The parser handling the value was verified, the
+  // route echoed it back, the file on disk held it - and the layout still ran on its default, because the reader
+  // between the file and the config never looked at the field at all. Asserting the parser alone could not see
+  // that, so this drives the real path: write the file, activate, read the config.
+  //
+  // **The subject is the arm only since 2026-10-05.** It used to drive `questionPlacement: 'first'` as well, and a
+  // rename that stops reading a stored setting is the defect this test was written for one rename later — but the
+  // field behind the question is *deleted* rather than renamed, so what the reader owes a file that still carries it
+  // is the refusal the test below pins, not an application.
   withEmptyHome(() => {
     const home = process.env['DSH_HOME'];
     assert.ok(home !== undefined);
     const file = join(home, '.s1cap', 'tuning.json');
     mkdirSync(join(home, '.s1cap'), { recursive: true });
-    writeFileSync(file, JSON.stringify({ depth: 5, relevanceThreshold: 0.7, window: 1600, xFirst: false }), 'utf8');
+    writeFileSync(
+      file,
+      JSON.stringify({ depth: 5, relevanceThreshold: 0.7, window: 1600, tracePlacement: 'trace-append' }),
+      'utf8',
+    );
 
     const h = harness();
     apply(h.ctx, { enabled: true, s1: { provider: 'none' } });
 
     const status = JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
-      xFirst?: boolean;
+      tracePlacement?: string;
+      questionPlacement?: string;
       recall?: { depth?: number; window?: number };
-      tuning?: { effective?: { xFirst?: boolean } };
+      tuning?: { effective?: { tracePlacement?: string; questionPlacement?: string } };
     };
     // The status command reports the live config object the observer holds, so this is the value assembly sees.
-    assert.equal(status.xFirst, false, 'a stored false must override the default true');
+    assert.equal(status.tracePlacement, 'trace-append', 'a stored arm must override the default');
+    assert.equal('questionPlacement' in status, false, 'and no stored question position is reported, because none exists');
     assert.equal(status.recall?.depth, 5, 'and the numeric knobs still arrive alongside it');
     assert.equal(status.recall?.window, 1600);
-    assert.equal(status.tuning?.effective?.xFirst, false, 'and the route reports the same value it applied');
+    assert.equal(status.tuning?.effective?.tracePlacement, 'trace-append', 'and the route reports the same value it applied');
+    assert.equal('questionPlacement' in (status.tuning?.effective ?? {}), false);
+  });
+});
+
+test('a stored layout is reported by /s1, so a round can read back the arm it actually ran', () => {
+  // The read-back half of the test above. `/s1` is the surface a reader asks "which of the paper's two conditions
+  // is this session running", and the field has to be there *and* agree with what was applied: a status route
+  // that reported the default while the assembler laid out the override would be the same defect as a stored key
+  // nobody reads, one layer further out. The question's position is not reported because it is not a setting: every
+  // assembly's `layoutOrder` ends in `anchor`, and that is where the fact lives.
+  //
+  // **What this test does not assert, and why.** No deviation line is logged for this field when the tuning file is
+  // read at activation: `primeOnce` compares the live config against a `cellBefore` snapshot taken *after* the
+  // activation-time read has already applied the file, so the two agree and the comparison is silent. That is
+  // pre-existing behaviour on this path — the provider deviation is logged from a different block, and the panel
+  // route's `applyTuning` does warn — it is not something this change introduced, and it is reported rather than
+  // fixed here because "which values reached the config" is what this test is for and changing when the warning
+  // fires would change what a round's log says.
+  const payload = withEmptyHome(() => {
+    const home = process.env['DSH_HOME'];
+    assert.ok(home !== undefined);
+    mkdirSync(join(home, '.s1cap'), { recursive: true });
+    writeFileSync(join(home, '.s1cap', 'tuning.json'), JSON.stringify({ tracePlacement: 'trace-append' }), 'utf8');
+    const h = harness();
+    // `laya.enabled: false`: the subject is the layout read-back, and a Laya block that tried to spawn would make
+    // this test depend on a python interpreter being present on the machine running the suite.
+    apply(h.ctx, { enabled: true, s1: { provider: 'none' }, laya: { enabled: false } });
+    return JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
+      tracePlacement?: string;
+      questionPlacement?: string;
+      tuning?: { effective?: { tracePlacement?: string; questionPlacement?: string } };
+    };
+  });
+  assert.equal(payload.tracePlacement, 'trace-append', '/s1 names the arm the session is running');
+  assert.equal('questionPlacement' in payload, false, 'and does not report a question position');
+  assert.equal(payload.tuning?.effective?.tracePlacement, 'trace-append', 'the panel route agrees with it');
+  assert.equal('questionPlacement' in (payload.tuning?.effective ?? {}), false);
+});
+
+test('a stored question-first setting is refused loudly and never applied; the question-last one is noted', () => {
+  // The legacy key, through the same full path: stored by an older panel, read by this build, and **refused**.
+  // `xFirst: true` (and `questionPlacement: 'first'`) asked for `[T, q, x]` — the question in front of the long
+  // context — which no setting produces any more, so applying the rest of the file while saying nothing would leave
+  // a researcher with a stored layout the build does not have and a session quietly running another one. The
+  // refusal is an `error` line naming the key, the value and the paper sentence, and the status payload carries it
+  // as well, so a reader of `/s1` sees what the file asked for.
+  withEmptyHome(() => {
+    const home = process.env['DSH_HOME'];
+    assert.ok(home !== undefined);
+    mkdirSync(join(home, '.s1cap'), { recursive: true });
+    writeFileSync(join(home, '.s1cap', 'tuning.json'), JSON.stringify({ xFirst: true }), 'utf8');
+
+    const h = harness();
+    apply(h.ctx, { enabled: true, s1: { provider: 'none' }, laya: { enabled: false } });
+    const status = JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
+      questionPlacement?: string;
+      tuning?: { stored?: { refused?: { key?: string; message?: string }[]; notes?: string[] } };
+    };
+    assert.equal('questionPlacement' in status, false, 'the old key does not set a field, because there is none');
+    assert.equal(status.tuning?.stored?.refused?.length, 1, 'and the file is reported as refused rather than applied');
+    assert.match(status.tuning?.stored?.refused?.[0]?.message ?? '', /xFirst: true/, 'the refusal names the spelling');
+    assert.match(status.tuning?.stored?.refused?.[0]?.message ?? '', /end of every input/, 'and the paper sentence');
+  });
+
+  // The harness's logger in this suite has `info` and `warn` only, so the loud channel is asserted through the
+  // status payload above; this half pins the *harmless* value end to end: `xFirst: false` is read, noted, and the
+  // session runs.
+  withEmptyHome(() => {
+    const home = process.env['DSH_HOME'];
+    assert.ok(home !== undefined);
+    mkdirSync(join(home, '.s1cap'), { recursive: true });
+    writeFileSync(join(home, '.s1cap', 'tuning.json'), JSON.stringify({ depth: 6, xFirst: false }), 'utf8');
+
+    const h = harness();
+    apply(h.ctx, { enabled: true, s1: { provider: 'none' }, laya: { enabled: false } });
+    const status = JSON.parse(JSON.stringify(commandPayload(h.commands.get('s1')?.({})) ?? {})) as {
+      recall?: { depth?: number };
+      tuning?: { stored?: { refused?: unknown[]; notes?: string[] } };
+    };
+    assert.equal(status.recall?.depth, 6, 'the rest of the file still applies');
+    assert.equal(status.tuning?.stored?.refused, undefined, 'a question-last spelling is not a refusal');
+    assert.equal(status.tuning?.stored?.notes?.length, 1, 'it is a note, so the file is not read in silence');
+  });
+});
+
+test('a legacy question spelling on the command line is refused or noted, and a refused save writes nothing', () => {
+  // The wire half of the deletion, driven through the surface a researcher actually uses: `/s1-tune`, whose handler
+  // calls the same `applyTuning` the panel's PUT route does. `xFirst=on` and its spellings asked for the question in
+  // front of the long context — `[T, q, x]` — and the field behind them is deleted, so the save is **refused**, with
+  // the sentence that retired it, rather than coerced into a layout nobody asked for. `xFirst=off` and its spellings
+  // asked for the question last, which is every condition of the paper: accepted, noted, and changing nothing.
+  const h = harness();
+  withEmptyHome(() => {
+    const home = process.env['DSH_HOME'] as string;
+    apply(h.ctx, { enabled: true, s1: { provider: 'none' }, laya: { enabled: false } });
+
+    for (const raw of ['xFirst=on', 'xf=on', 'q=first', 'questionPlacement=first', '3 0.7 512 on']) {
+      const refused = h.commands.get('s1-tune')?.({ rawInput: raw });
+      assert.equal(commandKind(refused), 'error', `${raw} must be refused, got ${commandText(refused)}`);
+      const text = commandText(refused);
+      assert.match(text, /no setting here produces it/, `${raw}: the message says the layout is not producible`);
+      assert.match(text, /\[T, q, x\]/, `${raw}: and names the order it asked for`);
+      assert.match(text, /end of every input/, `${raw}: and quotes the paper sentence that retired it`);
+      assert.match(text, /trace/, `${raw}: and names the axis that exists instead`);
+    }
+    // Nothing was persisted for any of them: a refusal that still wrote a file would leave the next start reading a
+    // layout the save said it would not apply.
+    assert.equal(existsSync(join(home, '.s1cap', 'tuning.json')), false, 'a refused save writes no file');
+
+    for (const raw of ['xFirst=off', 'xf=off', 'q=last']) {
+      const accepted = h.commands.get('s1-tune')?.({ rawInput: `${raw} d=3` });
+      assert.equal(commandKind(accepted), 'success', `${raw} asks for what every layout does: ${commandText(accepted)}`);
+      assert.match(commandText(accepted), /retired/, `${raw}: the answer says the setting is retired`);
+      assert.match(commandText(accepted), /end of every input/, `${raw}: and quotes the paper sentence`);
+      assert.match(commandText(accepted), /d=3|depth=3/, `${raw}: while the knobs beside it were applied`);
+    }
+    // And what was written is settings only: the readings never reach the file the next launch parses.
+    const stored = JSON.parse(readFileSync(join(home, '.s1cap', 'tuning.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(stored['depth'], 3);
+    assert.equal('notes' in stored, false, 'the retirement note is a reading, not a setting');
+    assert.equal('refused' in stored, false);
+    assert.equal('questionPlacement' in stored, false, 'and the deleted axis is not in the file at all');
   });
 });

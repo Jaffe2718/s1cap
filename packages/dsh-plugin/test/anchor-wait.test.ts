@@ -1,6 +1,12 @@
 /**
- * The bounded anchor wait (`recall.anchorWaitMs`): a step waits for the newest `user` segment's own scoring row,
- * and only for that row.
+ * The bounded anchor wait (`recall.anchorWaitMs`): a step waits for the anchor's own scoring row, and only for
+ * that row.
+ *
+ * "The anchor" is the step's newest **input event** — the `user` question on a turn-opening step, and the model's
+ * own message, tool call or tool result on every step after it (`packages/core/src/observer.ts`, `isInputEvent`).
+ * It used to read "the newest `user` segment", which stops advancing after the first step of a turn and is the
+ * defect round `20261004-0233` measured; the fixtures below are the agent-loop shape, so the anchor they wait on
+ * is a segment the model produced.
  *
  * Why this needs its own file. Scoring runs asynchronously in the upkeep queue, off the step's critical path, and a
  * measured System-1 relevance call takes a median of 15.3 s against the local backend. A step can therefore reach
@@ -159,15 +165,18 @@ test('wait=0 disables the wait entirely', async () => {
  * The fixture the three seeded tests share, and the constraints that shaped it - none of which were obvious, and all
  * of which cost a rejected attempt:
  *
- *   - `unjudgedWithin` only looks *backwards* from the anchor, so a user turn at index 0 of the graph has nothing to
+ *   - `unjudgedWithin` only looks *backwards* from the anchor, so a segment at index 0 of the graph has nothing to
  *     wait for however long the wait is set to. The anchor needs a predecessor.
  *   - `scoreNew` walks the graph in order and scores each segment against the segments *before* it, so a segment that
  *     is already in the graph and has not been processed keeps a row that a later pass may or may not fill. Seeding
  *     the graph through `rgStore` is what puts such a segment there.
- *   - the anchor is the newest `user` segment of the graph's order, so a payload that adds a *new* user message moves
- *     the anchor onto that message and the wait is then about its row, not the seeded turn's. This fixture therefore
- *     carries the seeded turn itself, which is the live shape: the conversation is already in the graph, the step
- *     re-carries the task, and the anchor's row is what may or may not be scored when assembly asks for it.
+ *   - the anchor is the newest **input event** of the graph's order, so a payload that adds a newer event moves the
+ *     anchor onto it and the wait is then about *that* segment's row. This fixture's graph ends on `r1` - the model's
+ *     own reasoning message, which is what an agent loop's newest event usually is - so the anchor is `r1` and the
+ *     pairs the wait may not have rows for are the two in front of it (`sys`, `u1`). The fixture used to end on `u1`
+ *     and report one pair; the count moved with the anchor, which is the fix rather than a change of subject. The
+ *     live shape is the same either way: the conversation is already in the graph, the step re-carries its tail, and
+ *     the anchor's row is what may or may not be scored when assembly asks for it.
  *
  * An earlier version of this comment explained the fixture through the index-space bug: the anchor was
  * `window[payloadAnchor]`, so the payload had to be a suffix of the graph or the walk rooted on the wrong segment.
@@ -187,9 +196,9 @@ function seededGraph(): AssociationGraph {
 /**
  * The seeded conversation's own tail, so the anchor lands on a segment that has a predecessor.
  *
- * The payload's own last user turn and the graph's newest one are the same segment here, which is the normal case and
- * the one the wait is about: `u1` has `sys` in front of it inside the window, so there is a pair whose row the backend
- * may not have written yet.
+ * The payload re-carries the turns the graph already holds, which is the normal case and the one the wait is about:
+ * `u1` has `sys` in front of it inside the window, and the graph's newest input event `r1` has both of them, so there
+ * are pairs whose rows the backend may not have written yet.
  */
 const SEEDED_TAIL = [
   { id: 'r1', role: 'assistant', content: [{ type: 'reasoning', text: 'the comparison is off by one' }] },
@@ -232,7 +241,7 @@ test('a wait that reaches its deadline proceeds, and reports the remainder exact
   assert.equal(giveUps.length, 1, `exactly one diagnostic, not one per poll: ${JSON.stringify(h.warns)}`);
   assert.match(
     giveUps[0] ?? '',
-    /anchor wait gave up after 1000ms \(2 drain\(s\)\): 1 pair\(s\) inside the window still unjudged/,
+    /anchor wait gave up after 1000ms \(2 drain\(s\)\): 2 pair\(s\) inside the window still unjudged/,
   );
   const lines = h.probes.filter((p) => p.kind === 'anchor-wait');
   assert.equal(lines.length, 1, 'one probe line for the whole wait');
@@ -242,10 +251,16 @@ test('a wait that reaches its deadline proceeds, and reports the remainder exact
     step: 1,
     ms: 1_000,
     polls: 2,
-    unknown: 1,
+    unknown: 2,
     waited: true,
     gaveUp: true,
     outcome: 'gave-up',
+    // **The one stale assertion in this file, and it is stale rather than wrong.** The line gained `started` with
+    // the anchor priority: this fixture supplies a batch scorer (the stalled one), so the wait *did* start a sweep
+    // that named the anchor - and the sweep is still in flight, which is exactly why the row never landed. Before
+    // that change the wait could only drain a queue that this fixture leaves empty of scoring work, so "it waited
+    // and lost" was the whole of what the line could say.
+    started: true,
   });
 });
 
@@ -278,16 +293,20 @@ test('an idle queue with nothing in flight is not waited on, and the fail-open p
       step: 1,
       ms: 10_000,
       polls: 0,
-      unknown: 1,
+      unknown: 2,
       waited: false,
       gaveUp: true,
       outcome: 'not-started',
+      // Stale, not wrong: the line gained `started` with the anchor priority. This fixture supplies no batch scorer
+      // at all - that is what makes the stand-down correct - so no sweep was started, and `started: false` is the
+      // reading that says the wait could not have caused the row even if it had waited.
+      started: false,
     },
   ]);
   const standDowns = h.warns.filter((w) => w.includes('anchor wait not started'));
   assert.equal(standDowns.length, 1, `the remainder is still reported, and as what it is: ${JSON.stringify(h.warns)}`);
   assert.match(standDowns[0] ?? '', /nothing queued and no scoring call in flight/);
-  assert.match(standDowns[0] ?? '', /fail-open rule admits its 1 pair\(s\)/);
+  assert.match(standDowns[0] ?? '', /fail-open rule admits its 2 pair\(s\)/);
   assert.equal(
     h.warns.filter((w) => w.includes('anchor wait gave up')).length,
     0,
@@ -316,7 +335,7 @@ test('a row the lexical fallback wrote is not a complete row: the wait still rep
   assert.deepEqual(h.slept, [], 'nothing is running that could judge the row, so no sleep is spent');
   const standDowns = h.warns.filter((w) => w.includes('anchor wait not started'));
   assert.equal(standDowns.length, 1, `a fallback row leaves the pair unjudged: ${JSON.stringify(h.warns)}`);
-  assert.match(standDowns[0] ?? '', /1 pair\(s\)/);
+  assert.match(standDowns[0] ?? '', /2 pair\(s\)/);
   assert.deepEqual(
     h.probes.filter((p) => p.kind === 'anchor-wait'),
     [
@@ -326,10 +345,14 @@ test('a row the lexical fallback wrote is not a complete row: the wait still rep
         step: 1,
         ms: 10_000,
         polls: 0,
-        unknown: 1,
+        unknown: 2,
         waited: false,
         gaveUp: true,
         outcome: 'not-started',
+        // Stale, like the one above: no batch scorer in this fixture, so nothing was started. The rule this test
+        // states is unchanged - a lexical row is not a judgement - and it is now also why the wait does not start a
+        // sweep here: a sweep without a backend can only write lexical rows, which `unjudgedWithin` disbelieves.
+        started: false,
       },
     ],
     'and the count the fail-open rule will admit is reported, with the path it took',
@@ -351,10 +374,11 @@ test('a row the lexical fallback wrote is not a complete row: the wait still rep
  * follows it in the same tick, and a unit fixture cannot put it there - the drain is synchronous, so the only thing
  * that can complete the row during it is a Graph scorer that already has the answer, and the row it writes is
  * lexical (which `unjudgedWithin` is written to disbelieve). What can be pinned is the record: it is a pure
- * function of the outcome and four numbers, so the three branches are asserted directly.
+ * function of the outcome and five numbers, so the branches are asserted directly. (It was four numbers until the
+ * anchor priority added `started`; the two `gave-up` readings below are why that field earns its place.)
  */
 test('all three anchor-wait outcomes are written, with the step, and only two of them give up', () => {
-  const completed = anchorWaitLine('completed', 4, 10_000, 2, 0);
+  const completed = anchorWaitLine('completed', 4, 10_000, 2, 0, true);
   assert.deepEqual(
     completed.line,
     {
@@ -367,26 +391,38 @@ test('all three anchor-wait outcomes are written, with the step, and only two of
       waited: true,
       gaveUp: false,
       outcome: 'completed',
+      started: true,
     },
     'the success carries the step number and the poll count, and admits nothing unjudged',
   );
   assert.match(completed.message, /anchor wait completed after 10000ms \(2 drain\(s\)\)/);
   assert.match(completed.message, /the fail-open rule admits nothing on this step/);
+  assert.match(completed.message, /the wait named the anchor to a sweep of its own/, 'and says whose sweep did it');
 
-  const gaveUp = anchorWaitLine('gave-up', 5, 10_000, 201, 3);
+  const gaveUp = anchorWaitLine('gave-up', 5, 10_000, 201, 3, true);
   assert.equal(gaveUp.line['waited'], true, 'a wait that ran out of time did wait');
   assert.equal(gaveUp.line['gaveUp'], true);
   assert.equal(gaveUp.line['outcome'], 'gave-up');
   assert.equal(gaveUp.line['step'], 5);
+  assert.equal(gaveUp.line['started'], true, 'and it had named the anchor to a sweep that had not answered');
   assert.match(gaveUp.message, /anchor wait gave up after 10000ms \(201 drain\(s\)\): 3 pair\(s\)/);
+  assert.match(gaveUp.message, /had not answered by the deadline/);
 
-  const notStarted = anchorWaitLine('not-started', 6, 10_000, 0, 2);
+  const notStarted = anchorWaitLine('not-started', 6, 10_000, 0, 2, false);
   assert.equal(notStarted.line['waited'], false, 'the stand-down never polled, which is what `waited` says');
   assert.equal(notStarted.line['gaveUp'], true, 'and it still gives up on the row: the pairs are admitted unjudged');
   assert.equal(notStarted.line['outcome'], 'not-started');
   assert.equal(notStarted.line['step'], 6);
+  assert.equal(notStarted.line['started'], false, 'nothing was started: with no backend, a sweep could only lie');
   assert.match(notStarted.message, /anchor wait not started/);
   assert.match(notStarted.message, /fail-open rule admits its 2 pair\(s\)/);
+
+  // `started` is orthogonal to the outcome, and the two readings it separates are the ones the priority exists for:
+  // a wait that only drained somebody else's sweep and one that named the anchor itself. The first is what round
+  // `20261004-1239` did 18 times; the second is what makes the row happen.
+  const joinedOnly = anchorWaitLine('gave-up', 7, 10_000, 160, 54, false);
+  assert.equal(joinedOnly.line['outcome'], gaveUp.line['outcome'], 'same outcome');
+  assert.notEqual(joinedOnly.line['started'], gaveUp.line['started'], 'different reading');
 
   // The three are distinguishable from each other, which is the whole point: the pre-fix line carried neither
   // `outcome` nor `step`, and a stand-down was written identically to a completed wait with no polls.

@@ -131,8 +131,37 @@ test('the control-plane record carries the frozen schema and the full C0/C2 cont
   assert.equal(c2.event.schema, TELEMETRY_SCHEMA_VERSION);
   assert.equal(c2.event.seq, BASE.seq);
   assert.deepEqual(Object.keys(c2.event.blocks).sort(), ['anchor', 'pinned', 'recalled', 'stateProxy', 'tail']);
-  assert.ok(c2.event.budgetUsed <= c2.event.budgetTotal);
+  // The accounting identity, not `budgetUsed <= budgetTotal`. That inequality held *because* the removed
+  // `recall.budgetRatio` cap dropped candidates that did not fit the allowance; selection is decided by `r` and `d`
+  // now, so `budgetUsed` may legitimately exceed `budgetTotal` (see `AssemblyResult.budget` and
+  // `AssemblyEvent.budgetUsed`). What is worth pinning is that the recorded number agrees with the blocks it is
+  // made of, which is what a reader of a round recomputes.
+  assert.equal(
+    c2.event.budgetUsed,
+    Object.values(c2.event.blocks).reduce((sum, tokens) => sum + tokens, 0),
+    'budgetUsed is the size of the assembled view: every block, the recalled one included',
+  );
+  assert.ok(c2.event.budgetTotal > 0, 'and the window budget it is measured against is on the record');
   assert.equal(c2.event.prefixTokensStable, c2.event.blocks['pinned'], 'the cache-stable prefix is the pinned block');
+  // The arm rides on every assembly record, because "which of the paper's conditions ran" has to be answerable from
+  // the round's own artifacts. This field replaced a boolean `xFirst` on 2026-10-05: that one recorded *where a
+  // block went* and was read as though it named the arm, which is how every cell came to record a layout the paper
+  // does not have. `layoutOrder` is asserted beside it so the pair is checked against the order it describes rather
+  // than on its own.
+  //
+  // **The field that once sat beside it (`questionPlacement`) is gone, and its absence is asserted rather than
+  // ignored.** It recorded where the question sits, and the question is the last block of every layout now — the
+  // paper fixes it there in every condition — so a field that carried one value forever would be a knob in the
+  // record that no round can vary. A tape written before 2026-10-05 still carries it, and `layoutOrder` beside it
+  // says the same thing in the layout's own words.
+  assert.equal(c2.event.tracePlacement, 'trace-as-state', 'the default arm is the paper\'s method');
+  assert.equal('questionPlacement' in c2.event, false, 'and no record states a question position any more');
+  assert.deepEqual(
+    c2.event.layoutOrder,
+    ['pinned', 'stateProxy', 'tail', 'recalled', 'anchor'],
+    'the recorded order is what the arm describes and where the question is: M([T, x, q])',
+  );
+  assert.equal(c2.event.layoutOrder.at(-1), 'anchor', 'the question is last, in the record as in the layout');
 
   // C0 is the baseline cell: no System-1 selection at all, so nothing is recalled.
   const c0Policy = cellPolicy('C0');
@@ -142,8 +171,13 @@ test('the control-plane record carries the frozen schema and the full C0/C2 cont
   assert.deepEqual(c0.selectedIds, []);
   assert.equal(c0.event.candidates, 0);
 
-  // C2 still respects the budget it is given.
-  assert.ok(c2.event.budgetUsed <= c2.event.budgetTotal);
+  // C2's block is what the selection found, and this fixture is small enough that the whole view fits the window:
+  // the point of the assertion is that the record's two budget numbers are internally consistent, not that a cap
+  // kept them in that order (the cap is gone - see the identity above).
+  assert.equal(
+    c2.event.budgetUsed,
+    Object.values(c2.event.blocks).reduce((sum, tokens) => sum + tokens, 0),
+  );
   assert.ok(c2.wouldSaveTokens >= 0);
 });
 
@@ -158,13 +192,14 @@ test('the graph accumulates across steps, so a later step can recall an earlier 
   assert.ok(second.segments.length === MESSAGES.length);
 });
 
-test('the tail block holds the newest turns, including the output produced after the anchor', async () => {
-  // This is the shape the graph window actually has in a live session: the anchor is the last *user* segment,
-  // and everything the model did for this task (its own message, the tool call, the tool result) sits after it
-  // in the append-only log. An earlier version sliced the window at the anchor, so the pool was the *history*
-  // and `tail` was empty in every real record - the k most recent verbatim turns were never in the prompt.
-  // Exercised through the graph-window path (empty payload) because that is what production takes: `pre-step`
-  // hands over an empty array after the first step.
+test('the tail block holds the newest turns of the pool, and never the anchor', async () => {
+  // This is the shape the graph window actually has in a live session: the step's newest turn is at the end of the
+  // append-only log and everything else is in front of it. An earlier version sliced the window *at* the anchor, so
+  // the pool was the history and `tail` was empty in every real record - the k most recent verbatim turns were never
+  // in the prompt. The filter that replaced it (`observer.ts`, `pool`) is what this exercises, and it is written
+  // against the anchor rather than against a position: every segment except the anchor, the anchor's sibling chunks
+  // and the pinned prefix is in the pool, whatever the anchor is. Exercised through the graph-window path (empty
+  // payload) because that is what production takes: `pre-step` hands over an empty array after the first step.
   const policy = cellPolicy('C2');
   policy.tail.k = 3;
   const graph = new AssociationGraph();
@@ -177,7 +212,7 @@ test('the tail block holds the newest turns, including the output produced after
   assert.equal(obs.kind, 'assembled');
   if (obs.kind !== 'assembled') return;
 
-  // The anchor is the last user message; the assistant and tool segments that follow it are what the tail is for.
+  // The anchor is `u2`, the newest input event this window has; the turns in front of it are what the tail is for.
   assert.ok(obs.event.blocks['tail'] !== undefined);
   assert.ok(
     obs.event.blocks['tail']! > 0,
@@ -251,7 +286,7 @@ test('a delivered block is never ingested, never recalled, and never in the toke
  */
 test('the assembly record carries the recall walk as a nested tree of ids', async () => {
   const policy = cellPolicy('C2');
-  policy.tail.k = 1; // a2 is a tail turn, so it cannot also be a recalled one - it is still in the tree
+  policy.tail.k = 1; // a1 is a tail turn, so it cannot also be a recalled one - it is still in the tree
   const graph = new AssociationGraph();
   const at = BASE.now;
   const s = (id: string, seq: number, kind: 'user' | 'assistant', text: string) => ({
@@ -263,9 +298,16 @@ test('the assembly record carries the recall walk as a nested tree of ids', asyn
     tokens: 5,
     text,
   });
+  // **Appended `a2, a1, u1`, and the direction rule is why.** The walk is `u1 -> a1 -> a2` and every expansion is
+  // a step *back* in the append order, so `a2` has to be the oldest segment and `u1` - the anchor, which is the
+  // step's newest input event - the newest. The fixture used to append `a1, a2, u1` and reached `a2` from `a1` by
+  // walking forward in time. Which segment the tail takes is unaffected: `tail.k = 1` and the tail is the last of
+  // the pool in append order, so it is still `a1`, and `a1` is still a hit the walk reached (at depth 1) that the
+  // tail exclusion then drops from the block. That is the property this test pins: the tree documents what the
+  // selector found, not what the layout kept.
   graph.addSegments([
-    s('a1', 1, 'assistant', 'the token check is at line 88 of auth.ts'),
-    s('a2', 2, 'assistant', 'the expiry comparison looks off by one second'),
+    s('a2', 1, 'assistant', 'the expiry comparison looks off by one second'),
+    s('a1', 2, 'assistant', 'the token check is at line 88 of auth.ts'),
     s('u1', 3, 'user', 'fix the expiry path too'),
   ]);
   const link = (from: string, to: string, w: number) =>
@@ -278,11 +320,11 @@ test('the assembly record carries the recall walk as a nested tree of ids', asyn
   assert.equal(obs.kind, 'assembled');
   if (obs.kind !== 'assembled') return;
 
-  assert.equal(obs.layout.anchor.id, 'u1', 'the anchor is the last user segment, and the root of the tree');
+  assert.equal(obs.layout.anchor.id, 'u1', 'the anchor is the newest input event here (u1), and the root of the tree');
   assert.deepEqual(obs.event.recallTree, { u1: { a1: { a2: {} } } });
-  // The tree records what the selector found; the block records what the budget delivered. a2 is in the tail and
-  // therefore not in `recalled`, and dropping it from the tree for that reason would misreport the walk.
-  assert.deepEqual(obs.layout.recalled.map((seg) => seg.id), ['a1']);
+  // The tree records what the selector found; the block records what the selection then placed. a1 is in the tail
+  // and therefore not in `recalled`, and dropping it from the tree for that reason would misreport the walk.
+  assert.deepEqual(obs.layout.recalled.map((seg) => seg.id), ['a2']);
   assert.equal(obs.event.selected, 1);
   assert.deepEqual(Object.keys(obs.event.recallTree ?? {}), ['u1'], 'keys are ids, at the root and below');
   // The record is written as JSON, and `undefined` would vanish from the line: round-tripping is the check that
@@ -319,7 +361,7 @@ test('a step whose recall found nothing records recallTree as {}, not as a missi
 // --- the anchor: which segment the walk is rooted on ---
 
 /**
- * The anchor is the newest `user` segment *of the graph's window*, and this is the test that fails without it.
+ * The anchor is resolved *in the graph's window*, and this is the test that fails without that.
  *
  * The defect it pins, measured on a real three-cell round: `anchor` was a position in the payload's segment list
  * and it was used to index the graph's append-ordered array (`window[anchor]`). The two index spaces only agree
@@ -327,6 +369,10 @@ test('a step whose recall found nothing records recallTree as {}, not as a missi
  * current question after its own first segment - so 273 of 277 invocations rooted the walk on
  * `34b2115f-…-#3`: the tail chunk of turn 1's `AGENTS.md` block. Every record looked healthy, and the tree was a
  * faithful account of a walk from the wrong question.
+ *
+ * What the window resolves *to* is a separate rule with its own test (F6, below): the newest input event. In this
+ * fixture that is `u2`, the question this step carries, which is also what the rule it replaced would have picked -
+ * so this test pins the index space and not the predicate, and the two cannot be confused for each other.
  *
  * The fixture is the live shape and nothing more: the earlier turn is already in the graph, and the step carries
  * the current question plus the `AGENTS.md` chunks that sit in front of it. The payload's last user turn is at
@@ -437,7 +483,8 @@ test('observeStep offers the anchor id to beforeAssemble, and only after the anc
     },
   });
 
-  // The anchor is the newest `user` segment: u2 is last in MESSAGES and 'also check the expiry path' is the task.
+  // The anchor is the newest input event, which in MESSAGES is u2: 'also check the expiry path' is the task, and it
+  // is the last thing the step carries.
   assert.deepEqual(seen, ['u2']);
   assert.equal(observation.kind, 'assembled');
   if (observation.kind !== 'assembled') return;
@@ -558,10 +605,10 @@ test('the assembly record carries the fail-open admission count, and omits it wh
   // not look like a step whose admission count was dropped. `{}` vs absent is the convention `recallTree` uses.
   //
   // Two constraints shape the fixture, and both cost a rejected attempt. The recallable turn is an *assistant*
-  // segment: the anchor is the newest `user` segment, so a second user message sits behind it and can never be
-  // recalled at all. And it must not be inside the verbatim tail: `tail.k` takes the last three segments of the
-  // pool and the assembler excludes them, so a history turn with three short turns after it is the one that is
-  // left for the walk - with fewer, everything in front of the anchor is "recent" and `selected` is 0.
+  // segment rather than a second user message, so nothing here depends on where the question sits. And it must not
+  // be inside the verbatim tail: `tail.k` takes the last three segments of the pool and the assembler excludes
+  // them, so a history turn with three short turns after it is the one that is left for the walk - with fewer,
+  // everything in front of the anchor is "recent" and `selected` is 0.
   const judgedGraph = new AssociationGraph();
   const judged = await observeStep({
     ...BASE,
@@ -595,14 +642,16 @@ test('the assembly record carries the fail-open admission count, and omits it wh
 /**
  * F5: with the corrected seed, x is one *chunk* of the question.
  *
- * The seed is now the newest `user` segment in the graph window, which is right as a root - and a long user message
- * is split into chunks that share a `chunkOf` parent (`segmenter.ts`), so that newest segment is the *last chunk* of
- * the question. Nothing excluded its siblings: they sat in `tail` or in `history`, the assembler's `excluded` set was
- * built from pinned/tail/anchor only, and the sibling guard only stops two chunks of one parent being selected
- * together - the anchor's own parent is never in `selectedParents`, because the anchor is not selected by the walk.
- * So a chunk of the *current* question could be selected and delivered as "an earlier user turn, quoted verbatim",
- * which is both false and redundant. Measured in round `20261002-2037`: both deliveries quote the task prompt, and
- * the delivered body is its middle chunk.
+ * The seed is the newest input event in the graph window (`observer.ts`, `isInputEvent`) - the question itself at a
+ * turn-opening step, which is the case here - and a long user message is split into chunks that share a `chunkOf`
+ * parent (`segmenter.ts`), so that newest segment is the *last chunk* of the question. Nothing excluded its
+ * siblings: they sat in `tail` or in `history`, the assembler's `excluded` set was built from pinned/tail/anchor
+ * only, and the sibling guard only stops two chunks of one parent being selected together - the anchor's own parent
+ * is never in `selectedParents`, because the anchor is not selected by the walk. So a chunk of the *current*
+ * question could be selected and delivered as "an earlier user turn, quoted verbatim", which is both false and
+ * redundant. Measured in round `20261002-2037`: both deliveries quote the task prompt, and the delivered body is
+ * its middle chunk. The exclusion is written on the anchor's parent (`chunkOf ?? id`), so it now covers the model's
+ * own message, tool call or tool result as well, which is the anchor on every step after the turn's first.
  */
 test('a chunk of the current question is never recalled as history', async () => {
   const policy = cellPolicy('C2');
@@ -687,3 +736,182 @@ test('a chunk of the current question is never recalled as history', async () =>
     `the turns that are genuine history are still placed: ${JSON.stringify(inLayout.map((s) => s.id))}`,
   );
 });
+
+// ------------------------------------------------------- the anchor: the newest input event (F6)
+
+/**
+ * The anchor is the step's newest **input event**, not its newest `user` segment.
+ *
+ * The rule the walk is seeded from was "the newest `user` segment in the graph window", which is a
+ * chat-transcript rule: it holds while a session alternates one user turn with one model turn, and it stops
+ * advancing the moment the loop takes more than one step per turn. The model's own messages arrive as
+ * `assistant` (or `trace`), its tool invocations as `toolCall`, their results as `toolResult`, and none of those is
+ * a `user` segment — so from the turn's second step on, the newest `user` segment stays the turn's opening
+ * question for the rest of the turn and every step re-seeds the walk from it.
+ *
+ * Measured in round `20261004-0233`, cell C2, from that round's own control plane
+ * (`evidence/C2/control.jsonl`, 25 assemblies): the `recallTree` root changed once and then stayed
+ * `7b0dd492-…-#3` for the last 20 consecutive assemblies while the step counter climbed from 23 to 116.
+ * `candidates` plateaued at 26-28, `selected` at 20 and `bfsDepth` at 2 — and because the selection never moved,
+ * the delivered payload was byte-identical from step to step, so the payload-id guard refused it and only **11 of
+ * the 25** steps received anything at all. That session logged 25 `trace` and **zero** `assistant` segments (every
+ * model message carried reasoning parts, so the adapter labelled it `trace`) and 14 of its 15 `user` segments were
+ * S1CAP's own deliveries, which ingestion drops — so a rule that admitted only `user`, `assistant` and the tool
+ * kinds would still have frozen on the one genuine `user` segment left.
+ *
+ * The brief's own requirement is the two halves of idea 3: the recall is driven by "the user input *or* the
+ * model's own self-directed input", and idea 2 makes a model output and a tool-call result session events of the
+ * same standing as a user input. This test is that requirement, stepped through an agent loop one event at a
+ * time; `newestUser` is carried beside `anchor` in every row so the two rules can be read against each other in
+ * one output.
+ */
+test('the walk is seeded from the newest input event, and the seed advances through an agent loop', async () => {
+  const policy = cellPolicy('C2');
+  policy.tail.k = 2;
+  const graph = new AssociationGraph();
+  const at = BASE.now;
+  const s = (
+    id: string,
+    seq: number,
+    kind: 'user' | 'assistant' | 'trace' | 'toolCall' | 'toolResult' | 'systemPinned',
+    text: string,
+  ) => ({ id, sessionId: BASE.sessionId, kind, seq, ts: at, tokens: 5, text });
+  const link = (from: string, to: string, w: number) =>
+    graph.upsertEdge({ from, to, w, wTier1: w, source: 's1-noul', verifiedAt: at, provenance: 'test' });
+  /** What the rule this replaces would have anchored on, for the same window: the newest `user` segment. */
+  const newestUserOf = (window: readonly { id: string; kind: string }[]): string => {
+    for (let i = window.length - 1; i >= 0; i -= 1) {
+      const seg = window[i];
+      if (seg !== undefined && seg.kind === 'user') return seg.id;
+    }
+    return '(none)';
+  };
+
+  // Turn 1's remains, already in the graph: whatever the walk is seeded on has to have something to find, or it
+  // returns no hits and the tree is `{}` - which would let the root assertion below pass for the wrong reason.
+  graph.addSegments([
+    s('h1', 1, 'assistant', 'the token check is at line 88 of auth.ts'),
+    s('h2', 2, 'toolResult', 'auth.ts: 120 lines'),
+  ]);
+
+  // One arrival per step, in the order a live agent loop produces them. The payload is empty on every one of
+  // these steps, which is the live shape rather than a convenience: `inbox.claim` hands over the user's question
+  // on the turn's first step and nothing at all on every step after it, while the model's output reaches the
+  // graph through the session-event stream (`docs/STATUS-ARCHIVE.md`, fault 2).
+  const arrivals: [string, 'user' | 'assistant' | 'trace' | 'toolCall' | 'toolResult' | 'systemPinned', string][] = [
+    ['u1', 'user', 'the parser drops the last statement of a script'],
+    ['a1', 'assistant', 'I will trace the splitter.'],
+    ['c1', 'toolCall', 'tool call: read_file\n{"path":"sqlparse/engine/statement_splitter.py"}'],
+    ['t1', 'toolResult', 'statement_splitter.py: 210 lines; the flush is at line 120'],
+    ['r1', 'trace', 'the flush at line 120 keeps the trailing text'],
+    // A pinned prefix arriving late, as the harness's own notices do. It is the newest *segment* in the window and
+    // must still not be the anchor: `systemPinned` is the one kind the brief's rule excludes, because the pinned
+    // prefix is not a session event at all - it precedes everything in the request by construction.
+    ['p1', 'systemPinned', '<system-reminder> Additional instructions from AGENTS.md'],
+    ['q2', 'user', 'also check the expiry path'],
+  ];
+
+  const rows: { anchor: string; newestUser: string; root: string }[] = [];
+  let step = 1;
+  for (const [id, kind, text] of arrivals) {
+    graph.addSegments([s(id, 10 + step, kind, text)]);
+    // One hand-made edge per arrival, from the segment that is supposed to seed this step's walk. This test is
+    // about which segment seeds the walk, not about scoring, so the scorer is taken off the step path below and
+    // the edge is written here.
+    link(id, kind === 'user' ? 'h1' : 'h2', 0.9);
+
+    const obs = await observeStep({ ...BASE, policy, graph, messages: [], step, scoreOnStepPath: false });
+    assert.equal(obs.kind, 'assembled', `step ${step} (${id} arrived) must assemble: ${JSON.stringify(obs)}`);
+    if (obs.kind !== 'assembled') return;
+
+    const anchorId = obs.layout.anchor.id;
+    rows.push({
+      anchor: anchorId,
+      newestUser: newestUserOf(graph.orderedSegments()),
+      root: Object.keys(obs.event.recallTree)[0] ?? '(no hits)',
+    });
+
+    // The current event is never offered back as history: it is the anchor, and neither the recalled block nor the
+    // verbatim tail may quote it to the model as an earlier turn. The assertion is on the resolved anchor rather
+    // than on the arrival, because on the pinned step those are deliberately different segments.
+    assert.ok(!obs.selectedIds.includes(anchorId), `step ${step}: the anchor ${anchorId} is not also a recalled turn`);
+    assert.ok(
+      !obs.layout.tail.some((seg) => seg.id === anchorId),
+      `step ${step}: ${anchorId} is the step's own newest input event, not one of the k most recent turns`,
+    );
+    step += 1;
+  }
+
+  assert.deepEqual(
+    rows.map((r) => r.anchor),
+    ['u1', 'a1', 'c1', 't1', 'r1', 'r1', 'q2'],
+    'the seed is the newest input event at every step: the question, then the model\'s own message, its tool call, ' +
+      'the tool result and its reasoning - and it does not move when a pinned prefix arrives',
+  );
+  assert.deepEqual(
+    rows.map((r) => r.newestUser),
+    ['u1', 'u1', 'u1', 'u1', 'u1', 'u1', 'q2'],
+    'the rule this replaces, over the same six steps: the newest `user` segment, frozen on the turn\'s question ' +
+      'from the second step to the sixth',
+  );
+  assert.deepEqual(
+    rows.map((r) => r.root),
+    rows.map((r) => r.anchor),
+    'and each step\'s walk is rooted on that seed - which is what the delivered payload and the figure read',
+  );
+});
+
+/**
+ * The case the old rule got right, kept so the fix cannot be read as "ignore `user`".
+ *
+ * At a turn-opening step the user's question **is** the newest input event, so the two rules agree and must: the
+ * question is the segment the step's model call ends on, and it is the anchor of the layout as well as the root of
+ * the tree. The assertion is written against both halves of the predicate - the question wins over the pinned
+ * prefix that follows it in the same payload, and it is the root rather than merely the last block.
+ */
+test('a step whose newest event is the user\'s own question is still anchored there', async () => {
+  const policy = cellPolicy('C2');
+  const graph = new AssociationGraph();
+  const at = BASE.now;
+  graph.addSegments([
+    { id: 'h1', sessionId: BASE.sessionId, kind: 'assistant', seq: 1, ts: at, tokens: 5, text: 'turn 1 answer' },
+  ]);
+  // The question's own row, so the walk from it finds something and the tree is a walk rather than `{}`.
+  graph.upsertEdge({
+    from: 'q2',
+    to: 'h1',
+    w: 0.95,
+    wTier1: 0.95,
+    source: 's1-noul',
+    verifiedAt: at,
+    provenance: 'test',
+  });
+
+  const obs = await observeStep({
+    ...BASE,
+    policy,
+    graph,
+    step: 2,
+    scoreOnStepPath: false,
+    // The question arrives in this step's payload, and a rendered system prompt follows it — the newest *segment*
+    // is therefore `systemPinned`, and the anchor still has to be the question.
+    messages: [
+      { id: 'q2', role: 'user', content: [{ type: 'text', text: 'now fix the parser instead' }] },
+      {
+        id: 'sys',
+        role: 'system',
+        content: [{ type: 'text', text: 'You are a coding agent.' }],
+        source: { kind: 'system-prompt' },
+      },
+    ],
+  });
+  assert.equal(obs.kind, 'assembled');
+  if (obs.kind !== 'assembled') return;
+
+  assert.equal(obs.layout.anchor.id, 'q2', 'the user\'s question is the newest input event, and the anchor');
+  assert.equal(obs.layout.anchor.kind, 'user');
+  assert.deepEqual(Object.keys(obs.event.recallTree), ['q2'], 'and the walk is rooted on the question');
+  assert.ok(!obs.selectedIds.includes('q2'), 'the anchor is not also offered back as a recalled earlier turn');
+  assert.ok(!obs.layout.tail.some((seg) => seg.id === 'q2'), 'nor as one of the k most recent turns');
+});
+

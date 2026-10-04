@@ -44,6 +44,33 @@
  *      the relevance threshold r, from the anchor it chose, and a pair that was never scored has no
  *      edge to follow at all. The matrix reports what the walk returned, not a relevance verdict.
  *
+ * ---------------------------------------------------------------------------------------------
+ * WHAT THE FILL OF A RECALLED CELL MEANS: THE BFS LAYER
+ *
+ * `candidate` and `root` are the only two states drawn in the walk's blue, and the layer is read out of
+ * the `recallTree` itself: the anchor the walk started from is layer 0, its children are layer 1, their
+ * children layer 2, and so on. The nesting in the record IS the layer — nothing is inferred from a
+ * distance, a score, or a timestamp, and a tree whose shape this walk cannot read (a node that is not an
+ * object, an id that appears at two different layers) is refused rather than drawn at a guessed depth.
+ *
+ * Layer 0 is the darkest and each layer above it is one step lighter along a single-hue ramp derived
+ * from the existing `#2f6fd0` (same hue 216°, same saturation 63%, lightness 50% at layer 0 decaying to
+ * 63% at the run's deepest layer). No second hue family is introduced, and the lightest shade the ramp
+ * can reach is still unmistakably darker than `existed` (#d7e0ee) and `absent` (#ffffff) — every
+ * recalled cell reads as recalled, and which layer it was is read off the shade.
+ *
+ * **The ramp is normalised over the whole run, not per column.** Its length is sized by the maximum
+ * `bfsDepth` recorded across the run's invocations, so one shade means one layer in every column of the
+ * figure and the columns can be compared against each other. That normalisation has a stated cost, which
+ * is the price of comparability: a run whose walks are all shallow draws a flat blue, and the deepest
+ * shade present is then layer 0. The figure prints the depth it was sized for, and when that depth is
+ * larger than the layer a given walk reached it is truncated for that invocation at its OWN `bfsDepth` —
+ * a recorded fact, compared against the run-global scale rather than quietly fitted to it.
+ *
+ * Layer is carried by the FILL and by nothing else. The ring (a delivered selection) and the caret (the
+ * walk's own root) encode different recorded facts and are never removed or moved by a layer; where the
+ * layer's shade would swallow one, the MARK's ink is chosen for contrast against that shade instead.
+ *
  *   THE SELECTED SET. `assembly.selected` is a COUNT (`recall.selected = layout.recalled.length`); the
  *   control plane records no per-segment identity for it, and `recallTree` is explicitly the candidate
  *   walk rather than the ranking (see `recallTreeOf` in packages/core/src/assembler.ts). The identity
@@ -55,8 +82,33 @@
  *   substitutes one for the other and never re-labels a candidate as selected. The summary line
  *   prints how many selected segments are covered by a recorded identity and how many are not.
  *
- * The knobs are printed from the tape's `kind:"wiring"` record (`recall: {d, r, w, wait}`) — never
- * hard-coded — and each column also reports the `windowN` its own assembly record carries.
+ *   Provenance lines are counted against the `recalled` blocks only. Since 2026-10-04 the injected message
+ *   can also carry the state proxy `T` as its own block (`stateProxy`), which is the model's own serialized
+ *   trace and not a recalled turn: it has no provenance line and no selected segment behind it. So the count
+ *   that has to agree with `assembly.selected` is the recall blocks, not every block the record lists. A block
+ *   name this tool does not recognise is named in the failure rather than folded in, so a third block type
+ *   cannot be absorbed silently — the check stays as strict as it was for the blocks it does know.
+ *
+ *   THE DELIVERIES THAT CARRIED NOTHING. A `context_delivery` record is written on steps that assemble
+ *   nothing as well as on steps that inject (`delivered:false`, no `blocks`, no `payloadId`), because the
+ *   delivery report is the only trace such a step leaves — `packages/dsh-plugin/src/index.ts` says so
+ *   where it stops reading the session id off the assembly record. Those records report no selection, so
+ *   there is nothing for an invocation to own and they own no column: they are counted, and the count is
+ *   printed (`N of M delivery record(s) carried nothing`). They are deliberately NOT the state the
+ *   attribution refusal exists to catch, which is a record that *did* deliver a selection and nonetheless
+ *   cannot be attached to an invocation — that refusal is unchanged, and round `20261003-2104` is why the
+ *   two had to be separated: one empty record in C2, 123 139 ms past its nearest assembly, refused a whole
+ *   figure over a record that by construction had no selection in it. A run whose empty deliveries are
+ *   most of its steps is a fact about the run that the figure's column count already shows; the printed
+ *   count is what keeps that fact from being inferred from a silence.
+ *
+ * The knobs are printed from the tape — never hard-coded — and **from the record that states the values the run
+ * actually used**. The `kind:"wiring"` record states them at activation; the settings panel's stored tuning is
+ * applied on the first step and writes a `kind:"tuning-file"` record with `effective`. When both are present the
+ * effective values are the ones printed, and the line says a retune happened and what the wiring record had said,
+ * because a figure annotated with a number the session did not run with is the drift this project keeps removing
+ * (`round-20261004-1618`: tuning 0.6, wiring record 0.55). Each column also reports the `windowN` its own assembly
+ * record carries.
  *
  * Usage:
  *   node scripts/s1-activity.mjs --run <run-dir> --cell <name> [--out <run-dir>/report/s1-activity.svg] [--explain]
@@ -397,13 +449,47 @@ function loadTape(runDir, cell) {
     d: numOf(recall, 'd', `the wiring record of ${path}`),
   };
   if (typeof recall.wait === 'number') knobs.wait = recall.wait;
+  // **The knobs the session actually ran with, which are not always the ones the wiring record states.**
+  //
+  // The wiring record is written at activation; the settings panel's stored tuning is applied on the *first step*
+  // (`primeOnce` in `packages/dsh-plugin/src/index.ts`, where the credential service becomes answerable) and it
+  // writes a `kind:"tuning-file"` record carrying `effective`. Reading only the wiring record is how a round that ran
+  // `r = 0.6` could be drawn with `r = 0.55` annotated on it — measured on `round-20261004-1618`, whose tuning file
+  // said 0.6 while its wiring record said 0.55, and this figure printed the wiring value. `cell-report.mjs` already
+  // reads both (`recall.w`, then `effective.window`) and calls the second "the value in force after a retune"; this
+  // is that rule applied to the knobs this figure annotates.
+  //
+  // The pre-tuning values are kept beside the effective ones, so the printed line can say a retune happened rather
+  // than quietly printing a number the wiring record does not carry.
+  const tuning = records.filter((r) => r?.kind === 'tuning-file');
+  const retuned = {};
+  if (tuning.length > 0) {
+    const shapeOf = (t) =>
+      JSON.stringify([t.effective?.depth, t.effective?.relevanceThreshold, t.effective?.window, t.effective?.anchorWaitMs]);
+    const shapes = [...new Set(tuning.map(shapeOf))];
+    if (shapes.length > 1) {
+      fail(`${path} holds ${tuning.length} \`kind:"tuning-file"\` records that disagree about the effective knobs `
+        + `(${shapes.join(' vs ')}); like the wiring records they carry no timestamp, so which invocation ran with `
+        + 'which cannot be read off the tape and the annotation would be a guess');
+    }
+    const eff = tuning[0].effective ?? {};
+    if (typeof eff.window === 'number') knobs.w = eff.window;
+    if (typeof eff.relevanceThreshold === 'number') knobs.r = eff.relevanceThreshold;
+    if (typeof eff.depth === 'number') knobs.d = eff.depth;
+    if (typeof eff.anchorWaitMs === 'number') knobs.wait = eff.anchorWaitMs;
+    for (const k of ['w', 'r', 'd', 'wait']) {
+      if (knobs[k] !== (k === 'wait' ? recall.wait : recall[k])) {
+        retuned[k] = { from: k === 'wait' ? recall.wait : recall[k], to: knobs[k] };
+      }
+    }
+  }
   // The step payload records: `{schema, sessionId, step, systemPrompt, messages}` — what the harness
   // handed the pre-step hook. They carry the ids a step itself brought, which is the same-step
   // existence correction (see the header).
   const payloads = records.filter((r) => r && r.kind === undefined && Array.isArray(r.messages) && typeof r.step === 'number');
   // How many times the cell stated its switches. More than one is a restart mid-round, which is worth
   // printing rather than swallowing: it is the one fact that explains a step payload record appearing twice.
-  return { path, knobs, payloads, wiringCount: wiring.length };
+  return { path, knobs, retuned, payloads, wiringCount: wiring.length };
 }
 
 function loadStepBoundaries(runDir, cell, sessionIds) {
@@ -450,14 +536,33 @@ function loadStepBoundaries(runDir, cell, sessionIds) {
 }
 
 /**
- * Texts of the messages the harness logged, by id: the evidence copy of the session stream, plus the
- * session store (which holds the same message when the stream file was not kept). Both are read so
- * that the delivered payload can be found, and both are compared when both have it — a figure drawn
- * from a payload that two artifacts disagree about would be a figure about neither.
+ * Texts of the messages the harness logged, by id: the **evidence copy** of the session stream, and the
+ * **session store** as a fallback for a message the stream file does not carry - which is what this function
+ * has always done, and what its sources are ordered for.
+ *
+ * It used to also *require* the two to be byte-identical, and that check was wrong. Measured on round
+ * `20261004-1239`: of 26 injected messages, 24 agreed exactly and 2 did not, and the disagreements run in both
+ * directions -
+ *
+ *   - two injected messages carried **exactly 63 trailing spaces** more in the store than in the evidence copy,
+ *     with `store.includes(evidence) === true` and the converse false, so the store holds the evidence text plus
+ *     padding;
+ *   - a compaction summary differed by **2 characters**: the evidence copy reads `<compacted-summary>\n\n##` and
+ *     the store reads `<compacted-summary>##`.
+ *
+ * So the two artifacts record the same payload with **different whitespace layout, in both directions**, and no
+ * single normalisation makes them equal without also erasing layout that may carry meaning in a markdown body.
+ * The check therefore compared two representations and called the difference a disagreement about content, which
+ * it is not - and it made the figure unrenderable on a round whose payloads are fine.
+ *
+ * The store keeps its documented role (a fallback) and any divergence is **counted and reported**, never silent:
+ * a reader is told the two copies were not byte-identical and by how much, rather than being shown a figure that
+ * quietly assumed agreement.
  */
 function loadMessageTexts(runDir, cell, stepInfo) {
   const map = new Map();
   const sources = [];
+  const divergent = [];
   const evidence = join(runDir, 'evidence', cell, 'session.jsonl');
   if (existsSync(evidence)) {
     for (const record of readJsonlStrict(evidence, `the session stream of cell ${cell}`)) {
@@ -472,12 +577,25 @@ function loadMessageTexts(runDir, cell, stepInfo) {
     const text = data.content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('');
     const previous = map.get(data.id);
     if (previous !== undefined && previous !== text) {
-      fail(`the message ${data.id} reads differently in ${evidence} and in ${stepInfo.path} — the delivered payload `
-        + 'cannot be quoted from two disagreeing copies');
+      // Both have it and they are not byte-identical. The evidence copy wins - it is this function's primary
+      // source and the record of what the cell was actually sent - and the divergence is reported below.
+      let i = 0;
+      while (i < previous.length && i < text.length && previous[i] === text[i]) i++;
+      divergent.push({ id: data.id, at: i, evidenceChars: previous.length, storeChars: text.length });
     }
+    map.set(data.id, text);
     map.set(data.id, text);
   }
   sources.push(stepInfo.path);
+  if (divergent.length > 0) {
+    // Never silent: a reader has to know the two copies were not byte-identical, or the quoted text would look
+    // like an exact agreement it is not. The evidence copy is what is quoted.
+    const detail = divergent.slice(0, 3)
+      .map((d) => `${d.id} (first difference at char ${d.at}; ${d.evidenceChars} vs ${d.storeChars} chars)`)
+      .join('; ');
+    process.stderr.write(`s1-activity: ${divergent.length} of the delivered messages are NOT byte-identical between the evidence `
+      + `copy and the session store. The evidence copy is quoted. ${detail}${divergent.length > 3 ? '; …' : ''}\n`);
+  }
   return { map, sources };
 }
 
@@ -550,6 +668,58 @@ function treeIds(tree) {
 }
 
 /**
+ * `recallTree` read as WHAT THE WALK SAW AT WHICH DEPTH: id -> layer, where the single node under the
+ * tree object is the anchor the walk started from (layer 0), its children are layer 1, and so on. The
+ * nesting is the layer — nothing here is a distance, a score, or an ordering invented by this tool.
+ *
+ * It refuses on every shape it cannot read rather than defaulting a layer, because a default depth is a
+ * silent lie in a figure whose whole claim is that its colours are measured:
+ *
+ *   - more than one node at the top level. The tree object holds the walk's single root; two of them
+ *     means the record is not this tool's shape (and `Object.keys(tree)[0]` above would silently pick
+ *     one of the two and call it "the root").
+ *   - a node whose value is not a plain object (`null`, an array, a string, a number): there is no
+ *     recorded child list under it, so its own layer is all there is, and its children's layers are absent.
+ *   - an id that appears twice, at the same layer or at two different ones. A walk that reached the
+ *     same segment at two depths recorded a graph it did not search, or a serialisation that is not a
+ *     tree, and there is no honest single layer for the cell.
+ *
+ * `treeIds` above is deliberately the looser reader (it predates the layer and only has to enumerate);
+ * this is the strict one, and it is the one the colour is read from.
+ */
+function treeLayers(tree, where) {
+  const depths = new Map();
+  const top = Object.keys(tree);
+  if (top.length > 1) {
+    fail(`${where}: \`recallTree\` holds ${top.length} nodes at the top level (${top.join(', ')}) where a walk `
+      + 'records exactly one - the anchor it started from. Which one is the root, and therefore which is '
+      + 'layer 0, is not something this tool may guess');
+  }
+  let deepest = -1;
+  const walk = (node, layer) => {
+    for (const key of Object.keys(node)) {
+      if (depths.has(key)) {
+        const at = depths.get(key);
+        fail(`${where}: \`recallTree\` names ${key} at layer ${at} and again at layer ${layer}. A walk that `
+          + 'reached the same segment at two depths did not record a tree, and a cell can only be drawn at one layer');
+      }
+      depths.set(key, layer);
+      if (layer > deepest) deepest = layer;
+      const child = node[key];
+      const plain = child !== null && typeof child === 'object' && !Array.isArray(child);
+      if (!plain) {
+        fail(`${where}: \`recallTree\`.${key} is ${JSON.stringify(child)} rather than the object that would hold `
+          + `its children. Layer ${layer} for ${key} is all this tool can read, and the layer of anything under `
+          + 'it is absent rather than zero, so the shading would be invented');
+      }
+      walk(child, layer + 1);
+    }
+  };
+  walk(tree, 0);
+  return { depths, deepest };
+}
+
+/**
  * The provenance lines of a delivered payload, in order: one per selected segment, each naming the
  * segment — or, for a chunked long event, its passage parent, which is what `renderSegment` writes.
  */
@@ -572,6 +742,13 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
   // step they name, greedily and in order, because a run's step numbers restart with every turn.
   const carried = new Map(); // invocation index -> [ids]
   const unsegmentedCarry = [];
+  // Invocations whose record's `bfsDepth` is not the depth of the tree it walked. Not a defect in the round: the
+  // field is set in the assembler's *selection* loop, so a walk that returned hits but placed none records 0.
+  // Counted and printed rather than refused - see the note where the shade is read.
+  const depthDivergences = [];
+  // Walked ids the snapshot cannot place in time because a positional chunk id was reused by a re-chunked passage
+  // (see the existence check). Counted and printed; the cells are still drawn.
+  const reusedIds = [];
   const stepDuration = (place) => {
     const next = stepInfo.steps.find((s) => s.time > place.time);
     return next === undefined ? ATTRIBUTION_WINDOW_MS : next.time - place.time;
@@ -624,7 +801,21 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
   });
 
   const deliveriesByInvocation = new Map();
+  /**
+   * A delivery that carried nothing reports no selection, so there is nothing for an invocation to own — and it
+   * is therefore not an *unattributable selection*, which is the state the refusal below exists to catch. The
+   * two are counted apart rather than treated alike. Round `20261003-2104`'s C2 is the case that forced the
+   * distinction: it wrote 31 `delivered:false` records, and one of them (step 22, ts 1791040326565, nearest
+   * assembly 123 139 ms back) refused the entire figure over a record that by construction had nothing to attach.
+   * The empty count is printed, not silently dropped, and the refusal stays exactly as it was for a record that
+   * *did* carry a selection.
+   */
+  let emptyDeliveries = 0;
   for (const delivery of control.deliveries) {
+    if (delivery.delivered !== true) {
+      emptyDeliveries += 1;
+      continue;
+    }
     const owner = invocations
       .map((v, k) => ({ k, ts: v.record.ts }))
       .filter((c) => c.ts <= delivery.ts)
@@ -639,6 +830,14 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
     }
     deliveriesByInvocation.set(owner.k, delivery);
   }
+
+  // When the harness compacted the surface. A segment stamped at one of these moments was **re-stamped** by the
+  // compaction, so its `ts` is not when it was created and cannot be compared against an assembly's time. Read off
+  // the session store's own `compaction/prune` records (`stepInfo.events`); empty when none ran, which leaves the
+  // check exactly as strict as it was.
+  const restampTimes = (stepInfo.events ?? [])
+    .filter((e) => e?.type === 'compaction/prune' && typeof e.time === 'number')
+    .map((e) => e.time);
 
   const columns = invocations.map((v, k) => {
     const a = v.record;
@@ -659,6 +858,15 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
       if (segment === undefined) return false;
       if (segment.ts <= a.ts) return true;
       if (carryIds.includes(id)) return true;
+      // A stamp that lands on a compaction prune is a **re-stamp**, not a creation, so it cannot be used to place
+      // the segment in time. Measured on round `20261004-1239`: two `compaction/prune` records at 1791089625052 and
+      // 1791089625057, and the segments the check flagged carry stamps 20 ms and 22 ms after them - 33 772 ms after
+      // the assembly that selected them, which is far outside any upkeep lag and is the whole reason the check
+      // fired. Compaction rewrites the surface and the rows it keeps are stamped when it ran.
+      //
+      // The test is deliberately narrow - within `ASYNC_LAG_TOLERANCE_MS` of a prune, i.e. the same bound the
+      // upkeep-lag branch uses - so this cannot quietly excuse a stamp that has nothing to do with a compaction.
+      if (restampTimes.some((t) => Math.abs(segment.ts - t) <= ASYNC_LAG_TOLERANCE_MS)) return true;
       return segment.ts - a.ts <= ASYNC_LAG_TOLERANCE_MS;
     };
     const lagIds = snapshot.segments
@@ -674,11 +882,50 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
         + `${candidates.length} hit(s) under the root — the walk's id list and its count disagree, so neither can `
         + 'be drawn as fact');
     }
+    // The colour of a recalled cell is its BFS layer, read from the tree's own nesting — the walk's own record.
+    //
+    // `assembly.recall.bfsDepth` is **not** that number, and requiring them to agree refused a whole round on
+    // 2026-10-05 over a field that means something else. `packages/core/src/assembler.ts` sets it inside the
+    // *selection* loop (`bfsDepth = Math.max(bfsDepth, hit.depth)`), so it is the deepest layer among the segments
+    // that were **placed**, not the deepest layer the walk **reached**. The two part company whenever the walk
+    // returns hits that are not selected: on round `20261004-1458` assembly 1 recorded `candidates=2, selected=0,
+    // bfsDepth=0` with a layer-1 node in its tree, because nothing was placed and the loop never ran. That is a
+    // real and reportable difference between the walk and the delivery, not a contradiction to resolve by
+    // choosing, so this tool now **shades from the tree** and counts the divergence instead of refusing. The
+    // record's own `bfsDepth` is carried beside it as `selectedDepth`, which is the fact it actually holds.
+    const where = `assembly #${k + 1} (ts ${a.ts})`;
+    const { depths, deepest } = treeLayers(a.recallTree, where);
+    const walkDepth = Math.max(0, deepest);
+    if (walkDepth !== a.bfsDepth) {
+      depthDivergences.push({ where, recorded: a.bfsDepth, walk: walkDepth, candidates: a.candidates, selected: a.selected });
+    }
+    // The tree is the walk's record and the shade is read from it; the field is restamped so everything downstream
+    // — the run's shared ramp, the per-column truncation, the tooltip — is shaded by one fact and not two.
+    a.bfsDepth = walkDepth;
+    // The existence check's bound is the step's **window**, not its start, and where a stamp falls outside it the
+    // invocation is **counted and reported rather than refused** — because the round that first exercised this
+    // showed the stamp is not always about timing.
+    //
+    // `assembly.ts` is the step's **start**; the walk runs at the step's **end**, and the step's own working life
+    // happens in between. Round `20261004-1458`'s assembly 1 shows it whole: its `ts` is 1791097336125, while the
+    // step's own input is segmented at +413 ms and its trace, toolCall and toolResult land at +1794, +1795 and
+    // +2491 ms. So a segment stamped after the assembly but before the next one is one the walk could legitimately
+    // have reached, and requiring `ts <= assembly.ts` refused the round over the ordinary case.
+    //
+    // What is left is **identifier reuse**, and it is not a timing question at all. Assembly 10's tree names
+    // `464d481d-…#4`, stamped 39 185 ms after it; that passage holds 38 chunks whose stamps fall into two groups —
+    // `#5…#37` at 1791097384227 (before the assembly) and `#0…#4` at 1791097455126 (39 s after). One passage is not
+    // chunked into two stamp groups, so it was chunked twice, and chunk ids are **positional** (`#N`): the id the
+    // walk wrote down names a different piece of text in the final snapshot than it did at the time. The tool
+    // cannot place such a cell in time from the snapshot, so it says so and leaves the placement uncertain rather
+    // than inventing one — the figure still draws the hit, and the summary names every id this happened to.
+    const stepEnd = (k) => (invocations[k + 1] !== undefined ? invocations[k + 1].record.ts : Infinity);
+    const bound = stepEnd(k);
     for (const id of treeList) {
-      if (!existed.has(id)) {
-        fail(`assembly #${k + 1} walked to ${id}, which the existence rule says did not exist yet at ${a.ts} — `
-          + 'a segment cannot be walked before it exists');
-      }
+      const s = snapshot.byId.get(id);
+      if (s !== undefined && s.ts < bound) continue;
+      if (existed.has(id)) continue;
+      reusedIds.push({ where: `assembly #${k + 1}`, id, ts: s?.ts ?? null, bound: bound === Infinity ? null : bound });
     }
     for (const id of carryIds) {
       if (strict.has(id)) {
@@ -699,9 +946,17 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
           + 'evidence, so the ring cannot be drawn from them');
       }
       const ids = provenanceIds(text);
-      if (ids.length !== delivery.blocks.length) {
+      // One provenance line per *recalled* block. `stateProxy` is a block the injected message can also carry,
+      // and it is the model's own serialized trace rather than a recalled turn - it has no provenance line and
+      // no selected segment behind it, so counting every block here would fail every delivering cell. A block
+      // name this tool does not know is reported rather than ignored: see the header, "THE SELECTED SET".
+      const recallBlocks = delivery.blocks.filter((b) => b === 'recalled').length;
+      const otherBlocks = [...new Set(delivery.blocks.filter((b) => b !== 'recalled'))];
+      if (ids.length !== recallBlocks) {
         fail(`the delivered payload ${delivery.payloadId} holds ${ids.length} provenance line(s) but the `
-          + `context_delivery record lists ${delivery.blocks.length} block(s)`);
+          + `context_delivery record lists ${recallBlocks} recalled block(s)`
+          + (otherBlocks.length > 0 ? ` beside ${delivery.blocks.length - recallBlocks} non-recall block(s): `
+            + `${otherBlocks.join(', ')}` : ''));
       }
       if (ids.length !== a.selected) {
         fail(`assembly #${k + 1} records selected=${a.selected} but its delivered payload names ${ids.length} `
@@ -754,6 +1009,8 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
       existed,
       root,
       candidates,
+      depths,
+      deepestLayer: deepest,
       selected,
       selectedSource,
       delivery,
@@ -782,7 +1039,20 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
           break;
         }
       }
-      row.cells.push({ state, overlay });
+      // `layer` is the BFS layer read from this invocation's own `recallTree` (root 0, its children 1, …),
+      // and it is `-1` for every state that is not a `recallTree` node — `existed` and `absent` carry no
+      // layer because they are not part of the walk. It changes no state: the taxonomy above is decided
+      // before it, and the fill of a recalled cell is read from it.
+      let layer = -1;
+      if (state === 'candidate' || state === 'root') {
+        const read = column.depths.get(row.segment.id);
+        if (read === undefined) {
+          fail(`assembly #${column.index} row ${row.row} is ${state} but its ${row.segment.id} has no layer in `
+            + 'the recallTree it was read from — a cell the shading would have to guess a depth for');
+        }
+        layer = read;
+      }
+      row.cells.push({ state, overlay, layer });
       counts[state] += 1;
       if (overlay === 'selected') counts.selectedIds += 1;
       if (overlay === 'passage') counts.selectedPassage += 1;
@@ -801,15 +1071,26 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
   const passageColumns = columns.filter((c) => c.selected !== null && c.selected.some((e) => e.passage)).length;
   const countOnly = selectedTotal - columns.reduce((n, c) => n + (c.selected === null ? 0 : c.selected.length), 0);
   const rowsById = new Map(rows.map((r) => [r.segment.id, r]));
+  // The one shading rule for the whole figure. `maxLayer` is the maximum `bfsDepth` recorded across THIS
+  // run's invocations — a recorded fact, and the one that decides how many shades there are — so the same
+  // colour means the same layer in every column and the columns can be compared against one another.
+  const maxLayer = columns.reduce((n, c) => Math.max(n, c.record.bfsDepth), 0);
+  const depthRamp = buildDepthRamp(maxLayer);
   return {
     columns,
     rows,
     counts,
+    maxLayer,
+    depthRamp,
     carryCells,
     lagCells,
     maxLagMs,
     lagToleranceMs: ASYNC_LAG_TOLERANCE_MS,
+    emptyDeliveries,
+    deliveriesTotal: control.deliveries.length,
     unsegmentedCarry,
+    depthDivergences,
+    reusedIds,
     selectedTotal,
     identityColumns,
     identityRows,
@@ -847,6 +1128,10 @@ const COLOUR = {
   candidate: '#2f6fd0',
   root: '#d7e0ee',
   ring: '#b0483f',
+  // The backing under every ring. A mark that encodes its own recorded fact is never removed to make a
+  // layer legible; the layer yields the contrast instead, and this is how the ring keeps it.
+  ringHalo: '#ffffff',
+  halo: '#d7e0ee',
   bar: '#2f6fd0',
   barSoft: '#bcd2ee',
   fallback: '#d08a2f',
@@ -855,7 +1140,115 @@ const COLOUR = {
   rule: '#e3e8ef',
   ruleFaint: '#f0f3f7',
   axis: '#9aa5b4',
+  paper: '#ffffff',
 };
+
+// ---------------------------------------------------------------------------------------------
+// 7a. The BFS-layer ramp
+//
+// One hue, derived from the `candidate` blue the figure already used, and one scale for the whole run.
+//
+//   layer 0 (the walk's own anchor) is the most intense: `#2f6fd0`, which is the pre-existing candidate
+//   colour and therefore exactly this blue at this lightness. Each layer above it steps one notch
+//   lighter along the SAME hue and saturation, so the ramp is one family rather than a second one
+//   bolted beside the first. The run's deepest recorded layer (`maxLayer`, the maximum `bfsDepth` across
+//   its invocations) lands on lightness 63%.
+//
+// Two bounds are asserted in code, not in a comment, because both are the difference between "layered"
+// and "worse": the deepest shade must stay unmistakably darker than `existed`, and the ramp must decay
+// monotonically. `buildDepthRamp` refuses a hue whose top two shades cannot be told apart.
+// ---------------------------------------------------------------------------------------------
+
+const LAYER_HUE = 216; // the hue of COLOUR.candidate, read off it rather than chosen beside it
+const LAYER_SAT = 63; // likewise its saturation
+const LAYER_LIGHT_ROOT = 50; // % lightness at layer 0 — COLOUR.candidate itself
+const LAYER_LIGHT_DEEP = 63; // % lightness at the run's deepest recorded layer
+
+function hslToHex(h, s, l) {
+  const sat = s / 100;
+  const lum = l / 100;
+  const c = (1 - Math.abs(2 * lum - 1)) * sat;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  const [r, g, b] = hp < 1 ? [c, x, 0] : hp < 2 ? [x, c, 0] : hp < 3 ? [0, c, x]
+    : hp < 4 ? [0, x, c] : hp < 5 ? [x, 0, c] : [c, 0, x];
+  const m = lum - c / 2;
+  return `#${[r, g, b].map((v) => Math.round((v + m) * 255).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
+
+/** WCAG relative luminance — the one number here that is not a taste decision. */
+function luminance(hex) {
+  const [r, g, b] = hexToRgb(hex).map((v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio, 1–21. */
+function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * The run-global ramp: `[{ layer, lightness, colour }]` from the anchor down to `maxLayer`, one entry
+ * per BFS layer, with layer 0 the most intense and each step measurably weaker than the one above it.
+ * It is built from the run's recorded `bfsDepth`, never from the depth a particular column happened to
+ * reach, because a ramp fitted per column would make the columns incomparable.
+ */
+function buildDepthRamp(maxLayer) {
+  const top = Math.max(0, Math.floor(maxLayer));
+  const ramp = [];
+  for (let layer = 0; layer <= top; layer += 1) {
+    const t = top === 0 ? 0 : layer / top;
+    const lightness = LAYER_LIGHT_ROOT + (LAYER_LIGHT_DEEP - LAYER_LIGHT_ROOT) * t;
+    ramp.push({ layer, lightness, colour: hslToHex(LAYER_HUE, LAYER_SAT, lightness) });
+  }
+  for (let i = 1; i < ramp.length; i += 1) {
+    if (ramp[i].lightness <= ramp[i - 1].lightness) {
+      fail(`the BFS-layer ramp is not decaying: layer ${i} is at lightness ${ramp[i].lightness} and layer ${i - 1} `
+        + `at ${ramp[i - 1].lightness}, so brightness would not mean layer`);
+    }
+  }
+  const deepest = ramp[ramp.length - 1].colour;
+  if (contrast(deepest, COLOUR.existed) < 1.35) {
+    fail(`the BFS-layer ramp's deepest shade ${deepest} is not clearly stronger than "existed" ${COLOUR.existed} `
+      + `(contrast ${contrast(deepest, COLOUR.existed).toFixed(2)} < 1.35) — a recalled cell would read as a blank one`);
+  }
+  return ramp;
+}
+
+/**
+ * The shade one cell is filled with. `absent` and `existed` keep the colours they have always had and
+ * are not part of the ramp; `candidate` and `root` are the walk's own blue, shaded by the BFS layer read
+ * out of the `recallTree`.
+ */
+function fillOf(cell, ramp) {
+  if (cell.state === 'absent') return COLOUR.absent;
+  if (cell.state !== 'candidate' && cell.state !== 'root') return COLOUR.existed;
+  if (cell.layer < 0 || cell.layer > ramp.length - 1) {
+    // Unreachable by construction — the matrix above refuses a recalled cell with no layer, and the ramp
+    // is sized to the run's deepest recorded `bfsDepth` — but a blank cell would be an invented fact.
+    fail(`cell at row ${cell.r} column ${cell.col + 1} is ${cell.state} at BFS layer ${cell.layer}, which the `
+      + `run-global ramp (layers 0–${ramp.length - 1}) has no shade for`);
+  }
+  return ramp[cell.layer].colour;
+}
+
+/**
+ * The ink of a mark drawn on a given fill. A ring, a caret and a `hit` each encode their own recorded
+ * fact, so none of them is dropped when a layer darkens or lightens the cell under it — the one thing
+ * that may change is which of the two existing inks (paper white, or the figure's `#171a1f`) reads on it.
+ */
+function markInk(fill) {
+  return contrast(fill, COLOUR.paper) >= contrast(fill, COLOUR.ink) ? COLOUR.paper : COLOUR.ink;
+}
 
 function niceStep(range, ticks) {
   if (range <= 0) return 1;
@@ -931,7 +1324,9 @@ function layoutOf(model, opts = {}) {
       nRows: exactRows,
       colBlocks: model.columns.map((_, i) => ({ from: i, to: i + 1, width: 1 })),
       rowBlocks: model.rows.map((_, i) => ({ from: i, to: i + 1, width: 1 })),
-      cells: model.rows.map((r, ri) => r.cells.map((c) => ({ ...c, state: c.state, overlay: c.overlay, col: 1, row: 1, r: ri }))),
+      cells: model.rows.map((r, ri) => r.cells.map((c) => ({
+        ...c, state: c.state, overlay: c.overlay, layer: c.layer, col: 1, row: 1, r: ri,
+      }))),
       colCounts: model.columns.map((c) => ({ candidates: c.record.candidates, selected: c.record.selected })),
       columns: model.columns,
       rows: model.rows,
@@ -947,18 +1342,27 @@ function layoutOf(model, opts = {}) {
     for (const crange of colRanges) {
       let state = 'absent';
       let overlay = '';
+      // The layer of the block is the layer of the state that won it, by the same rule the state itself is:
+      // the most intense recorded layer in the block. Depth is a second axis of "what the walk returned",
+      // so a block that holds hits at several depths is drawn at the shallowest of them — the strongest
+      // claim in the block, and never darker than any cell it stands for. What the roll-up gives up is
+      // named rather than hidden: the matrix panel says a block shows one layer, not which cell had it.
+      let layer = -1;
       for (let r = range.from; r < range.to; r += 1) {
         const row = model.rows[r];
         for (let c = crange.from; c < crange.to; c += 1) {
           const cell = row.cells[c];
           if (rank[cell.state] > rank[state]) state = cell.state;
           if (cell.overlay !== '' && rank[cell.overlay] > rank[overlay === '' ? 'absent' : overlay]) overlay = cell.overlay;
+          if (cell.state === 'candidate' || cell.state === 'root') {
+            layer = layer === -1 ? cell.layer : Math.min(layer, cell.layer);
+          }
         }
       }
       stateTally[state] += 1;
       if (overlay === 'selected') stateTally.selectedIds += 1;
       if (overlay === 'passage') stateTally.selectedPassage += 1;
-      line.push({ state, overlay, col: crange.width, row: range.width, r: range.from });
+      line.push({ state, overlay, layer: state === 'candidate' || state === 'root' ? layer : -1, col: crange.width, row: range.width, r: range.from });
     }
     cells.push(line);
   }
@@ -1001,6 +1405,9 @@ function blockRowLabel(row) {
 
 function renderFigure(model, meta) {
   const { columns, rows } = model;
+  // The one shade scale of the whole figure, built once from the run's deepest recorded BFS depth. Every
+  // cell below reads its fill through it, so a colour means one layer in every column.
+  const ramp = model.depthRamp;
   // What is actually drawn: the exact matrix when it fits, a block roll-up of it when it does not. Everything
   // below reads `grid`, so the two modes cannot disagree about how a state is drawn or counted.
   const grid = layoutOf(model, meta.grid);
@@ -1042,22 +1449,26 @@ function renderFigure(model, meta) {
 
   // -- band: the matrix ----------------------------------------------------------------------
   const matrixNote = wrap(meta.matrixNote, 150);
+  const layerNote = wrap(meta.layerNote, 150);
   const matrixTop = 42 + matrixNote.length * 15 + 20;
   const gridH = nRows * (ROW_H + ROW_GAP) - ROW_GAP;
-  bands.push(band('matrix', matrixTop + gridH + 44));
+  bands.push(band('matrix', matrixTop + gridH + 61 + layerNote.length * 15));
 
   // -- band: legend and notes ------------------------------------------------------------------
   const legendItems = [
+    ['ramp', 'shade = BFS layer; ONE run-global scale, the same in every column. Darkest = layer 0, the anchor.'],
     ['absent', 'not yet created — the recorded creation stamp is later than the invocation'],
     ['existed', 'existed, and the recorded walk did not return it (not a `recallTree` node)'],
-    ['candidate', 'existed, and the recorded walk returned it (a `recallTree` node)'],
+    ['candidate', 'existed, and the recorded walk returned it (a `recallTree` node), shaded by its BFS layer'],
     ['selected', 'ring — the id is in the delivered payload: the only recorded selected id'],
     ['passage', 'dashed ring — the payload names a passage parent; the chunk is not recorded'],
-    ['root', 'caret — that walk\'s root (the anchor it started from), which is not a hit'],
+    ['root', 'caret — that walk\'s root (its layer 0, the anchor), which is not a hit'],
   ];
   const legendRows = Math.ceil(legendItems.length / 2);
+  // The ramp strip draws its layer numbers under its swatches, so the band is a little taller than the
+  // row grid alone needs — that margin is what holds them, not the row pitch.
   const noteLines = meta.notes.flatMap((n) => wrap(n, 150));
-  const legendH = 34 + legendRows * 19 + 18 + noteLines.length * 15 + 16;
+  const legendH = 34 + legendRows * 19 + 26 + noteLines.length * 15 + 16;
   bands.push(band('legend', legendH));
 
   // -- band: the per-invocation record ---------------------------------------------------------
@@ -1158,19 +1569,29 @@ function renderFigure(model, meta) {
     grid.cells[r].forEach((cell, c) => {
       const x = colX(c);
       const stroke = cell.state === 'absent' ? COLOUR.absentEdge : 'none';
-      const fill = cell.state === 'absent' ? COLOUR.absent : cell.state === 'candidate' ? COLOUR.candidate : COLOUR.existed;
+      const fill = fillOf(cell, ramp);
+      const ink = markInk(fill);
       body.push(`  <rect class="cell" data-row="${cell.r}" data-col="${c + 1}" data-state="${cell.state}"`
+        + `${cell.layer >= 0 ? ` data-layer="${cell.layer}"` : ''}`
         + `${grid.aggregated ? ` data-block="${cell.row}x${cell.col}"` : ''}`
         + `${cell.overlay ? ` data-overlay="${cell.overlay}"` : ''} x="${x.toFixed(1)}" y="${yy.toFixed(1)}"`
         + ` width="${cellW.toFixed(1)}" height="${ROW_H}" fill="${fill}"${stroke === 'none' ? '' : ` stroke="${stroke}"`}/>`);
       if (cell.state === 'candidate') {
-        body.push(`  <text x="${(x + cellW / 2).toFixed(1)}" y="${(yy + ROW_H / 2 + 3).toFixed(1)}" class="cell-mark" text-anchor="middle">${grid.aggregated ? '·' : 'hit'}</text>`);
+        body.push(`  <text x="${(x + cellW / 2).toFixed(1)}" y="${(yy + ROW_H / 2 + 3).toFixed(1)}" class="cell-mark" text-anchor="middle" fill="${ink}">${grid.aggregated ? '·' : 'hit'}</text>`);
       }
       if (cell.state === 'root') {
-        body.push(`  <path d="M ${(x + 6).toFixed(1)} ${(yy + ROW_H - 6).toFixed(1)} l 4.5 -8 l 4.5 8 z" fill="${COLOUR.ink}" class="root-mark"/>`);
+        // The caret marks the walk's own anchor. It is layer 0, so it sits on the deepest shade of the
+        // ramp: the mark is kept and its ink is picked against the shade rather than the other way round.
+        body.push(`  <path d="M ${(x + 6).toFixed(1)} ${(yy + ROW_H - 6).toFixed(1)} l 4.5 -8 l 4.5 8 z" fill="${ink}" class="root-mark"/>`);
       }
       if (cell.overlay) {
         const dashed = cell.overlay === 'passage' ? ' stroke-dasharray="4 3"' : '';
+        // Two strokes, one mark. The wider pale one is a backing, not a second encoding: it is there so
+        // the ring keeps its contrast over a `#2f6fd0` layer-0 cell as well as over a `#d7e0ee` `existed`
+        // one, and the dash pattern (which says passage-only) still belongs to the ring alone.
+        body.push(`  <rect class="ring-halo" data-row="${cell.r}" data-col="${c + 1}" data-overlay="${cell.overlay}"`
+          + ` x="${(x + 1.5).toFixed(1)}" y="${(yy + 1.5).toFixed(1)}" width="${(cellW - 3).toFixed(1)}"`
+          + ` height="${ROW_H - 3}" fill="none" stroke="${COLOUR.ringHalo}" stroke-width="5" opacity="0.9"/>`);
         body.push(`  <rect class="ring" data-row="${cell.r}" data-col="${c + 1}" data-overlay="${cell.overlay}"`
           + ` x="${(x + 1.5).toFixed(1)}" y="${(yy + 1.5).toFixed(1)}" width="${(cellW - 3).toFixed(1)}"`
           + ` height="${ROW_H - 3}" fill="none" stroke="${COLOUR.ring}" stroke-width="2.5"${dashed}/>`);
@@ -1181,33 +1602,63 @@ function renderFigure(model, meta) {
   body.push(`  <text x="${MARGIN}" y="${(matrixTop + gridH + 22).toFixed(1)}" class="panel-note">${escapeXml(grid.aggregated
     ? `Row 0 is the oldest segment; each drawn row stands for ${grid.rowBlocks[0].width === 1 ? '1 segment' : `up to ${Math.max(...grid.rowBlocks.map((b) => b.width))} segments`} of the graph's append order, and each column for ${Math.max(...grid.colBlocks.map((b) => b.width))} invocation(s). The per-invocation table below is exact.`
     : `row 0 is the oldest segment of ${exactRows}; every row above it is one segment later in the graph's append order.`)}</text>`);
+  layerNote.forEach((line, i) => {
+    body.push(`  <text x="${MARGIN}" y="${(matrixTop + gridH + 37 + i * 15).toFixed(1)}" class="panel-note">${escapeXml(line)}</text>`);
+  });
   body.push('</g>');
 
   // -- legend ---------------------------------------------------------------------------------
   const { at: lAt } = bands[3];
   body.push(`<g class="band" data-band="legend" transform="translate(0,${lAt})">`);
-  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">Legend — what each cell state is read from</text>`);
+  body.push(`  <text x="${MARGIN}" y="24" class="panel-title">Legend — what each cell state is read from, and what its shade is</text>`);
   legendItems.forEach(([kind, text], i) => {
     const col = i % 2;
     const rowI = Math.floor(i / 2);
     const lx = MARGIN + col * 600;
     const ly = 48 + rowI * 19;
+    if (kind === 'ramp') {
+      // The ramp is drawn at the width its layers have in the figure: the anchor (`hit`) at the left,
+      // the deepest recorded layer at the right, each swatch one layer wide, and the shades exactly the
+      // ones a cell of that layer is filled with.
+      const sw = 16;
+      const usable = sw * ramp.length;
+      const gap = ramp.length > 1 ? 4 : 0;
+      const stepPx = ramp.length > 1 ? Math.max(sw, (usable - gap) / (ramp.length - 1) + gap) : sw;
+      const stripEnd = lx + stepPx * (ramp.length - 1) + sw;
+      ramp.forEach((entry, k) => {
+        const sx = lx + k * stepPx;
+        body.push(`  <rect x="${sx.toFixed(1)}" y="${ly - 12}" width="${sw}" height="14" fill="${entry.colour}"/>`);
+        body.push(`  <text x="${(sx + sw / 2).toFixed(1)}" y="${(ly + 16).toFixed(1)}" class="ramp-tick"`
+          + ` text-anchor="middle">${entry.layer}</text>`);
+      });
+      // The two values the strip has to be read against, drawn on the same scale rather than described.
+      for (const [cx, fill, label] of [
+        [stripEnd + 14, COLOUR.existed, 'existed'],
+        [stripEnd + 62, COLOUR.absent, 'absent'],
+      ]) {
+        body.push(`  <rect x="${cx}" y="${ly - 12}" width="${sw}" height="14" fill="${fill}"${fill === COLOUR.absent ? ` stroke="${COLOUR.absentEdge}"` : ''}/>`);
+        body.push(`  <text x="${(cx + sw / 2).toFixed(1)}" y="${(ly + 16).toFixed(1)}" class="ramp-tick" text-anchor="middle">${label}</text>`);
+      }
+      body.push(`  <text x="${(stripEnd + 92).toFixed(1)}" y="${ly}" class="legend">${escapeXml(text)}</text>`);
+      return;
+    }
+    // The ring swatches are drawn on the same backing the cells use, so the legend shows the ring as it
+    // reads over a fill rather than as it reads over nothing.
     if (kind === 'candidate') {
-      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.candidate}"/>`);
-      body.push(`  <text x="${lx + 11}" y="${ly - 1}" class="cell-mark" text-anchor="middle">hit</text>`);
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${ramp[0].colour}"/>`);
+      body.push(`  <text x="${lx + 11}" y="${ly - 1}" class="cell-mark" text-anchor="middle" fill="${markInk(ramp[0].colour)}">hit</text>`);
     } else if (kind === 'absent') {
       body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.absent}" stroke="${COLOUR.absentEdge}"/>`);
     } else if (kind === 'existed') {
       body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.existed}"/>`);
-    } else if (kind === 'selected') {
+    } else if (kind === 'selected' || kind === 'passage') {
       body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.existed}"/>`);
-      body.push(`  <rect x="${lx + 1.5}" y="${ly - 10.5}" width="23" height="11" fill="none" stroke="${COLOUR.ring}" stroke-width="2.5"/>`);
-    } else if (kind === 'passage') {
-      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.existed}"/>`);
-      body.push(`  <rect x="${lx + 1.5}" y="${ly - 10.5}" width="23" height="11" fill="none" stroke="${COLOUR.ring}" stroke-width="2.5" stroke-dasharray="4 3"/>`);
+      body.push(`  <rect x="${lx + 1.5}" y="${ly - 10.5}" width="23" height="11" fill="none" stroke="${COLOUR.ringHalo}" stroke-width="5" opacity="0.9"/>`);
+      body.push(`  <rect x="${lx + 1.5}" y="${ly - 10.5}" width="23" height="11" fill="none" stroke="${COLOUR.ring}"`
+        + ` stroke-width="2.5"${kind === 'passage' ? ' stroke-dasharray="4 3"' : ''}/>`);
     } else {
-      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${COLOUR.root}"/>`);
-      body.push(`  <path d="M ${lx + 6} ${ly - 2} l 4.5 -8 l 4.5 8 z" fill="${COLOUR.ink}"/>`);
+      body.push(`  <rect x="${lx}" y="${ly - 12}" width="26" height="14" fill="${ramp[0].colour}"/>`);
+      body.push(`  <path d="M ${lx + 6} ${ly - 2} l 4.5 -8 l 4.5 8 z" fill="${markInk(ramp[0].colour)}"/>`);
     }
     body.push(`  <text x="${lx + 36}" y="${ly}" class="legend">${escapeXml(text)}</text>`);
   });
@@ -1282,6 +1733,7 @@ function renderFigure(model, meta) {
     .axis-label { fill: ${COLOUR.muted}; font-size: 10.5px; }
     .bar-value { fill: ${COLOUR.ink}; font-size: 10.5px; }
     .cell-mark { fill: #ffffff; font-size: 9.5px; }
+    .ramp-tick { fill: ${COLOUR.muted}; font-size: 9px; }
     .row-label { fill: ${COLOUR.ink}; font-size: 11px; }
     .col-label { fill: ${COLOUR.ink}; font-size: 11.5px; font-weight: 600; }
     .badge-fallback { fill: ${COLOUR.fallback}; font-size: 9.5px; }
@@ -1326,10 +1778,14 @@ function summaryLine(model, meta) {
     + `existed-not-returned ${counts.existed} · selected ${model.selectedTotal} `
     + `(ids recorded ${model.identityRows} on ${model.identityColumns}/${columns.length} invocations`
     + `${model.passageColumns > 0 ? ` + ${counts.selectedPassage} passage-only row(s)` : ''}, count-only ${model.countOnly}) `
+    + `· recall hits shaded by BFS layer on one run-global ramp sized for depth ${model.maxLayer} `
+    + `(${model.depthRamp.map((e) => `L${e.layer} ${e.colour}`).join(', ')}) `
     + `· knobs w=${model.knobs.w} r=${model.knobs.r} d=${model.knobs.d}`
     + `${model.knobs.wait === undefined ? '' : ` wait=${model.knobs.wait}`}`
     + ` · ${model.carryCells} same-step carry cell(s)`
     + ` · ${model.lagCells} async-lag cell(s) within ${model.lagToleranceMs} ms (max ${model.maxLagMs} ms)`
+    + ` · ${model.emptyDeliveries} of ${model.deliveriesTotal} delivery record(s) carried nothing and own no `
+    + 'invocation (no selection to attach; counted, not refused)'
     + ` · drawing ${grid.mode}${grid.aggregated
       ? ` (${columns.length}x${model.rows.length} exact, drawn as ${grid.nCols}x${grid.nRows} blocks of up to `
         + `${Math.max(...grid.colBlocks.map((b) => b.width))}x${Math.max(...grid.rowBlocks.map((b) => b.width))})`
@@ -1357,6 +1813,11 @@ function explainLines(model) {
     lines.push(`  exists: ${column.existed.size} of ${model.rows.length} segments `
       + `(${column.strictIds.size} by creation stamp, carry: ${carried})`);    lines.push(`  walk: ${column.root === null ? 'no tree recorded (recall returned no hit)' : `root ${column.root}`}`
       + `${column.candidates.length === 0 ? '' : `, hits ${column.candidates.join(', ')}`}`);
+    // The layers are printed per invocation, not just per figure, because that is what the fill was read
+    // from: `depth` here is the BFS layer, and the sentence says which layer the run-global ramp draws it at.
+    lines.push(`  layers (BFS, 0 = the walk's own anchor; the run-global ramp is sized for depth ${model.maxLayer}): `
+      + `${column.root === null ? 'the walk returned no tree, so no cell is layered'
+        : [...column.depths.entries()].map(([id, d]) => `${id}=L${d} → ${model.depthRamp[d].colour}`).join(', ')}`);
     lines.push(`  selected: ${column.selected === null
       ? (a.selected === 0 ? 'none (recorded count 0)' : `count only (${a.selected}), no id recorded`)
       : `${column.selected.map((e) => (e.passage ? `${e.id} → passage of ${e.rows.length} chunk(s)` : e.id)).join(', ')} `
@@ -1365,6 +1826,14 @@ function explainLines(model) {
   if (model.unsegmentedCarry.length > 0) {
     lines.push(`carried messages that produced no segment (the adapter could not read their shape, so they have no row): `
       + `${model.unsegmentedCarry.map((u) => `${u.id} at invocation #${u.at + 1}`).join(', ')}`);
+  }
+  if (model.depthDivergences.length > 0) {
+    lines.push(`invocations whose recorded bfsDepth is not the depth of the tree they walked: `
+      + `${model.depthDivergences.length} of ${model.columns.length} - the field is set in the assembler's selection `
+      + `loop, so a walk that returned hits and placed none records 0 while its tree still holds them. The cells are `
+      + `shaded from the tree. `
+      + model.depthDivergences.map((d) => `${d.where}: recorded ${d.recorded}, walked ${d.walk} `
+        + `(candidates ${d.candidates}, selected ${d.selected})`).join('; '));
   }
   return lines;
 }
@@ -1386,6 +1855,12 @@ function usage() {
     `Matrices larger than ${MAX_COLS_EXACT} columns or ${MAX_ROWS_EXACT} rows are drawn aggregated (consecutive invocations`,
     'and consecutive segments roll up into blocks, shaded by the strongest recorded state in each). --grid raises or',
     'lowers those ceilings; the summary line always states which mode was used, and every count stays exact.',
+    '',
+    'A walked cell (recall candidate / walk root) is shaded by its BFS layer, read from the recallTree\'s own nesting:',
+    'layer 0 is the walk\'s own anchor, its children layer 1, and so on. The ramp is one hue derived from the',
+    'candidate blue and is sized ONCE for the whole figure from the run\'s deepest recorded bfsDepth, so the same shade',
+    'means the same layer in every column. Layer changes the fill only: the selection ring and the root caret encode',
+    'other recorded facts and are kept, with their ink chosen for contrast against the shade under them.',
   ].join('\n');
 }
 
@@ -1440,6 +1915,31 @@ function run(options) {
       + `figure would be ${model.columns.length} columns x ${model.rows.length} rows. Every count in this document is still `
       + 'computed from the full matrix, and the per-invocation table below is exact.'
     : '';
+  /**
+   * What the ramp is, in one sentence the figure prints under the matrix — and the clause that only
+   * sometimes applies, which is the case this ramp is most easily misread in: a walk that did not reach
+   * as deep as the run did. The scale stays the run's; the walk's own `bfsDepth` says how far down it
+   * goes, so a shade never means a layer that walk never visited.
+   */
+  const ramp = model.depthRamp;
+  const shallowWalk = model.columns.filter((c) => c.record.bfsDepth < model.maxLayer);
+  const shallowClause = shallowWalk.length === 0
+    ? ''
+    : ` ${shallowWalk.length} of ${model.columns.length} invocation(s) did not reach the run's deepest layer; `
+      + `their own recorded bfsDepth (${shallowWalk.map((c) => c.record.bfsDepth).join(', ')}) is the floor under `
+      + 'their cells, so a shade there never claims a depth that walk did not walk.';
+  const layerNote = model.maxLayer === 0
+    // The honest special case: a run whose every walk recorded depth 0 has no layer-1 cell to shade, and a
+    // ramp fitted to what is present would print two shades that mean the same thing. The scale stays the
+    // run's (one shade), and the figure says the run never walked past its anchor rather than implying it did.
+    ? `This cell's walks all recorded bfsDepth 0, so no invocation of this run reached past its own anchor and there is `
+      + `no layer above 0 to shade: the ramp is a single shade (${ramp[0].colour}), and no recalled cell is drawn in this `
+      + `figure (${model.counts.candidate} candidate, ${model.counts.root} walk-root).`
+    : `Shading of a walked cell is its BFS layer, read from the recallTree's own nesting: layer 0 is the anchor `
+      + `the walk started from, layer 1 what it found one step out, and so on to this run's deepest recorded layer ${model.maxLayer}. `
+      + `The ramp (${ramp.map((e) => e.colour).join(' → ')}) is sized ONCE from that run-global depth, so one shade means one `
+      + `layer in every column and the columns can be compared against each other; the deepest shade is still unmistakably `
+      + `darker than "existed" (#d7e0ee) and "absent" (#ffffff), which is the line a recalled cell must stay on the right of.${shallowClause}`;
   const meta = {
     runName,
     cell: options.cell,
@@ -1449,26 +1949,40 @@ function run(options) {
     subtitle: [
       `${model.columns.length} recall invocations × ${model.rows.length} segments (the cell's final segment count), `
         + `oldest segment at the bottom · records span ${span}`,
-      `recall knobs, read from the tape's wiring record: ${knobs}`
+      `recall knobs, in force for the run: ${knobs}`
+        + (Object.keys(tape.retuned ?? {}).length === 0
+          ? ' (the wiring record states these and no retune was recorded)'
+          : ` — **RETUNED on the first step**, so the wiring record states other values: `
+            + Object.entries(tape.retuned).map(([k, v]) => `${k} ${String(v.from)} -> ${String(v.to)}`).join(', '))
         + ` · the window each invocation itself ran with is its assembly record's windowN`
         + `${model.columns.every((c) => c.record.windowN === model.knobs.w) ? ' (all equal to w)' : ' (marked * in the table where it differs)'}`,
       `cell states: not yet created ${model.counts.absent} · recall candidate ${model.counts.candidate} · `
         + `walk root ${model.counts.root} · existed but not returned ${model.counts.existed}`
         + ` · selected ids recorded ${model.identityRows} of ${model.selectedTotal}`,
+      `walked cells are shaded by BFS layer 0–${model.maxLayer} on ONE run-global ramp `
+        + `(layer 0 = the walk's own anchor, the most intense): ${ramp.map((e) => e.colour).join(' → ')}`,
       gridInfo.note,
     ],
+    layerNote,
     countsNote: 'left bar: assembly.candidates (the walk\'s hits) · right bar: assembly.selected (how many were taken). '
       + 'Both are recorded counts; the ring below is the only recorded per-segment identity of a selection.'
       + (gridInfo.aggregated ? ' In a column block the bars are the largest recorded count in that block.' : ''),
     matrixNote: gridInfo.aggregated
-      ? 'one cell per BLOCK of (segments, invocations) — see the fourth subtitle line for the block size. Filled = the recorded '
-        + 'walk returned something in the block; dim = something existed in it and the walk did not return it; blank = nothing in '
-        + 'it existed yet. A ring marks a block in which a delivered payload named a segment, which is where a selected id is '
-        + 'written down. A `·` in a filled block is a rolled-up hit, not a single one.'
-      : 'one cell per (segment, invocation). Filled = the recorded walk returned that segment; dim = it existed and '
-        + 'the walk did not return it; blank = it did not exist yet. A ring marks a delivered selection, which is where a '
-        + 'selected id is written down. Row labels: `+parent` marks one chunk of a longer event, so `id#n` is the chunk.',
+      ? 'one cell per BLOCK of (segments, invocations) — see the fifth subtitle line for the block size. Blue = the recorded '
+        + 'walk returned something in the block, and the shade is the BFS layer it returned them at; dim = something existed in it '
+        + 'and the walk did not return it; blank = nothing in it existed yet. A ring marks a block in which a delivered payload '
+        + 'named a segment, which is where a selected id is written down. A `·` in a filled block is a rolled-up hit, not a '
+        + 'single one, and a block holding hits of several depths is drawn at the most intense of them.'
+      : 'one cell per (segment, invocation). Blue = the recorded walk returned that segment, and the shade is the BFS layer '
+        + 'it returned it at (darkest = the walk\'s own anchor); dim = it existed and the walk did not return it; blank = it did '
+        + 'not exist yet. A ring marks a delivered selection, which is where a selected id is written down. Row labels: '
+        + '`+parent` marks one chunk of a longer event, so `id#n` is the chunk.',
     notes: [
+      `Brightness is a measurement, not an emphasis: the walk root and its first layer out are both at the top of this figure's `
+        + `blue and differ by exactly one step of a ${ramp.length}-shade ramp, because the only thing that separates them in the `
+        + `record is the depth they were reached at. Every shade on it stays on the recalled side of "existed" `
+        + `(the deepest is ${contrast(ramp[ramp.length - 1].colour, COLOUR.existed).toFixed(2)}:1 against it), so a cell read as `
+        + 'remembered can never be mistaken for a cell read as merely present.',
       `The selected identity is recorded for ${model.identityColumns} of ${model.columns.length} invocations. assembly.selected `
         + 'is a count: the control plane stores no per-segment id list for it, and recallTree is the candidate walk rather '
         + 'than the ranking. A ring is drawn only where a delivered payload names the segment (its provenance line, keyed by '
@@ -1479,9 +1993,14 @@ function run(options) {
         + `anchor it chose, and a pair inside the window that was never scored has no edge to follow. ${model.carryCells} cell(s) `
         + 'exist by their own step\'s recorded payload although their creation stamp is a few milliseconds later than the '
         + `invocation (the graph write follows the assembly) — counted, not silently tolerated.${lagClause}${aggregateClause}${unsegmentedClause}`,
+      `The shade scale is sized once for the whole figure from this run's deepest recorded walk depth `
+        + `(bfsDepth ${model.maxLayer}, across ${model.columns.map((c) => c.record.bfsDepth).join(', ')} for its `
+        + `${model.columns.length} invocation(s)), not per column. A ramp fitted per column would make every column look `
+        + `alike and the comparison between them — the whole reason the shade is layered — impossible.${shallowClause}`,
     ],
     tableNote: 'seq is the plugin\'s own running message counter, not a step number; the turn/step column is attributed by time '
-      + '(the pre-step hook runs immediately before its step/start event). "ids: not recorded" means the run holds a count and no id list.',
+      + '(the pre-step hook runs immediately before its step/start event). "ids: not recorded" means the run holds a count and no id list. '
+      + 'depth is the invocation\'s own recorded bfsDepth, which this tool checks against the deepest layer in its recallTree.',
     sources: [
       `control plane: ${elidePath(rel(control.path))}`,
       `association graph snapshot: home/${options.cell}/.s1cap/rg/${snapshot.file} (session ${snapshot.doc.sessionId ?? '?'})`,
@@ -1544,6 +2063,11 @@ const FIXTURE_SEGMENTS = [
  * run (round `20261002-2037` measured 37 ms). Inside `ASYNC_LAG_TOLERANCE_MS` that is a race and the figure draws;
  * `defects.selectNotYetExisting` stamps a selected segment 600 ms past its invocation, which is outside the window
  * and is therefore refused - the two cases are the two sides of the one bound the tolerance draws.
+ *
+ * `defects.deepTree` replaces the last invocation's walk with a five-layer one, because a two-layer ramp cannot
+ * tell a decaying scale from a two-value lookup: the runs that need this shaded by layer reach three and more.
+ * `defects.treeShape` corrupts one node of a walk instead, which is the shape the layer reader refuses rather
+ * than guesses - a layer that no record states is worse than no layer at all.
  */
 function fixtureInvocations(defects = {}) {
   const inv = [
@@ -1553,6 +2077,26 @@ function fixtureInvocations(defects = {}) {
     { ts: 4000, seq: 12, windowN: 2048, candidates: 2, selected: 2, bfsDepth: 1, recallTree: { r1: { r2: {}, t1: {} } } },
     { ts: 5000, seq: 15, windowN: 1024, candidates: 0, selected: 2, bfsDepth: 0, recallTree: {}, fallback: 'recency-window' },
   ];
+  // Five layers on the one invocation that already exists, so the state taxonomy and every count in the
+  // default fixture stay exactly as they were and this case can be asserted on its own.
+  if (defects.deepTree) {
+    inv[4] = {
+      ...inv[4],
+      candidates: 4,
+      bfsDepth: 4,
+      recallTree: { u1: { u2: { t1: { r1: { r2: {} } } } } },
+      fallback: undefined,
+    };
+  }
+  if (defects.treeShape === 'notAnObject') inv[1].recallTree = { u1: { u2: [], t1: {} } };
+  if (defects.treeShape === 'idAtTwoLayers') {
+    // The repeat is inside the tree, and the id list minus the root still has the two hits the record
+    // claims, so the existing candidates agreement check passes: this case is caught by the layer reader
+    // and by nothing else, which is the point of asserting it.
+    inv[1].recallTree = { u1: { u2: {}, t1: { u1: {} } } };
+  }
+  if (defects.treeShape === 'twoRoots') inv[1].recallTree = { u1: {}, u2: { t1: {} } };
+  if (defects.treeShape === 'depthMismatch') inv[1].bfsDepth = 3;
   if (defects.candidateCount) inv[1].candidates = 3;
   if (defects.selectedCount) inv[3].selected = 3;
   return inv.map((a, i) => ({
@@ -1592,6 +2136,10 @@ function fixtureDeliveries(defects = {}) {
     { ts: 3005, payloadId: 's1cap-bbbb2222', names: defects.selectNotYetExisting ? ['r2'] : ['P'], blocks: 1 },
     { ts: 4005, payloadId: 's1cap-cccc3333', names: ['r2', 't1'], blocks: 2 },
   ];
+  // The far side of the attribution bound: a record that DID deliver a selection, moved past every assembly by
+  // far more than `ATTRIBUTION_WINDOW_MS`. Nothing can own it, so the figure is refused - the state the empty
+  // records above are deliberately not confused with.
+  if (defects.deliveredFarFromAssembly) out[2].ts = 900000;
   return out.map((d) => ({
     delivery: {
       type: 'context_delivery',
@@ -1629,6 +2177,27 @@ function buildFixture(dir, defects = {}) {
     // nothing delivered at all
   } else {
     for (const d of fixtureDeliveries(defects)) controlLines.push(JSON.stringify(d.delivery));
+  }
+  // An empty record a long way past every assembly (the last is at ts 5000): the state round `20261003-2104`'s
+  // C2 wrote 31 of. It reports no selection, so it must be counted and must NOT refuse the figure.
+  if (defects.emptyDeliveryFarFromAssembly) {
+    controlLines.push(JSON.stringify({
+      type: 'context_delivery',
+      schema: 1,
+      ts: 900000,
+      sessionId: FIXTURE_SESSION,
+      cell: 'C9',
+      delivered: false,
+      assembled: false,
+      reason: 'the decision carried no messages',
+      messagesBefore: 0,
+      messagesAfter: 0,
+      kept: 0,
+      dropped: 0,
+      inserted: 0,
+      blocks: [],
+      order: [],
+    }));
   }
   const controlPath = join(cellDir, 'control.jsonl');
   writeFileSync(controlPath, controlLines.join('\n') + '\n', 'utf8');
@@ -1766,6 +2335,74 @@ function selfTest() {
       model.columns.length * model.rows.length, 'the four states partition the matrix');
     say('state counts: absent 7, candidate 5, walk-root 3, existed 20 over 5x7 cells (2 by the async-lag window)');
 
+    // (1b) the BFS layer every walked cell is shaded by, read from the recallTree's own nesting.
+    // The taxonomy above is unchanged by it - `existed` and `absent` carry no layer at all - so these are
+    // assertions about which of two walked cells is which shade, not about the four counts.
+    assertEqual(model.columns[1].depths.get('u1'), 0, 'the walk root sits at layer 0, the anchor itself');
+    assertEqual(model.columns[1].depths.get('u2'), 1, 'what the walk found one step out is layer 1');
+    assertEqual(model.columns[1].depths.get('t1'), 1, 'and its sibling is layer 1 too, not layer 2');
+    assertEqual(model.columns[1].deepestLayer, 1, 'the deepest layer of that walk is the one its own bfsDepth records');
+    assertEqual(model.maxLayer, 1, 'the run-global ramp is sized by the deepest walk the run recorded');
+    assertEqual(model.depthRamp.length, 2, 'so it has one shade per layer of that run, and not one per column');
+    {
+      const root = model.rows.find((r) => r.segment.id === 'u1').cells[1];
+      const hit = model.rows.find((r) => r.segment.id === 'u2').cells[1];
+      // A cell the walk did not return: `u1` exists by invocation #4 (ts 4000) but that walk started from
+      // `r1`, so it is recorded as present-and-not-returned rather than as a hit at some depth.
+      const dim = model.rows.find((r) => r.segment.id === 'u1').cells[3];
+      const blank = model.rows.find((r) => r.segment.id === 'r1').cells[0];
+      assertEqual(root.layer, 0, 'the walk-root cell records its layer');
+      assertEqual(hit.layer, 1, 'the depth-1 candidate cell records its layer');
+      assertEqual(dim.layer, -1, 'an existed-but-not-returned cell is not in the walk and has no layer');
+      assertTrue(fillOf(root, model.depthRamp) !== fillOf(hit, model.depthRamp),
+        'the walk root and a depth-1 hit are drawn in different shades');
+      assertTrue(fillOf(hit, model.depthRamp) !== fillOf(dim, model.depthRamp),
+        'a depth-1 hit and an existed-but-not-returned cell are told apart by shade');
+      assertTrue(contrast(fillOf(hit, model.depthRamp), COLOUR.existed) >= 1.35,
+        'the deepest shade of this run is still unmistakably stronger than "existed"');
+      assertEqual(fillOf(dim, model.depthRamp), COLOUR.existed, '"existed" keeps the colour it has always had');
+      assertEqual(fillOf(blank, model.depthRamp), COLOUR.absent,
+        '"absent" keeps the colour it has always had');
+    }
+    say(`layer: root L0 ${model.depthRamp[0].colour}, depth-1 ${model.depthRamp[1].colour}, `
+      + 'run-global over both layers; existed and absent untouched');
+
+    // (1c) the same ramp has to mean the same layer in every column, or the columns cannot be compared -
+    // which is the entire reason the shading is layered at all. Two columns with walks of different depth
+    // are the case a per-column ramp would get wrong, so one is built here on purpose.
+    {
+      const dir = mkdtempSync(join(tmp, 'ramp-'));
+      const fixture = buildFixture(dir, { deepTree: true });
+      const deep = run({ run: fixture, cell: 'C9' });
+      assertEqual(deep.model.maxLayer, 4, 'a five-layer walk sizes the run-global ramp');
+      assertEqual(deep.model.depthRamp.length, 5, 'one shade per layer, not per column');
+      assertEqual(deep.model.depthRamp[0].colour, COLOUR.candidate, 'layer 0 is the colour candidate has always had');
+      assertEqual(deep.model.depthRamp[0].lightness, 50, 'and the darkest lightness of the ramp');
+      // Monotone decay, measured rather than asserted about the code: relative luminance falls at every step.
+      for (let k = 1; k < deep.model.depthRamp.length; k += 1) {
+        const above = luminance(deep.model.depthRamp[k - 1].colour);
+        const below = luminance(deep.model.depthRamp[k].colour);
+        assertTrue(below > above, `layer ${k} (${deep.model.depthRamp[k].colour}) is weaker than layer ${k - 1} `
+          + `(${deep.model.depthRamp[k - 1].colour})`);
+      }
+      assertTrue(contrast(deep.model.depthRamp[4].colour, COLOUR.existed) >= 1.35,
+        `the deepest shade ${deep.model.depthRamp[4].colour} is still unmistakably stronger than "existed"`);
+      assertTrue(contrast(deep.model.depthRamp[4].colour, COLOUR.absent) > contrast(deep.model.depthRamp[4].colour, COLOUR.existed),
+        'and unmistakably stronger than "absent", which is the lighter of the two');
+      // Run-global, not per column: the shallow columns of this same figure are drawn on the five-shade
+      // scale, so a layer-1 hit is the SAME shade as a layer-1 hit in the deep column, not a paler one.
+      const shallowFill = fillOf(deep.model.rows.find((r) => r.segment.id === 'u2').cells[1], deep.model.depthRamp);
+      const deepFill = fillOf(deep.model.rows.find((r) => r.segment.id === 'u2').cells[4], deep.model.depthRamp);
+      assertEqual(deepFill, shallowFill, 'a layer-1 hit is the same shade in a shallow and a deep column');
+      assertEqual(deep.model.columns[4].record.bfsDepth, 4, 'and the deep column records the depth it really reached');
+      assertTrue(deep.model.columns[0].record.bfsDepth < deep.model.maxLayer,
+        'while a column that never walked past the anchor is said so rather than shaded as if it had');
+      assertTrue(deep.svg.includes(deep.model.depthRamp[2].colour), 'the legend draws the shade layer 2 is filled with');
+      assertTrue(deep.line.includes('run-global ramp sized for depth 4'), 'and the summary line names the scale it used');
+      say(`ramp: 5 shades from one run-global depth (${deep.model.depthRamp.map((e) => e.colour).join(' → ')}), `
+        + 'monotone, and identical across columns of different walk depth');
+    }
+
     // (2) selection identity, and its absence, are both read rather than assumed
     assertEqual(model.identityColumns, 3, 'invocations whose delivered payload records the selected ids');
     assertEqual(model.identityRows, 3, 'rows ringed as recorded selections');
@@ -1827,6 +2464,30 @@ function selfTest() {
     assertEqual(stateTally.root ?? 0, 3, 'the drawn walk-root cells equal the derived count');
     assertEqual(stateTally.existed ?? 0, 20, 'the drawn dim cells equal the derived count');
     assertEqual((doc.match(/class="ring"/g) ?? []).length, 5, 'one ring per recorded selected row');
+    // The rings now carry a pale backing stroke so they keep their contrast over a layer-0 blue. That
+    // backing is one mark drawn twice, not two marks: the count of rings is the count of recorded
+    // selections, and a halo without a ring under it would be a mark encoding nothing.
+    assertEqual((doc.match(/class="ring-halo"/g) ?? []).length, 5,
+      'every ring has its contrast backing, and the backing is never drawn without a ring');
+    {
+      const geometry = (html) => /x="([^"]+)" y="([^"]+)" width="([^"]+)" height="([^"]+)"/.exec(html)?.slice(1).join(' ');
+      const ringGeometry = new Set([...doc.matchAll(/<rect class="ring"[^>]*\/>/g)].map((m) => geometry(m[0])));
+      for (const m of doc.matchAll(/<rect class="ring-halo"[^>]*\/>/g)) {
+        assertTrue(ringGeometry.has(geometry(m[0])), 'a ring is drawn under its backing, at the same place');
+      }
+    }
+    // Every mark that stays on a walked cell keeps its ink legible against the layer's shade: the mark is
+    // never removed or moved, and the one thing a layer may change is which of the two inks is drawn.
+    for (const m of doc.matchAll(/class="cell-mark"[^>]*fill="(#\w{6})"/g)) {
+      assertTrue(contrast(m[1], COLOUR.ink) >= 1.8 || contrast(m[1], COLOUR.paper) >= 1.8,
+        `the hit mark on ${m[1]} has no readable ink`);
+    }
+    for (const m of doc.matchAll(/<path d="M [^"]+" fill="(#\w{6})" class="root-mark"/g)) {
+      assertTrue(contrast(m[1], COLOUR.ink) >= 1.8 || contrast(m[1], COLOUR.paper) >= 1.8,
+        `the root caret on ${m[1]} has no readable ink`);
+    }
+    assertTrue(doc.includes('data-state="root" data-layer="0"') && doc.includes('data-state="candidate" data-layer="1"'),
+      'a walked cell states its BFS layer in the document, so the shading can be read back without the ramp');
     for (const m of doc.matchAll(/<g class="band"[^>]*transform="translate\(0,(-?[\d.]+)\)"/g)) {
       assertTrue(Number(m[1]) >= 0 && Number(m[1]) <= docH, `band offset ${m[1]} is inside the document`);
     }
@@ -1883,6 +2544,35 @@ function selfTest() {
       }
       assertEqual(layout.cells.flat().length, 9, 'nine blocks tile the aggregated matrix');
       assertTrue(layout.cells.flat().every((c) => c.col >= 1 && c.row >= 1), 'every block records how many cells it stands for');
+      // A block carries the layer of the state that won it, and only that state has one: the layer of the
+      // roll-up is not an average of the block, and a block of `existed`/`absent` cells has no layer.
+      assertTrue(layout.cells.flat().every((c) => (c.state === 'candidate' || c.state === 'root'
+        ? c.layer >= 0 && c.layer <= small.model.maxLayer
+        : c.layer === -1)), 'a block carries a layer exactly when its state is a walked one, and within the ramp');
+      // A block that holds hits of more than one depth is drawn at the most intense of them — never darker
+      // than any cell it stands for — which is the roll-up's existing "the strongest recorded fact wins"
+      // applied to the second axis of that fact rather than a second, contradictory rule.
+      for (const [ri, rowSp] of rowSpans.entries()) {
+        for (const [ci, colSp] of colSpans.entries()) {
+          const inBlock = [];
+          for (let r = rowSp[0]; r < rowSp[1]; r += 1) {
+            for (let c = colSp[0]; c < colSp[1]; c += 1) {
+              const cell = model.rows[r].cells[c];
+              if (cell.state === 'candidate' || cell.state === 'root') inBlock.push(cell.layer);
+            }
+          }
+          const drawn = layout.cells[ri][ci];
+          if (inBlock.length === 0) {
+            assertEqual(drawn.layer, -1, 'a block with no walked cell in it carries no layer');
+          } else {
+            assertEqual(drawn.layer, Math.min(...inBlock),
+              `block ${ri},${ci} is drawn at the most intense layer it holds (of ${inBlock.join(', ')})`);
+          }
+        }
+      }
+      assertTrue(layout.cells.flat().some((c) => c.state !== 'absent' && c.layer === 0)
+        && layout.cells.flat().some((c) => c.state !== 'absent' && c.layer === 1),
+        'this fixture has blocks at two different layers, so the roll-up is exercised rather than trivially agreeing');
       assertEqual(layout.cells.flat().filter((c) => c.state === 'absent').length, expectedBlankBlocks,
         `a block is blank only when every cell in it was (${expectedBlankBlocks} of 9 here)`);
       assertTrue(layout.cells.flat().filter((c) => c.state !== 'absent').length >= model.counts.candidate + model.counts.root,
@@ -1930,6 +2620,8 @@ function selfTest() {
     assertTrue(out.line.startsWith('s1-activity: C9 @ round-fixture'), 'the summary names the cell and the run');
     assertTrue(out.line.includes('5 invocations x 7 segments (35 cells)'), 'the summary prints the dimensions');
     assertTrue(out.line.includes('not-created 7, candidate 5, walk-root 3, existed-not-returned 20'), 'the summary prints every state');
+    assertTrue(out.line.includes('recall hits shaded by BFS layer on one run-global ramp sized for depth 1'),
+      'and says the layer scale is run-global and how deep it was sized for');
     assertTrue(out.line.includes('ids recorded 3 on 3/5 invocations'), 'the summary prints the recorded-identity coverage');
     assertTrue(out.line.includes('2 passage-only row(s)'), 'the summary prints the passage-granularity rows');
     assertTrue(out.line.includes('count-only 2'), 'the summary prints how many selections have no id behind them');
@@ -1942,6 +2634,9 @@ function selfTest() {
     assertTrue(explained.includes('count only (2), no id recorded'), '--explain distinguishes a count from an id');
     assertTrue(explained.includes('passage of 2 chunk(s)'), '--explain states the passage granularity');
     assertTrue(explained.includes('turn 2 step 1'), '--explain labels the column with its turn and step');
+    assertTrue(explained.includes('u1=L0 → #2f6fd0'), '--explain states the BFS layer of each walked id, and the shade drawn');
+    assertTrue(explained.includes('the run-global ramp is sized for depth 1'),
+      'and says the scale the layer was read against');
     say('--explain reports the derivation behind every column (carry, walk, selection provenance)');
 
     // --- what must fail loudly ------------------------------------------------------------------
@@ -1972,6 +2667,73 @@ function selfTest() {
     bad('a snapshot of another session',
       { wrongSnapshotSession: true },
       'holds no snapshot of session');
+
+    // --- the shapes a BFS layer cannot be read out of ----------------------------------------------------------------
+    // Each of these is a walk whose record does not state a layer, or states one the tree contradicts.
+    // The tool refuses the first three rather than drawing a shade at a guessed depth: a colour that means
+    // "about this deep" is worse than no colour, because it reads as a measurement.
+    bad('a walk root that is not an object',
+      { treeShape: 'notAnObject' },
+      'rather than the object that would hold its children');
+    bad('a segment the walk reached at two different layers',
+      { treeShape: 'idAtTwoLayers' },
+      'did not record a tree');
+    bad('two walk roots in one recallTree',
+      { treeShape: 'twoRoots' },
+      'this tool may guess');
+    // The fourth is **not** refused any more, and that reversal is the fix rather than a loosening. `bfsDepth` is
+    // set in the assembler's *selection* loop, so it is the deepest layer among the segments that were **placed**;
+    // the tree is the deepest layer the walk **reached**. A walk that returns hits and places none parts them
+    // legitimately - round `20261004-1458`'s assembly 1 did exactly that - so the shade is now read from the tree
+    // and the divergence is counted and printed. What still has to hold is that the count is reported: a silent
+    // disagreement would leave a reader comparing `bfsDepth` against a shade and finding no reason for the gap.
+    {
+      const dir = mkdtempSync(join(tmp, 'depthgap-'));
+      const fixture = buildFixture(dir, { treeShape: 'depthMismatch' });
+      const gap = run({ run: fixture, cell: 'C9' });
+      assertEqual(gap.model.depthDivergences.length, 1,
+        'the invocation whose recorded bfsDepth is not its tree depth is counted, not refused');
+      assertEqual(gap.model.columns[1].record.bfsDepth, 1,
+        'and the shade is read from the tree, so the column carries the depth it really walked');
+      // The lines `--explain` prints, read from the same function that prints them. The self-test used to read a
+      // `summaryLines` field off `run()`'s return value; that field does not exist (the return value is
+      // `{ model, meta, svg, line }` and the explanation is built by `explainLines(model)`), so this assertion threw
+      // a TypeError instead of checking anything - the self-test itself was broken, and the tool's own presence in
+      // the suite is why that matters.
+      const told = explainLines(gap.model).find((l) => l.includes('not the depth of the tree they walked'));
+      assertTrue(told !== undefined, 'and the divergence is printed rather than left for a reader to notice');
+    }
+    // And the roll-up's one honest loss, which is a drawing cost and not a rule: a block that holds hits
+    // of more than one depth is drawn at the most intense of them, so what a block cannot say is which of
+    // its cells carried which depth. The exact figure below the matrix still can.
+    {
+      const dir = mkdtempSync(join(tmp, 'ramp-'));
+      const fixture = buildFixture(dir, { deepTree: true });
+      const rolled = run({ run: fixture, cell: 'C9', grid: { maxCols: 2, maxRows: 3 } });
+      const rolledLayout = layoutOf(rolled.model, { maxCols: 2, maxRows: 3 });
+      const deepCell = rolled.model.rows.find((r) => r.segment.id === 'r2').cells[4];
+      assertEqual(deepCell.layer, 4, 'the exact matrix still carries every layer it read from the walk');
+      assertTrue(rolledLayout.cells.flat().some((c) => c.layer === 0),
+        'a rolled-up block can still be drawn at the walk root, where the run-global ramp is darkest');
+      say('a rolled-up block shows one layer at a time: the most intense it holds, never darker than its own cells');
+    }
+
+    // --- the empty deliveries, and the line between them and an unattributable selection --------------------
+    // Both sides are asserted, because the change that introduced the count could otherwise be read as having
+    // loosened the refusal: an empty record owns no invocation, a record that carried a selection still must.
+    {
+      const dir = mkdtempSync(join(tmp, 'defect-'));
+      const fixture = buildFixture(dir, { emptyDeliveryFarFromAssembly: true });
+      const withEmpty = run({ run: fixture, cell: 'C9' });
+      assertEqual(withEmpty.model.emptyDeliveries, 1, 'empty delivery records are counted');
+      assertEqual(withEmpty.model.deliveriesTotal, 4, 'and the total they are counted against');
+      assertEqual(withEmpty.model.columns.length, 5, 'an empty record adds no invocation');
+      assertEqual(withEmpty.model.identityColumns, 3, 'and changes no selection identity');
+      say('an empty delivery 895 000 ms past every assembly is counted, not refused (1 of 4, 5 invocations)');
+    }
+    bad('a delivered selection beyond the attribution window',
+      { deliveredFarFromAssembly: true },
+      'follows no assembly within');
 
     // The remaining two are file-level absences rather than record-level contradictions.
     {

@@ -20,7 +20,7 @@
  *      authority for a cell, and the first draft of this script that used it produced a dozen false positives on
  *      correct sentences — exactly the failure mode this file has to avoid.
  *   4. PRESET OVERRIDES — a switch written into a preset that the code owns, which would silently override the cell
- *      (the presets' own `_meta` say this is why `deliver`/`xFirst` are absent).
+ *      (the presets' own `_meta` say this is why `deliver`/`tracePlacement` are absent).
  *   5. POINTER DISCIPLINE, COUNTED — how many restated values remain per document, reported as informational counts
  *      so the number can be watched falling. Informational hits never change the exit code.
  *
@@ -134,10 +134,35 @@ const CELL_TOKEN = '(C[0-9])(?![A-Za-z0-9_])';
  * this tree are here; `ρ`, `μ`, `w` and `d` are not, because prose uses them as formula symbols as well.
  */
 const KNOB_ALIASES = {
-  tier1: 'recall.tier1', deliver: 'deliver', xFirst: 'xFirst',
+  tier1: 'recall.tier1', deliver: 'deliver',
+  tracePlacement: 'tracePlacement',
   tMaxChars: 'tas.tMaxChars', updatePolicy: 'tas.updatePolicy', tasOn: 'tas.on',
-  threshold: 'recall.threshold', depth: 'recall.depth', fanout: 'recall.fanout',
-  budgetRatio: 'recall.budgetRatio', minRecalledShare: 'recall.minRecalledShare',
+  threshold: 'recall.threshold', depth: 'recall.depth',
+  // `fanout: 'recall.fanout'` was here until 2026-10-05 and is deleted rather than kept, for the reason the two
+  // entries below spell out: the path it named no longer exists (`recall.fanout` is retired - the per-node
+  // expansion cap was never in the originating brief, in no wiring record and in no panel; `core/src/config.ts`,
+  // `LEGACY_POLICY_KEYS`), and an alias to a dead path is worse than no alias. It resolves to a truthy string, so
+  // the dead-field check below reads the name as a knob it knows and stops instead of reading the mention, and a
+  // `fanout: <value>` claim resolves against a path that does not exist - silence in both directions, when what a
+  // retired knob should produce is a mention that is *read*. A live document that still backticks the bare name
+  // now gets the `dead-policy-field` finding, which is the reading it should produce; the field is still named in
+  // prose (never backticked) by the retirement itself and by the dated corrections, and those are not claims.
+  // `budgetRatio` was here until 2026-10-05 and is deleted rather than kept: the path it named no longer exists,
+  // and an alias to a dead path is worse than no alias. It resolves to a truthy string, so a doc sentence about it
+  // would be skipped by the dead-field check instead of flagged, and a `budgetRatio: <value>` claim would not be
+  // resolved at all - silence in both directions. A document that still mentions the retired knob is now a
+  // `dead-policy-field` finding, which is the reading a retired knob should produce.
+  //
+  // `questionPlacement` was here until the same day and is deleted for the same reason and one more: the path it
+  // named is itself gone - the field was **deleted rather than renamed**, because the paper places the question last
+  // in every condition, so the question's position is not a variable (`packages/core/src/config.ts` carries the
+  // deletion). An alias to a dead path is worse than no alias there too: it resolves to a truthy string, so the
+  // dead-field check reads the name as a knob it knows and stops instead of reading the mention, and a
+  // `questionPlacement: <value>` claim resolves against a path that does not exist, which is not a comparison.
+  // Silence in both directions, when what a retired knob should produce is a mention that is read: a retired path
+  // named under a field the policy does declare is the `dead-policy-field` finding
+  // (`.s1cap-ablation/DEFECT-GATE.md` carries the `recall.budgetRatio` one).
+  minRecalledShare: 'recall.minRecalledShare',
   minRecalledSegments: 'recall.minRecalledSegments', anchorWaitMs: 'recall.anchorWaitMs',
   window: 'recall.window', retryAttempts: 's1.retryAttempts', admissionLimit: 's1.admissionLimit',
   questionsPerCall: 's1.questionsPerCall', reselectPolicy: 'cache.reselectPolicy',
@@ -149,8 +174,24 @@ const KNOB_ALIASES = {
  * Paths a preset may not carry: the code owns them, and a value in a preset would silently override the cell. `cell`
  * is deliberately not here — a preset names its own cell, which is how a loader selects it, and `cellPolicy()` sets
  * the same value. What is checked instead is that the name agrees with the file it is in.
+ *
+ * The field the code owns is `tracePlacement`, and it is now the whole list.
+ *
+ * It is on the list for the reason the single boolean `xFirst` was: it is the paper's own contrast, the only layout
+ * axis this build has (the question's position was deleted rather than renamed — the paper places it last in every
+ * condition, so it is not a variable), `cellPolicy()` fixes it at `'trace-as-state'`, and a preset carrying
+ * `'trace-append'` would put that cell on the other side of the paper's control and quietly redefine which arm it
+ * *is* (`packages/core/src/types.ts`, above `cellPolicy()`).
+ *
+ * **`deliver` was removed from this list on 2026-10-05, and that is a change of architecture rather than a
+ * relaxation.** It was here because `cellPolicy()` set it per cell, so a preset carrying it would have overridden a
+ * value the code owned. The ownership moved: `deliver` now comes from `bench/cells/<cell>.json` — the file a
+ * researcher can edit and the file a round copies into its own home — and `cellPolicy()` no longer sets it. The
+ * guard's premise was "the code owns this", and the code stopped owning it. What protects against the silent
+ * override it was written for is now different and stronger: the preset is an explicit layer with a recorded
+ * provenance (`cellPreset.fromPreset` / `.overridden` on the wiring record), so a preset value is never a surprise.
  */
-const CODE_OWNED_SWITCHES = ['deliver', 'xFirst'];
+const CODE_OWNED_SWITCHES = ['tracePlacement'];
 
 /** Extensions a document reference may carry. A path without one of these is not treated as a file reference. */
 const REF_EXTENSIONS = ['ts', 'mts', 'cts', 'js', 'mjs', 'cjs', 'py', 'json', 'jsonl', 'md', 'yml', 'yaml', 'svg', 'html', 'png', 'txt'];
@@ -1187,9 +1228,9 @@ export function countRestatements({ documents, valueInfo, refChecks }) {
 // ---------------------------------------------------------------------------------------------------------------
 
 const FIXTURE_POLICY = `export const CORE_SCHEMA_VERSION = 1 as const;
-export interface AssemblyPolicy { deliver: boolean; xFirst: boolean; recall: { tier1: 'off' | 's1'; threshold: number }; tas: { on: boolean } }
+export interface AssemblyPolicy { deliver: boolean; tracePlacement: 'trace-as-state' | 'trace-append'; recall: { tier1: 'off' | 's1'; threshold: number }; tas: { on: boolean } }
 export function defaultPolicy(): AssemblyPolicy {
-  return { cell: 'C2', deliver: false, xFirst: true, recall: { tier1: 's1', threshold: 0.55 }, tas: { on: true } };
+  return { cell: 'C2', deliver: false, tracePlacement: 'trace-as-state', recall: { tier1: 's1', threshold: 0.55 }, tas: { on: true } };
 }
 export function cellPolicy(cell: 'C0' | 'C1' | 'C2') {
   const p = defaultPolicy();
@@ -1199,18 +1240,15 @@ export function cellPolicy(cell: 'C0' | 'C1' | 'C2') {
       p.tas.on = false;
       p.recall.tier1 = 'off';
       p.deliver = false;
-      p.xFirst = false;
       break;
     case 'C1':
       p.tas.on = true;
       p.recall.tier1 = 'off';
       p.deliver = false;
-      p.xFirst = true;
       break;
     case 'C2':
       p.recall.tier1 = 's1';
       p.deliver = true;
-      p.xFirst = true;
       break;
   }
   return p;
@@ -1314,6 +1352,13 @@ const FIXTURE_FILES = {
     '',
     '`C1` sets `deliver: true` today, beside `recall.tier1: \'off\'`.',
     '`C2` runs the full configuration with `recall.tier1: \'embed\'`.',
+    // `tracePlacement` is the only layout axis, and the code names it, so a wrong value for it is the same class of
+    // finding as a wrong `deliver`.
+    '`C1` runs `tracePlacement: \'trace-append\'`, the control arm.',
+    // The deleted question axis, asserted as absent rather than left untested: this line states a value for a path
+    // the policy does not have, so it is not a value claim and no `stale-value` finding can be its reading. If the
+    // field ever comes back, the line starts resolving and the assertion on it fails — which is the point of it.
+    '`C2` runs `questionPlacement: \'first\'`, a layout the paper has no condition for.',
     '',
   ].join('\n'),
   'docs/DATED-RECORD.md': [
@@ -1347,7 +1392,7 @@ const FIXTURE_FILES = {
   ].join('\n'),
 };
 
-const FIXTURE_BAD_PRESET = JSON.stringify({ _meta: { role: 'a preset that takes a switch back' }, cell: 'C9', deliver: true, recall: { tier1: 'off' } }, null, 2);
+const FIXTURE_BAD_PRESET = JSON.stringify({ _meta: { role: 'a preset that takes a switch back' }, cell: 'C9', deliver: true, tracePlacement: 'trace-append', recall: { tier1: 'off' } }, null, 2);
 
 function writeFixtureRepo(dir) {
   for (const [rel, text] of Object.entries(FIXTURE_FILES)) {
@@ -1430,6 +1475,14 @@ export function selfTest({ quiet = false } = {}) {
     expect('a wrong deliver claim for C1 is a finding', stale.some((f) => f.key === 'deliver' && f.cell === 'C1' && f.stated === 'true'), kinds(stale).join('; '));
     expect('a wrong tier1 claim for C2 is a finding', stale.some((f) => f.key === 'recall.tier1' && f.cell === 'C2' && f.stated === 'embed'));
     expect('a correct claim is not a finding', !stale.some((f) => f.file === 'docs/GOOD.md'), kinds(stale.filter((f) => f.file === 'docs/GOOD.md')).join('; '));
+    // `tracePlacement` is the layout axis the code names, so a document claiming the wrong arm must be a finding
+    // rather than silently unchecked.
+    expect('a wrong tracePlacement claim for C1 is a finding', stale.some((f) => f.key === 'tracePlacement' && f.cell === 'C1' && f.stated === 'trace-append'), kinds(stale).join('; '));
+    // The deleted question axis (`questionPlacement`, removed on 2026-10-05 and not renamed): a document still
+    // stating a value for it is stating it against a path the policy does not have, so it is not a value claim and
+    // no `stale-value` finding is its reading. Pinned rather than dropped, so the deletion is asserted: if the field
+    // ever returns, the fixture line above starts resolving and this expectation fails.
+    expect('a claim about the deleted question axis is not a value claim (the field is gone)', !stale.some((f) => f.key === 'questionPlacement' || f.asWritten === 'questionPlacement'), kinds(stale).join('; '));
     expect('a dated record is not flagged for a value it states in the past tense', !stale.some((f) => f.file === 'docs/DATED-RECORD.md'), kinds(stale).join('; '));
     expect('the dated record is still reported as informational', report.history.some((h) => h.file === 'docs/DATED-RECORD.md' && h.key === 'deliver'));
     // Field cases verified by hand in this session.
@@ -1439,6 +1492,7 @@ export function selfTest({ quiet = false } = {}) {
 
     const preset = report.findings.filter((f) => f.kind === 'preset-override');
     expect('a code-owned switch written into a preset is a finding', preset.some((f) => f.file === 'bench/cells/C4.json' && f.target === 'deliver'), kinds(preset).join('; '));
+    expect('the code-owned layout axis written into a preset is a finding', preset.some((f) => f.file === 'bench/cells/C4.json' && f.target === 'tracePlacement'), kinds(preset).join('; '));
     expect('a preset whose `cell` disagrees with its own file name is a finding', preset.some((f) => f.file === 'bench/cells/C4.json' && f.target === 'cell'), kinds(preset).join('; '));
     expect('the presets the code agrees with are not findings', !preset.some((f) => ['bench/cells/C0.json', 'bench/cells/C1.json', 'bench/cells/C2.json'].includes(f.file)), kinds(preset).join('; '));
 

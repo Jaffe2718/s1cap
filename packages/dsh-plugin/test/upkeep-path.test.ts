@@ -64,6 +64,17 @@ async function settle(): Promise<void> {
 }
 
 /**
+ * A pre-step payload: one message, which becomes the step's own segment and its recall anchor.
+ *
+ * It exists because scoring is on-demand since 2026-10-05. A test that wants the live System-1 path exercised has
+ * to drive a *step*: the rows are bought by the walk a step's recall starts, and events folded in by upkeep are
+ * nodes with no rows until a step asks for them.
+ */
+function stepPayload(text: string): unknown {
+  return { step: 2, messages: [{ id: `q-${text.slice(0, 8)}`, role: 'user', content: [{ type: 'text', text }] }] };
+}
+
+/**
  * The session-event shapes the host actually emits.
  *
  * Measured, not inferred: a `session-event-probe` line from a live session recorded the envelope as
@@ -182,23 +193,32 @@ test('a todo/write event is a lifecycle event: counted, and no segment', async (
   assert.equal(stats.errors, 0, 'and nothing threw');
 });
 
-test('a batch scorer is called for the window once there is a previous segment to score against', async () => {
+test('a step\'s recall buys its rows from the batch scorer, and the pairs are counted', async () => {
+  // **What this pins moved on 2026-10-05, and the move is the design.** Upkeep used to call the scorer for every
+  // event it folded in; it no longer scores at all, because scoring is on-demand: the rows are bought by a step's
+  // recall (`AssociationGraph.recallDemand`), level by level, from the anchor backwards. So the fixture drives a
+  // step *after* the events - which is what a live session does on its next LLM call - and the assertions are the
+  // same three facts about the same counters, now produced by the walk.
   const h = harness({ withScorer: true });
   for (const event of sessionEvents()) h.observer.noteSessionEvent(event);
   h.ticks.forEach((tick) => tick());
+  await settle();
+  await h.observer.observe(stepPayload('and now report what you found'));
   await settle();
 
   assert.ok(h.scored.length > 0, 'the batch scorer ran: this is the live System-1 path');
   const stats = h.observer.stats();
   assert.ok(stats.upkeepScoredPairs > 0, 'and the pairs are counted');
   assert.ok(stats.graphEdges > 0, 'a weight above the threshold produced an edge');
-  assert.equal(stats.upkeepDeferredPairs, 0, 'nothing was held back by a scorer that answers');
+  assert.equal(stats.upkeepMissedPairs, 0, 'nothing was asked for and left unanswered');
 });
 
-test('a scorer that defers its windows is counted, not scored, and the graph holds no edge for it', async () => {
+test('a scorer that defers its rows is counted, not scored, and the graph holds no edge for it', async () => {
   // The wiring half of `S1_DEFERRED` (`backpressure.test.ts` holds the mechanism). What this pins is that the
-  // observer's counters separate "the backend answered little" from "we stopped asking": a deferred window is
-  // neither a lexical score nor an edge, and `upkeepDeferredPairs` is where it is reported.
+  // observer's counters separate "the backend answered little" from "we stopped asking": a deferred row is neither
+  // a lexical score nor an edge, and the graph's `demandMissedPairs` - read here through the observer's own
+  // `upkeepMissedPairs` - is where the omission is reported. It is deliberately *not* `upkeepDeferredPairs`: that
+  // counter is the eager sweep's accounting of a suffix of the append order, and nothing writes it any more.
   const ticks: (() => void)[] = [];
   const records: unknown[] = [];
   let calls = 0;
@@ -220,13 +240,16 @@ test('a scorer that defers its windows is counted, not scored, and the graph hol
   for (const event of sessionEvents()) observer.noteSessionEvent(event);
   ticks.forEach((tick) => tick());
   await settle();
+  await observer.observe(stepPayload('and now report what you found'));
+  await settle();
 
   const stats = observer.stats();
   assert.ok(calls > 0, 'the scorer was asked, and declined');
   assert.equal(stats.upkeepJudgedPairs, 0, 'the backend judged nothing');
-  assert.equal(stats.upkeepScoredPairs, 0, 'and nothing was offered, so nothing is counted as scored');
-  assert.ok(stats.upkeepDeferredPairs > 0, `the held-back pairs are counted (${stats.upkeepDeferredPairs})`);
-  assert.equal(stats.graphEdges, 0, 'no edge was invented from a window that was never judged');
+  assert.equal(stats.upkeepScoredPairs, 0, 'and nothing was settled, so nothing is counted as scored');
+  assert.ok(stats.upkeepMissedPairs > 0, `the pairs nobody answered are counted (${stats.upkeepMissedPairs})`);
+  assert.equal(stats.upkeepDeferredPairs, 0, 'and the eager path\'s deferral counter stays at zero: nothing walks it');
+  assert.equal(stats.graphEdges, 0, 'no edge was invented from a row that was never judged');
   assert.equal(stats.errors, 0, 'and a deferral is not an error');
 });
 

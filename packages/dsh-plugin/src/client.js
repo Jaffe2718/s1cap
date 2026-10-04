@@ -22,8 +22,8 @@
  *      the host after a save instead of trusting the form;
  *   2. the Jev key, which belongs to the Jev half. It never passes through a command's raw input — that would put
  *      it in the session transcript — and the panel only ever shows whether a key exists, never its value;
- *   3. the recall tuning — **BFS depth d** (integer, d > 0), **relevance threshold r** (0 <= r <= 1), the
- *      **scoring window w** (integer >= 64) and the **anchor wait** in milliseconds (integer 0..60000, 0 disables
+ *   3. the recall tuning — **BFS depth d** (integer, 1..16), **relevance threshold r** (0 <= r <= 1), the
+ *      **scoring window w** (integer >= 4) and the **anchor wait** in milliseconds (integer 0..60000, 0 disables
  *      it) — saved through the host's `/s1cap-7340/tuning` route as the same command line `/s1-tune` takes and
  *      applied by the host to the live policy at session start;
  *   4. the local Laya backend's own fields: the Python interpreter, the weights cache and the environment variable
@@ -50,9 +50,17 @@ window.__ModuleLoader__.load({
     /** `<scope>/<id>` refs; the host half reads the same two (packages/dsh-plugin/src/credentials.ts). */
     const REF = 's1cap/jev';
     const TUNING_REF = 's1cap/tuning';
-    const DEFAULT_DEPTH = 2;
+    /**
+     * The panel's own fallback copies of the three recall defaults, used to fill the boxes when the host route does
+     * not answer. Every one of them mirrors `defaultPolicy().recall` (`packages/core/src/types.ts`), which is the
+     * authority: `depth` 16, `threshold` 0.55, `window` 16 since 2026-10-05 — the window fell from 1024 because a
+     * window at or above a session's segment count does nothing and cost 4.3x the session it had to serve, and the
+     * depth rose from 2 to carry the reach the window gave up (`w x d`). The panel cannot import the policy (it is
+     * the browser-side half), so these are the one copy, and `test/panel.test.ts` fails if they drift from it.
+     */
+    const DEFAULT_DEPTH = 16;
     const DEFAULT_TAU = 0.55;
-    const DEFAULT_WINDOW = 1024;
+    const DEFAULT_WINDOW = 16;
     /**
      * Matches `defaultPolicy().recall.anchorWaitMs`: how long a step may wait for the anchor's own scoring row.
      *
@@ -62,8 +70,37 @@ window.__ModuleLoader__.load({
     const DEFAULT_WAIT = 10000;
     /** the same bound core's NUMBER_RULES carries for `recall.anchorWaitMs`, so the panel refuses what the host would drop */
     const MAX_WAIT = 60000;
-    /** matches `defaultPolicy().xFirst`, so an unreachable host shows the layout that is actually in effect */
-    const DEFAULT_XFIRST = true;
+    /** the same bounds core's NUMBER_RULES carries for `recall.depth` (1..16) and `recall.window` (>= 4) */
+    const MIN_DEPTH = 1;
+    const MAX_DEPTH = 16;
+    const MIN_WINDOW = 4;
+    /**
+     * The two values the arm selector offers, in the host's own spelling (`TracePlacement` in `@s1cap/core`).
+     *
+     * `trace-as-state` is the paper's method — `M([T, x, q])`, the trace placed *before* the long context — and it
+     * is the default because that is what the project is testing. `trace-append` is the paper's own control:
+     * `M([x, T, q])`, the same two elements with order as the only difference. The panel labels them by those
+     * names rather than by "before/after context", because the arm is what a round measures and the mechanism is
+     * an implementation detail of it.
+     */
+    const TRACE_CHOICES = [
+      { value: 'trace-as-state', label: 'Trace as State — [T, x, q] (the paper\'s method)' },
+      { value: 'trace-append', label: 'Trace Append — [x, T, q] (the control)' },
+    ];
+    /** matches `defaultPolicy().tracePlacement`, so an unreachable host shows the arm actually in effect */
+    const DEFAULT_TRACE = 'trace-as-state';
+    /**
+     * The question's position is **not** offered, and its absence is the point (2026-10-05).
+     *
+     * This panel used to render a `q` selector with `last` and `first`, on the reading that the question's position
+     * was a setting that merely happened not to be the paper's variable. The paper fixes it: "We therefore separate
+     * the question from the long context and place it at the end of every input" (arXiv:2609.02702 §4.1), with
+     * `[T, x, q]` and `[x, T, q]` as its two arms — so `first` rendered `[T, q, x]`, which is neither arm, and a
+     * control that offers a layout the build cannot justify is worse than no control. The axis is deleted from the
+     * policy, and the two spellings a previous panel wrote are handled by the host: `xFirst=on`/`q=first` are refused
+     * with the sentence that retired them and `xFirst=off`/`q=last` are noted, both of which this panel shows (see
+     * the legacy read in `load()` and the note under the arm selector).
+     */
     /** matches `resolvePluginConfig()`'s default `s1.provider`, so an unreachable host still shows a real backend */
     const DEFAULT_PROVIDER = 'jev';
     /**
@@ -128,7 +165,7 @@ window.__ModuleLoader__.load({
       note: { margin: 0, fontSize: '12px', opacity: 0.75 },
     };
 
-    /** The panel: the backend radio with its three blocks, the recall knobs, and the layout switch. */
+    /** The panel: the backend radio with its three blocks, the recall knobs, and the paper's arm selector. */
     function makeSection(ctx) {
       return function S1CapSection() {
         const [state, setState] = React.useState({ phase: 'loading', configured: false, message: '' });
@@ -137,7 +174,8 @@ window.__ModuleLoader__.load({
         const [tau, setTau] = React.useState('');
         const [win, setWin] = React.useState('');
         const [wait, setWait] = React.useState('');
-        const [xFirst, setXFirst] = React.useState(DEFAULT_XFIRST);
+        /** the paper's variable: which of its two second-pass arms this session lays out — and the only axis */
+        const [trace, setTrace] = React.useState(DEFAULT_TRACE);
         /**
          * Which backend the radio selects.
          *
@@ -207,7 +245,7 @@ window.__ModuleLoader__.load({
             let nextTau = String(DEFAULT_TAU);
             let nextWin = String(DEFAULT_WINDOW);
             let nextWait = String(DEFAULT_WAIT);
-            let nextXFirst = DEFAULT_XFIRST;
+            let nextTrace = DEFAULT_TRACE;
             /** `null` means "the host did not name a backend I offer": leave the radio where the user left it. */
             let nextProvider = null;
             let nextLayaPath = '';
@@ -220,17 +258,17 @@ window.__ModuleLoader__.load({
               const response = await fetch('/s1cap-7340/tuning');
               const answer = await response.json();
               const eff = answer?.effective ?? {};
-              if (Number.isInteger(eff.depth) && eff.depth > 0) nextDepth = String(eff.depth);
+              if (Number.isInteger(eff.depth) && eff.depth >= MIN_DEPTH && eff.depth <= MAX_DEPTH) nextDepth = String(eff.depth);
               if (Number.isFinite(eff.relevanceThreshold) && eff.relevanceThreshold >= 0 && eff.relevanceThreshold <= 1) {
                 nextTau = String(eff.relevanceThreshold);
               }
-              if (Number.isInteger(eff.window) && eff.window >= 64) nextWin = String(eff.window);
+              if (Number.isInteger(eff.window) && eff.window >= MIN_WINDOW) nextWin = String(eff.window);
               // 0 is a real value here - it disables the anchor wait - so this tests the type and the bound rather
               // than truthiness. The `>= 0` half is what keeps a disabled wait from reading back as "not stored".
               if (Number.isInteger(eff.anchorWaitMs) && eff.anchorWaitMs >= 0 && eff.anchorWaitMs <= MAX_WAIT) {
                 nextWait = String(eff.anchorWaitMs);
               }
-              if (typeof eff.xFirst === 'boolean') nextXFirst = eff.xFirst;
+              if (TRACE_CHOICES.some((choice) => choice.value === eff.tracePlacement)) nextTrace = eff.tracePlacement;
               /**
                * The radio, filled from the host rather than from the form.
                *
@@ -251,6 +289,21 @@ window.__ModuleLoader__.load({
                * "what is the backend running with right now", which is what the status line below reports.
                */
               const stored = answer?.stored ?? {};
+              /**
+               * A stored file that still carries the question's old axis says so here, in the panel's own message
+               * line: the host reads `refused`/`notes` out of `tuning.json` (`readTuningFile`, packages/dsh-plugin/
+               * src/index.ts) and `stored` is where this route echoes them back. `refused` is the half that matters —
+               * a stored `xFirst: true` / `questionPlacement: 'first'` asks for `[T, q, x]`, which no setting
+               * produces, and the panel must not look as though it applied one. The notes are the harmless half (the
+               * question-last spellings), and they are shown for the same reason: a file that asked for something
+               * this build no longer has must not be read in silence.
+               */
+              const refusals = Array.isArray(stored.refused) ? stored.refused : [];
+              if (refusals.length > 0) {
+                note = refusals.map((refusal) => String(refusal && refusal.message ? refusal.message : refusal)).join(' ');
+              } else if (Array.isArray(stored.notes) && stored.notes.length > 0) {
+                note = stored.notes.map((entry) => String(entry)).join(' ');
+              }
               const supplied = answer?.status?.laya?.supplied ?? {};
               const pick = (a, b) => (typeof a === 'string' && a !== '' ? a : typeof b === 'string' ? b : '');
               nextLayaPath = pick(stored.layaPythonPath, supplied.pythonPath);
@@ -280,20 +333,38 @@ window.__ModuleLoader__.load({
                 const d = Number(parts[0]);
                 const r = Number(parts[1]);
                 const w = Number(parts[2]);
-                if (Number.isInteger(d) && d > 0) nextDepth = String(d);
+                if (Number.isInteger(d) && d >= MIN_DEPTH && d <= MAX_DEPTH) nextDepth = String(d);
                 if (Number.isFinite(r) && r >= 0 && r <= 1) nextTau = String(r);
-                if (Number.isInteger(w) && w >= 64) nextWin = String(w);
+                if (Number.isInteger(w) && w >= MIN_WINDOW) nextWin = String(w);
                 const legacySwitch = String(parts[3] ?? '').toLowerCase();
-                if (['1', 'on', 'true', 'yes'].includes(legacySwitch)) nextXFirst = true;
-                else if (['0', 'off', 'false', 'no'].includes(legacySwitch)) nextXFirst = false;
-                note = 'read from the legacy credential entry; the tuning route is unreachable';
+                // The fourth slot is the question's old setting, under every spelling it had. It is no longer a
+                // setting at all — the paper places the question last in every condition, so `q` is the last block by
+                // construction and the axis was deleted rather than renamed — and this panel offers no control for it.
+                // What it *can* still do is tell the truth about what that stored string asks for: `on`/`first` wants
+                // `[T, q, x]`, which no layout produces (the host refuses that spelling with the same sentence), and
+                // `off`/`last` wants what every layout does now. Saying it here matters because this branch runs when
+                // the host route is unreachable, which is exactly when nobody else will say it. The arm has no legacy
+                // spelling — it did not exist before this panel did — so it stays at the default.
+                const wantsFirst = ['first', 'qfirst', '1', 'on', 'true', 'yes'].includes(legacySwitch);
+                const wantsLast = ['last', 'qlast', '0', 'off', 'false', 'no'].includes(legacySwitch);
+                note = wantsFirst
+                  ? 'the stored tuning string asks for the question first (`' + legacySwitch + '`), which is not a ' +
+                    'layout this build has: the paper separates the question from the long context and places it at ' +
+                    'the end of every input, and the setting that could move it was deleted, so that field was ' +
+                    'ignored. The only layout axis is the trace placement. (Read from the legacy credential entry; ' +
+                    'the tuning route is unreachable.)'
+                  : wantsLast
+                    ? 'the stored tuning string carries the retired question setting (`' + legacySwitch + '`): the ' +
+                      'question is last in every layout now, so it asked for what already happens and nothing was ' +
+                      'changed. (Read from the legacy credential entry; the tuning route is unreachable.)'
+                    : 'read from the legacy credential entry; the tuning route is unreachable';
               }
             }
             setDepth(nextDepth);
             setTau(nextTau);
             setWin(nextWin);
             setWait(nextWait);
-            setXFirst(nextXFirst);
+            setTrace(nextTrace);
             if (nextProvider !== null) setProvider(nextProvider);
             setLayaPath(nextLayaPath);
             setLayaWeights(nextLayaWeights);
@@ -358,28 +429,25 @@ window.__ModuleLoader__.load({
         }, [draft, load, write]);
 
         /**
-         * Validate against the two rules the panel states — d an integer greater than 0, r between 0 and 1 — and
-         * refuse anything else instead of sending a value the host would silently drop.
+         * Validate against the rules the panel states — d an integer in 1..16, r between 0 and 1, w an integer at
+         * least 4 — and report **every** offending field, each with its own name, instead of sending a value the host
+         * would silently drop. A single first-failure message reads as if it were about the field just edited, which
+         * is how this misled us once when depth was still empty and the window was the field being typed into.
          */
-          /**
-           * Validate against the stated rules and report **every** offending field, each with its own name. A single
-           * first-failure message reads as if it were about the field just edited, which is how this misled us once
-           * when depth was still empty and the window was the field being typed into.
-           */
           const saveTuning = React.useCallback(async () => {
             const d = Number(depth);
             const r = Number(tau);
             const w = Number(win);
             const waitMs = Number(wait);
             const problems = [];
-            if (depth.trim() === '' || !Number.isInteger(d) || d <= 0) {
-              problems.push('depth d must be an integer greater than 0');
+            if (depth.trim() === '' || !Number.isInteger(d) || d < MIN_DEPTH || d > MAX_DEPTH) {
+              problems.push('depth d must be an integer between ' + MIN_DEPTH + ' and ' + MAX_DEPTH);
             }
             if (tau.trim() === '' || !Number.isFinite(r) || r < 0 || r > 1) {
               problems.push('threshold r must be a number between 0 and 1');
             }
-            if (win.trim() === '' || !Number.isInteger(w) || w < 64) {
-              problems.push('window w must be an integer of at least 64');
+            if (win.trim() === '' || !Number.isInteger(w) || w < MIN_WINDOW) {
+              problems.push('window w must be an integer of at least ' + MIN_WINDOW);
             }
             // 0 is accepted and means "do not wait": the host drops a value outside 0..60000 rather than clamping it,
             // so refusing it here is what keeps the form from looking saved next to a wait that never took effect.
@@ -409,13 +477,20 @@ window.__ModuleLoader__.load({
           if (layaWeightsValue !== '') layaFields.push('weights="' + layaWeightsValue + '"');
           if (layaEnvVarValue !== '') layaFields.push('weightsEnv=' + layaEnvVarValue);
           // The wait rides on the same command line under its keyed name. It has no positional slot: the first four
-          // tokens are the legacy order (`d r w xFirst`) that older writes and the credential string use, and adding
-          // a fifth would put a duration where `xFirst` is read from.
+          // tokens are the legacy `d r w <question>` order that older writes and the credential string use, and
+          // adding a fifth would put a duration where a question token is still read from.
+          //
+          // The arm goes on under its own keyed name rather than into the positional slot, and **the question does
+          // not go on at all**: `trace=` is the paper's variable and the only layout axis, while the question's
+          // position stopped being a setting when the axis behind it was deleted (the paper places `q` last in every
+          // condition, and the panel no longer renders a control for it). Writing `q=last` here would put a spelling
+          // on every save that the host reads only to note as retired.
           //
           // The radio rides along too, and on *both* buttons: the provider is part of the form, so a save that
           // touched only the knobs must not quietly leave a radio the user just moved pointing at the old backend.
           const body = [
-            d + ' ' + r + ' ' + w + ' xFirst=' + (xFirst ? 'on' : 'off'),
+            d + ' ' + r + ' ' + w,
+            'trace=' + trace,
             'wait=' + waitMs,
             'provider=' + provider,
           ]
@@ -435,19 +510,24 @@ window.__ModuleLoader__.load({
             }
             const eff = answer.effective ?? {};
             // Trust the host, not the form: whatever it stored becomes what the panel shows.
-            if (Number.isInteger(eff.depth) && eff.depth > 0) setDepth(String(eff.depth));
+            if (Number.isInteger(eff.depth) && eff.depth >= MIN_DEPTH && eff.depth <= MAX_DEPTH) setDepth(String(eff.depth));
             if (Number.isFinite(eff.relevanceThreshold)) setTau(String(eff.relevanceThreshold));
-            if (Number.isInteger(eff.window) && eff.window >= 64) setWin(String(eff.window));
+            if (Number.isInteger(eff.window) && eff.window >= MIN_WINDOW) setWin(String(eff.window));
             if (Number.isInteger(eff.anchorWaitMs) && eff.anchorWaitMs >= 0 && eff.anchorWaitMs <= MAX_WAIT) {
               setWait(String(eff.anchorWaitMs));
             }
-            if (typeof eff.xFirst === 'boolean') setXFirst(eff.xFirst);
+            if (TRACE_CHOICES.some((choice) => choice.value === eff.tracePlacement)) setTrace(eff.tracePlacement);
             if (PROVIDER_CHOICES.some((choice) => choice.value === eff.provider)) setProvider(eff.provider);
+            // The retirement notes the host answered with, if the command line carried one (`q=last`, `xFirst=off`):
+            // the panel never writes such a token itself, so this is for a body assembled by something else — and it
+            // is shown for the same reason the host prints it, so that nothing about the deleted axis is silent.
+            const saveNotes = Array.isArray(answer.notes) ? answer.notes.map((entry) => String(entry)) : [];
             const summary =
               'saved: provider=' + eff.provider + ' d=' + eff.depth + ' r=' + eff.relevanceThreshold + ' w=' + eff.window +
-                ' wait=' + eff.anchorWaitMs + ' xFirst=' + (eff.xFirst ? 'on' : 'off') +
+                ' wait=' + eff.anchorWaitMs + ' trace=' + eff.tracePlacement +
                 (layaFields.length > 0 ? ' + ' + layaFields.length + ' Laya field(s)' : '') +
-                (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')');
+                (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')') +
+                (saveNotes.length > 0 ? ' — ' + saveNotes.join(' ') : '');
             // Re-read the host so the backend status and the conflict line reflect what was just written. The
             // host's PUT answer echoes the recall knobs only, so without this second read the panel would show a
             // stale conflict next to the path that just resolved it. `load()` resets the message, so the summary
@@ -457,7 +537,7 @@ window.__ModuleLoader__.load({
           } catch (err) {
             setState((s) => ({ ...s, message: 'tuning save failed: ' + String(err) }));
           }
-        }, [depth, tau, win, wait, xFirst, provider, layaPath, layaWeights, layaEnvVar, load]);
+        }, [depth, tau, win, wait, trace, provider, layaPath, layaWeights, layaEnvVar, load]);
 
         const clear = React.useCallback(async () => {
           try {
@@ -669,9 +749,13 @@ window.__ModuleLoader__.load({
           e(
             'p',
             { style: S.note },
-            'BFS depth d bounds how many hops recall may walk the association graph (integer, d > 0). The relevance ' +
+            'BFS depth d bounds how many hops recall may walk the association graph (integer, ' + MIN_DEPTH + '..' +
+              MAX_DEPTH + '; it is what carries the walk\'s reach, at `w x d` segments, and raising it costs the ' +
+              'scoring lane nothing while scoring is eager). The relevance ' +
               'threshold r is the edge weight a segment must reach to be recalled (0 ≤ r ≤ 1). The window w is how many ' +
-              'recent segments each new segment is scored against, and it is what bounds the System-1 cost of scoring. ' +
+              'recent segments each new segment is scored against, and it is what bounds the System-1 cost of scoring ' +
+              '— but only once it is smaller than the session\'s segment count: a window the session never reaches ' +
+              'scores every pair and costs the full quadratic. ' +
               'The wait is how long a step may hold for the newest user segment\'s own scoring row to be judged by the ' +
               'System-1 backend before it assembles anyway, in milliseconds (a measured relevance call has a median of ' +
               '15.3 s; 0 turns the wait off, and the assembler then admits the pairs the backend never judged as unknown). ' +
@@ -685,7 +769,8 @@ window.__ModuleLoader__.load({
               id: 's1cap-depth',
               style: S.number,
               type: 'number',
-              min: '1',
+              min: String(MIN_DEPTH),
+              max: String(MAX_DEPTH),
               step: '1',
               value: depth,
               placeholder: String(DEFAULT_DEPTH),
@@ -708,7 +793,7 @@ window.__ModuleLoader__.load({
               id: 's1cap-window',
               style: S.number,
               type: 'number',
-              min: '64',
+              min: String(MIN_WINDOW),
               step: '1',
               value: win,
               placeholder: String(DEFAULT_WINDOW),
@@ -739,39 +824,55 @@ window.__ModuleLoader__.load({
             { style: S.row },
             e('button', { style: S.button, type: 'button', onClick: () => void saveTuning() }, 'Save tuning'),
           ),
-          e('h3', { style: S.subtitle }, 'Layout'),
+          e('h3', { style: S.subtitle }, 'Layout — the paper\'s arm'),
           e(
             'div',
             { style: S.row },
-            e('input', {
-              id: 's1cap-xfirst',
-              type: 'checkbox',
-              checked: xFirst,
-              onChange: (event) => setXFirst(event.target.checked),
-            }),
+            e('label', { style: S.label, htmlFor: 's1cap-trace' }, 'trace'),
             e(
-              'label',
-              { style: S.label, htmlFor: 's1cap-xfirst' },
-              'x-first: put the current task before recalled history',
+              'select',
+              {
+                id: 's1cap-trace',
+                value: trace,
+                onChange: (event) => setTrace(event.target.value),
+                style: S.input,
+              },
+              ...TRACE_CHOICES.map((choice) =>
+                e('option', { key: choice.value, value: choice.value }, choice.label),
+              ),
             ),
           ),
           e(
             'p',
             { style: S.note },
-            xFirst
-              ? 'On — [pinned | T | x | recalled | tail]. The task is read first and the evidence follows it, the ' +
-                  '"state then information" order; x also joins the byte-stable head, which holds while the task does ' +
-                  'not change.'
-              : 'Off — [pinned | T | recalled | tail | x]. History sits immediately before the task and x stays last, ' +
-                  'so everything above x is history and only the pinned prefix is stable.',
+            trace === 'trace-as-state'
+              ? 'Trace as State — [pinned | T | recalled | tail | q]: the trace is placed before the long context, ' +
+                  'which is the method this project is testing, and the question stays last.'
+              : 'Trace Append — [pinned | recalled | tail | T | q]: the same trace after the long context, the paper\'s ' +
+                  'own control arm. Nothing but the order of T and the context differs from Trace as State.',
+          ),
+          // No question selector, and the note says why rather than leaving its absence to be read as an oversight.
+          // The panel used to offer `q` first/last; the paper fixes it last in every condition ("place it at the end
+          // of every input"), so `first` laid out [T, q, x] — neither of the paper's two arms — and the axis was
+          // deleted from the policy rather than renamed. A stored `xFirst`/`questionPlacement` from an older panel is
+          // read by the host and reported here: the question-first spellings are refused with the sentence that
+          // retired them, the question-last ones are noted, and neither is silent.
+          e(
+            'p',
+            { style: S.note },
+            'The question is last in every layout and is not a setting: the paper separates it from the long context ' +
+              'and places it "at the end of every input", so `q` is the final block of every recorded order. The ' +
+              'question-first spelling an older panel could write (`xFirst=on`, `q=first`) asks for a layout this ' +
+              'build does not have and is refused by the host, not silently ignored.',
           ),
           e(
             'p',
             { style: S.note },
-            'Cache: the stable head is the pinned prefix plus T' +
-              (xFirst ? ' plus the task; ' : '; ') +
-              'and a re-selection re-prefills everything after it. The per-assembly numbers are in each ' +
-              'control-plane record as layoutStableTokens and tokensAfterCut.',
+            'Cache: the stable head is the pinned prefix' +
+              (trace === 'trace-as-state' ? ' plus T' : '') +
+              '; the question is always behind it, because it is always last. A re-selection re-prefills everything ' +
+              'after the head. The per-assembly numbers are in each control-plane record as layoutStableTokens and ' +
+              'tokensAfterCut.',
           ),
           e('p', { style: S.note }, state.message),
           e(

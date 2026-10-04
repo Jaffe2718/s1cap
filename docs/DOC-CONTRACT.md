@@ -14,6 +14,16 @@ already owned.
   may only point at them.**
 - **(c) Dated records** — round reports, audits, captured outputs, diagnostic analyses. **Frozen.**
 
+**The admission test — the one question a live document has to pass.** A live document exists to answer a question
+someone actually asked: *what is this, how do I do this, what was decided and why, what does this number mean.* It
+says which one where a reader arrives. "Here is how the project works" is not a question, and a document that answers
+only that is a class-(c) record under another name — which means it is frozen, and so can never be where a current
+fact is maintained.
+
+**Code is the authority for what the system does.** A document is where to look for *why*, *what was decided* and
+*what a number means* — never a source to rebuild the logic from, and never a second copy of it. §2 states this rule
+as a repair; this states it as the limit on what a document is for.
+
 ## 2. The rule this pass paid for
 
 **A document sentence that repeats a value the code owns is a defect of the documentation, not a

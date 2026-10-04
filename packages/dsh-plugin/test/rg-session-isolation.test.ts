@@ -92,6 +92,18 @@ async function runSession(
     h.ticks.length = 0;
     await settle();
   }
+  // **A second step, after the events, and it is what makes this fixture score anything now.** Scoring is
+  // on-demand since 2026-10-05: the rows are bought by a step's recall (`AssociationGraph.recallDemand`), not by
+  // the arrival of the segments they belong to. The step above happened before the events were fed in, so its
+  // anchor had nothing in front of it and no walk asked for anything; this one is rooted on the newest input
+  // event of the whole session, and its walk asks for exactly the rows behind it. A fixture that wants a scored
+  // graph has to drive a step after the content - which is the design, not a test artefact.
+  await h.observer.observe(stepPayload(sessionId, `${texts[texts.length - 1] ?? 'start'} (again)`));
+  for (let round = 0; round < 6; round += 1) {
+    h.ticks.forEach((tick) => tick());
+    h.ticks.length = 0;
+    await settle();
+  }
 }
 
 test('two sessions in one process get two graphs, and neither sees the other', async () => {
@@ -130,7 +142,12 @@ test('a restarted process resumes a session graph and does not re-score pairs it
   ], 'r2a');
   const before = store.load('sess-A');
   assert.ok(before !== undefined);
-  assert.ok((before as RgSnapshot).scored > 0, 'the scoring cursor should have advanced');
+  // **The cursor is not the reading any more, and asserting on it here was an assertion about eager scoring.**
+  // Under on-demand scoring a row is settled when a walk reaches it, so `#scored` - the contiguous *prefix* of
+  // settled entries - stays where it was while `scores` fills from the newest end backwards. What says "the
+  // previous process paid for pairs" is the pairs themselves.
+  assert.ok((before as RgSnapshot).scores !== undefined && ((before as RgSnapshot).scores?.length ?? 0) > 0,
+    'the first process should have settled pairs');
   const alreadyScored = new Set(first.scoredCurrents);
   assert.ok(alreadyScored.size > 0, 'the first process should have scored something');
 

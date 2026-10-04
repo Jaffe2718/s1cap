@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { TUNING_REF, parseTuning, parseTuningArgs, readCredential } from '../src/credentials.ts';
+import { defaultPolicy } from '@s1cap/core';
 import { S1_PROVIDERS } from '@s1cap/s1-client';
 
 test('the first entry point that answers wins, and it is reported by name', async () => {
@@ -96,20 +97,50 @@ test('parseTuningArgs accepts d/r by position and by name, and drops out-of-rang
   assert.deepEqual(parseTuningArgs(''), {});
   assert.deepEqual(parseTuningArgs(undefined), {});
 });
-test('the scoring window floor is 64, and it is dropped rather than clamped below it', () => {
+test('the scoring window floor is 4, and it is dropped rather than clamped below it', () => {
+  // The floor moved 64 -> 4 on 2026-10-05 with the default (1024 -> 16). What did **not** move is the rule that a
+  // value outside the bounds is dropped so the policy default stands: clamping would run a window the researcher
+  // never chose, and the panel and `/s1-tune` share this parser so the two cannot drift (docs/FORMULAS.md, the
+  // 2026-10-05 correction's "The bounds, and why they moved with the values").
   assert.deepEqual(parseTuning('3 0.7 512'), { depth: 3, relevanceThreshold: 0.7, window: 512 });
-  assert.deepEqual(parseTuning('3 0.7 64'), { depth: 3, relevanceThreshold: 0.7, window: 64 });
-  assert.deepEqual(parseTuning('3 0.7 63'), { depth: 3, relevanceThreshold: 0.7 }, 'below the floor: dropped');
+  assert.deepEqual(parseTuning('3 0.7 16'), { depth: 3, relevanceThreshold: 0.7, window: 16 });
+  assert.deepEqual(parseTuning('3 0.7 4'), { depth: 3, relevanceThreshold: 0.7, window: 4 }, 'the floor is inclusive');
+  assert.deepEqual(parseTuning('3 0.7 3'), { depth: 3, relevanceThreshold: 0.7 }, 'below the floor: dropped');
   assert.deepEqual(parseTuning('3 0.7 -1'), { depth: 3, relevanceThreshold: 0.7 });
   assert.deepEqual(parseTuningArgs('3 0.7 512'), { depth: 3, relevanceThreshold: 0.7, window: 512 });
-  assert.deepEqual(parseTuningArgs('w=64'), { window: 64 });
-  assert.deepEqual(parseTuningArgs('w=63'), {}, 'below the floor: dropped');
+  assert.deepEqual(parseTuningArgs('w=4'), { window: 4 });
+  assert.deepEqual(parseTuningArgs('w=3'), {}, 'below the floor: dropped');
+});
+
+test('the depth ceiling is 16, and a value above it is dropped rather than clamped', () => {
+  // The ceiling moved 6 -> 16 on 2026-10-05, with the default (2 -> 16). It is *new* on this surface: the panel
+  // accepted any integer > 0 until then, so a stored file could carry a depth the core validator refuses
+  // (`packages/core/src/config.ts`, `NUMBER_RULES`) - two surfaces disagreeing about the same knob.
+  assert.deepEqual(parseTuning('16 0.55'), { depth: 16, relevanceThreshold: 0.55 }, 'the ceiling is inclusive');
+  assert.deepEqual(parseTuning('17 0.55'), { relevanceThreshold: 0.55 }, 'above the ceiling: dropped');
+  assert.deepEqual(parseTuning('8 0.55'), { depth: 8, relevanceThreshold: 0.55 });
+  assert.deepEqual(parseTuningArgs('d=16'), { depth: 16 });
+  assert.deepEqual(parseTuningArgs('depth=17'), {}, 'above the ceiling: dropped');
+  assert.deepEqual(parseTuningArgs('d=0'), {}, 'and the floor is still 1');
+});
+
+test('the panel admits exactly the recall values the core policy carries', () => {
+  // The point of this case: the bounds are written twice - once in `packages/core/src/config.ts` and once in
+  // `packages/dsh-plugin/src/credentials.ts`, because this parser deliberately reads no build artifact (see the note
+  // on the question slot). A copy that drifts is a value one surface accepts and the other refuses, so the two
+  // defaults are read from the policy itself rather than written down again here.
+  const policy = defaultPolicy().recall;
+  assert.equal(policy.window, 16, 'recall.window default');
+  assert.equal(policy.depth, 16, 'recall.depth default');
+  assert.equal(policy.threshold, 0.55, 'recall.threshold is not part of this change');
+  assert.deepEqual(parseTuningArgs(`w=${policy.window}`), { window: policy.window }, 'the default round-trips');
+  assert.deepEqual(parseTuningArgs(`d=${policy.depth}`), { depth: policy.depth }, 'and so does the depth');
 });
 
 test('the panel can set the bounded anchor wait, and an out-of-range value is dropped', () => {
   // The requirement is that this value be settable from the settings panel, so the keyed form is the one that
-  // matters: `wait=` has no positional slot, because the first four tokens are the legacy `d r w xFirst` order that
-  // older writes and the credential string use, and a fifth would put a duration where `xFirst` is read from.
+  // matters: `wait=` has no positional slot, because the first four tokens are the `d r w q` order that older writes
+  // and the credential string use, and a fifth would put a duration where the question's position is read from.
   assert.deepEqual(parseTuningArgs('wait=3000'), { anchorWaitMs: 3000 });
   assert.deepEqual(parseTuningArgs('anchorWaitMs=3000'), { anchorWaitMs: 3000 });
   assert.deepEqual(parseTuningArgs('wait=0'), { anchorWaitMs: 0 }, '0 is a real value: it disables the wait');

@@ -11,9 +11,20 @@ import {
   weightsCacheDir,
   weightsEnvVar,
 } from '../src/launcher.ts';
-import type { LaunchDeps, SpawnedProcess } from '../src/launcher.ts';
+import type { LaunchDeps, SpawnedProcess, StartResult } from '../src/launcher.ts';
 
 const PY = 'D:\\conda_store\\envs\\ml\\python.exe';
+
+/**
+ * `LAYA_POLL_TIMEOUT_MS`, written out rather than imported, and asserted against the export at the end of the test
+ * that uses it.
+ *
+ * The reason is the *before* run: against a launcher that has no bound at all, a static named import of a constant
+ * that does not exist yet is a module *link* error, so the whole file would fail to load and none of these tests
+ * would get to demonstrate the hang they were written for. A local band plus one dynamic cross-check keeps the
+ * before-run honest and the after-run unable to drift.
+ */
+const PER_POLL_BOUND_MS = 5_000;
 
 interface FakeChild {
   child: SpawnedProcess;
@@ -52,7 +63,8 @@ interface Harness {
   plan: { command?: string; args?: string[]; env?: Record<string, string> };
   fake: FakeChild;
   fetched: string[];
-  setFetch(fn: (url: string) => Promise<Response>): void;
+  /** `init` is handed to the mock as well, so a mock can watch whatever the launcher passes alongside the URL. */
+  setFetch(fn: (url: string, init?: RequestInit) => Promise<Response>): void;
 }
 
 function harness(opts: { hasConsoleScript?: boolean; platform?: string } = {}): Harness {
@@ -60,7 +72,7 @@ function harness(opts: { hasConsoleScript?: boolean; platform?: string } = {}): 
   const plan: Harness['plan'] = {};
   const fetched: string[] = [];
   let t = 0;
-  let impl = async (_url: string): Promise<Response> => new Response('{}', { status: 200 });
+  let impl = async (_url: string, _init?: RequestInit): Promise<Response> => new Response('{}', { status: 200 });
   const deps: LaunchDeps = {
     platform: opts.platform ?? 'win32',
     now: () => t,
@@ -74,10 +86,10 @@ function harness(opts: { hasConsoleScript?: boolean; platform?: string } = {}): 
       plan.env = options.env;
       return fake.child;
     },
-    fetchImpl: ((input: RequestInfo | URL) => {
+    fetchImpl: ((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       fetched.push(url);
-      return impl(url);
+      return impl(url, init);
     }) as typeof fetch,
   };
   return {
@@ -89,6 +101,53 @@ function harness(opts: { hasConsoleScript?: boolean; platform?: string } = {}): 
       impl = fn;
     },
   };
+}
+
+/**
+ * A backend socket that **accepts the connection and never answers** — the one shape every other mock in this file
+ * cannot produce.
+ *
+ * A refusal fails in microseconds, so the readiness loop always got back to its own `while (now < deadline)` and
+ * `startupTimeoutMs` looked like it worked. A socket that is accepted and then goes silent is what parks that loop
+ * on an `await` that never returns, so the counter here is what tells the two cases apart: `armed` counts the polls
+ * that arrived with an `AbortSignal` (a poll without one is a socket nothing can interrupt), `aborted` counts the
+ * ones whose bound actually expired while the socket stayed silent.
+ */
+interface BlackHole {
+  fetch(url: string, init?: RequestInit): Promise<Response>;
+  calls: number;
+  armed: number;
+  aborted: number;
+}
+
+function makeBlackHole(): BlackHole {
+  const hole: BlackHole = {
+    calls: 0,
+    armed: 0,
+    aborted: 0,
+    fetch(_url: string, init?: RequestInit): Promise<Response> {
+      hole.calls += 1;
+      const signal = init?.signal;
+      // No signal: nothing can cut this off, which is exactly the unfixed call. It never settles, and neither did
+      // the launcher that made it.
+      if (!signal) return new Promise<Response>(() => {});
+      hole.armed += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        const onAbort = (): void => {
+          hole.aborted += 1;
+          reject(new DOMException('This operation was aborted', 'AbortError'));
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      });
+    },
+  };
+  return hole;
+}
+
+/** Let every microtask behind an abort settle, without advancing a mocked clock. */
+function drain(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 test('consoleScriptPath targets the environment layout of each platform', () => {
@@ -213,7 +272,7 @@ test('LayaServer.waitForReady falls back to /v1/models for Jev-style deployments
   assert.ok(h.fetched.some((u) => u.endsWith('/v1/models')));
 });
 
-test('LayaServer.start reports a startup timeout instead of hanging', async () => {
+test('LayaServer.start reports a startup timeout when the connection is refused', async () => {
   const h = harness();
   h.setFetch(async () => {
     throw new Error('ECONNREFUSED');
@@ -227,6 +286,100 @@ test('LayaServer.start reports a startup timeout instead of hanging', async () =
   assert.equal(server.status, 'failed');
   assert.match(String(server.error), /timed out/);
   assert.equal(h.fetched.length, 4, 'two poll rounds, two candidate paths each');
+});
+
+// ---- the black hole ----
+//
+// Every mock above refuses the connection or answers it, and that is why the readiness loop's missing bound was
+// invisible: a refusal fails in microseconds, so the loop always got back to its own `while (now < deadline)` and
+// `startupTimeoutMs` looked like a budget. A socket that *accepts* and then goes silent is the one shape that parks
+// the loop on an `await` that never returns - and a loop parked there can never observe its own deadline, so the
+// startup timeout did not exist for that backend and `start()` never returned.
+//
+// The two tests below pin the two halves of the fix: the poll is bounded (and its bound is a cap of its own, not
+// the whole budget), and a poll that times out is *retried* rather than reported, because the budget - not one
+// silent answer - is what decides that a backend is not coming.
+//
+// Both drive the clock with mocked timers. `Date` is mocked as well as `setTimeout`, so the loop's own clock
+// advances exactly when a poll's bound expires - which is the one thing a virtual `sleep`-driven clock cannot show,
+// because it does not move while a poll is open.
+
+test('LayaServer.start gives up on a socket that accepts and never answers', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const h = harness();
+  const hole = makeBlackHole();
+  h.setFetch(hole.fetch);
+  h.deps.now = () => Date.now();
+
+  const cfg = { ...defaultLayaConfig(), enabled: true, startupTimeoutMs: 1_000, pollIntervalMs: 100 };
+  const server = new LayaServer(cfg, h.deps);
+  let settled: StartResult | undefined;
+  void server.start(PY).then((value) => {
+    settled = value;
+  });
+  await drain();
+
+  assert.deepEqual(h.fetched, ['http://127.0.0.1:8008/health'], 'the first candidate path is the one in flight');
+  t.mock.timers.tick(999);
+  await drain();
+  assert.equal(settled, undefined, 'the poll gave up before the budget it was given: a slow backend still gets its time');
+  assert.equal(hole.aborted, 0, 'and nothing was cut off early');
+
+  // The assertion the unbounded version cannot satisfy at any tick: the socket will never answer, and the loop has
+  // to report its own deadline instead of waiting for a reply that is not coming.
+  t.mock.timers.tick(1);
+  await drain();
+  assert.equal(hole.aborted, 1, 'the silent poll was cut off at the budget rather than left open');
+  assert.equal(hole.armed, hole.calls, 'every poll carried the guard signal');
+  assert.deepEqual(h.fetched, ['http://127.0.0.1:8008/health'], 'the spent budget left nothing for /v1/models');
+  assert.equal(settled?.ok, false);
+  assert.equal(server.status, 'failed');
+  assert.match(String(server.error), /timed out after 1000ms/);
+});
+
+test('a poll that stayed silent is retried, and one poll may not outlast its own bound', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const h = harness();
+  const hole = makeBlackHole();
+  let calls = 0;
+  h.setFetch(async (url, init) => {
+    calls += 1;
+    if (calls === 1) return hole.fetch(url, init); // the first /health poll: accepted, never answered
+    if (url.endsWith('/health')) return new Response('{"status":"ok"}', { status: 200 });
+    return new Response('no', { status: 404 });
+  });
+  h.deps.now = () => Date.now();
+
+  // The real default budget, 120 000 ms. If one poll were allowed to use it, the cap below would not exist and this
+  // loop would sit silent for two minutes on a socket that will never answer.
+  const cfg = { ...defaultLayaConfig(), enabled: true };
+  const server = new LayaServer(cfg, h.deps);
+  let ready: boolean | undefined;
+  void server.waitForReady().then((value) => {
+    ready = value;
+  });
+  await drain();
+
+  t.mock.timers.tick(PER_POLL_BOUND_MS - 1);
+  await drain();
+  assert.equal(hole.aborted, 0, 'the poll was still open - 4 999 ms of silence is not yet a dead socket');
+  assert.equal(ready, undefined, 'nothing has answered yet, so nothing has been decided');
+
+  t.mock.timers.tick(1);
+  await drain();
+  assert.equal(hole.aborted, 1, 'the bound expired, not the 120 s budget');
+  assert.equal(ready, true, 'a timed-out poll is "ask again", not "the backend is not coming"');
+  assert.deepEqual(
+    h.fetched,
+    ['http://127.0.0.1:8008/health', 'http://127.0.0.1:8008/v1/models', 'http://127.0.0.1:8008/health'],
+    'the round after the timeout asked /health again, and that answer is the one that counted',
+  );
+  assert.equal(hole.calls, 1, 'only the first poll met the black hole');
+
+  // The band above is written out so this test can run against a launcher that has no bound at all (where the
+  // import would not resolve). This keeps it honest against the launcher that does.
+  const launcher = await import('../src/launcher.ts');
+  assert.equal(launcher.LAYA_POLL_TIMEOUT_MS, PER_POLL_BOUND_MS, 'the test band and the module constant cannot drift');
 });
 
 test('LayaServer.start surfaces an early process exit', async () => {

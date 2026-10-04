@@ -107,6 +107,65 @@ export interface StartResult {
   error?: string;
 }
 
+/**
+ * How long one readiness poll may stay silent before its socket is treated as dead.
+ *
+ * ## The defect this bound exists for
+ *
+ * `waitForReady` called `this.#deps.fetchImpl(url)` with no signal and swallowed each poll's error. A backend that
+ * *refuses* the connection fails in microseconds, so every poll returned, the loop always got back to
+ * `while (this.#deps.now() < deadline)`, and `startupTimeoutMs` looked like a budget. A backend that *accepts* and
+ * then never answers is the other case: the poll stays open for ever, the loop is parked on an `await` that never
+ * returns, and the deadline it exists to compare against can never be read again. The startup timeout therefore did
+ * not exist for that backend and `start()` never returned.
+ *
+ * The guard has to cover the whole exchange rather than the `fetch` call, which is why `#poll` takes a callback:
+ * `fetch` resolves as soon as the *headers* arrive, so a hook around the call alone is disarmed at the headers and
+ * a socket that stalls mid-body still hangs whatever reads the body. Nothing here reads a body today - the poll
+ * asks `res.ok` and stops - and the callback is what keeps that from mattering the first time something does.
+ *
+ * ## Why this is a per-poll cap and not the loop's budget
+ *
+ * The loop already has `startupTimeoutMs` - 120 s by default, 600 s from `packages/laya-runtime/scripts/smoke.ts` -
+ * and the caller clamps this cap by what is left of it (`Math.min(remaining, LAYA_POLL_TIMEOUT_MS)`), so the
+ * constant decides only *how often the loop re-asks*, never how long the loop may take. The asymmetry is the whole
+ * argument for a small number: a cap that is too small costs one more retry of a loop that was going to retry
+ * anyway, while a cap that is too large *is* the hang.
+ *
+ * ## The number
+ *
+ * 5 000 ms, the same bound `@s1cap/s1-client` puts on `health()`/`models()` (`S1_PROBE_TIMEOUT_MS`) - the same
+ * endpoint and the same question, so the two must not disagree about what silence means. It is not imported from
+ * there: this package declares no dependencies at all (`packages/laya-runtime/package.json`) and that helper is
+ * private, so a five-line guard with its twin named is cheaper than an undeclared cross-package import.
+ *
+ * The measured round trip of `/health` against the local server is 18 ms, so 5 s is 278x a legitimate answer. The
+ * case that legitimately takes minutes is not silent either: with `LAYA_PRELOAD=1` the checkpoints are built
+ * *before* uvicorn binds the port, so those polls are refused instantly rather than left hanging
+ * (docs/LAYA_RUNTIME.md §6). A socket silent for five seconds is a wedged socket - and at 5 s per path, eleven
+ * rounds still fit inside the default 120 s budget, so a backend that answers on the second ask is still found. If
+ * `/health` ever moves behind the inference path, the soaked one-question figure quoted on the s1-client probe
+ * (about 13 s) is what falsifies this number, and the fix is this number.
+ */
+export const LAYA_POLL_TIMEOUT_MS = 5_000;
+
+/**
+ * A poll that was cut off at its bound: `LAYA_POLL_TIMEOUT_MS`, or whatever was left of `startupTimeoutMs`.
+ *
+ * The classification mirrors `S1TimeoutError` in `@s1cap/s1-client`: the signal that fired is this file's own, so
+ * an abort *is* the deadline and not a caller cancelling. `waitForReady` deliberately treats it as one more "not up
+ * yet" and asks again, so nothing branches on the type today; it exists so that a silent socket stays
+ * distinguishable from a refused one in a stack trace or for a caller that later needs to tell them apart.
+ */
+export class LayaPollTimeoutError extends Error {
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`no answer within ${timeoutMs}ms`);
+    this.name = 'LayaPollTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export class LayaServer {
   #cfg: LayaConfig;
   #deps: LaunchDeps;
@@ -207,6 +266,24 @@ export class LayaServer {
     return { ok: false, baseUrl, error: this.#error };
   }
 
+  /**
+   * Run one readiness poll under a bound. The twin of `S1Client.#probe` in `@s1cap/s1-client`, which cannot be
+   * imported for the reasons on `LAYA_POLL_TIMEOUT_MS`: one controller, one timer, the **body read** inside the
+   * guard as well as the request, `AbortError` classified as a timeout, and the timer cleared on every path.
+   */
+  async #poll(run: (signal: AbortSignal) => Promise<Response>, budgetMs: number): Promise<Response> {
+    const guard = new AbortController();
+    const timer = setTimeout(() => guard.abort(), budgetMs);
+    try {
+      return await run(guard.signal);
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') throw new LayaPollTimeoutError(budgetMs);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Poll the readiness endpoint until it answers or the startup timeout expires. */
   async waitForReady(): Promise<boolean> {
     const deadline = this.#deps.now() + this.#cfg.startupTimeoutMs;
@@ -215,14 +292,30 @@ export class LayaServer {
     while (this.#deps.now() < deadline) {
       if (this.#state === 'failed') return false;
       for (const path of paths) {
+        // Both bounds are needed and they do different jobs. `remaining` is what makes `startupTimeoutMs` true
+        // end-to-end: without it a single silent poll could outlive the deadline, and a `while` that is parked on
+        // that poll cannot notice. `LAYA_POLL_TIMEOUT_MS` is what keeps the loop a loop: left to `remaining` alone,
+        // the first poll of a 600 s run would sit silent for ten minutes on a socket that will never answer.
+        const remaining = deadline - this.#deps.now();
+        if (remaining <= 0) return false;
         try {
-          const res = await this.#deps.fetchImpl(`${this.baseUrl}${path}`);
+          const res = await this.#poll(
+            (signal) => this.#deps.fetchImpl(`${this.baseUrl}${path}`, { signal }),
+            Math.min(remaining, LAYA_POLL_TIMEOUT_MS),
+          );
           if (res.ok) return true;
         } catch {
-          // server not up yet
+          // Refused, answered "no", or went silent - all three mean "ask again", and the budget - not this one
+          // answer - is what decides that the backend is not coming. A poll that timed out is therefore *retried*
+          // rather than reported: `startupTimeoutMs` exists for exactly the slow case (a first run loading a
+          // checkpoint), and a process that really died is reported by the `exit` hook above, which this loop sees
+          // at the top of the next round - now within one poll bound instead of never.
         }
       }
-      await this.#deps.sleep(this.#cfg.pollIntervalMs);
+      // Waking exactly on the deadline rather than up to one interval past it is what makes the budget a budget
+      // instead of an approximation.
+      if (this.#deps.now() >= deadline) return false;
+      await this.#deps.sleep(Math.min(this.#cfg.pollIntervalMs, deadline - this.#deps.now()));
     }
     return false;
   }

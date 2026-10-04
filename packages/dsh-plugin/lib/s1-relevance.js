@@ -19,11 +19,35 @@
  * every one of them, and each graph recorded exactly that many *distinct* pairs. One pair fewer than offered
  * would have meant a pair asked twice, because `scores` is keyed by pair; none of the four cells shows it. The
  * call count is that number divided by this cap, so C2's 22 791 pairs at 20 questions per call are the 1 155
- * calls it made (807 answered, 282 `503 server busy`, 66 at the 30 s transport guard).
+ * calls it made (807 answered, 282 `503 server busy`, 66 at the transport guard, which was a fixed 30 s in that
+ * round and is now `s1TransportGuardMs(batch)`; the 66 is a count under the old guard).
+ *
+ * **Corrected 2026-10-05: the identity above is not an invariant, and this paragraph was read as though it were.**
+ * Round `20261004-0233` falsifies the generalization. Its C2 graph holds **2 211** `scores` rows - exactly
+ * `67*66/2`, a complete triangle over segments 0-66 with no holes and nothing outside it - while `scoredPairs`
+ * reads **10 157**, i.e. **4.59x** its distinct-pair content, and its control plane recorded **9 828 questions**
+ * for those 2 211 pairs where a clean pass needs 144 calls. 486 of its 634 calls (77.5%) were re-asks of pairs the
+ * graph already held. The fingerprint is in the call sequence: `q = 1,2,3,4, 2,3,4, 3,4, 4, 5,6,6, ...`, window
+ * sizes repeated *downward*, where a single sweep is strictly ascending.
+ *
+ * The mechanism was concurrent sweeps, not the cap: `upkeep-queue.ts`'s `runOne` does not await its handler and
+ * `step-observer.ts` drains every queued event synchronously, so a burst started N sweeps at once, and each sweep
+ * copied the shared cursor **once at entry** and then wrote it forward per take. Overlapping walks scored the same
+ * segment and either could move the cursor backward. Multiplicity tracked concurrency: 371 calls of exactly 20
+ * questions against only 47 windows of >=20 pairs = 7.9, beside `admissionLimit: 8`. `scoreNew` now claims each
+ * entry exclusively before its first `await`, so L in flight means L *distinct* segments and the cursor cannot
+ * regress; a scale test at this round's exact shape reads **17 020 questions for 17 020 pairs (1.00x)**.
+ *
+ * The honest reading of round `20261001-1300`'s clean arithmetic is therefore "that round did not overlap", not
+ * "overlap cannot happen" - and a reader who took the second meaning from this paragraph had no reason to look for
+ * the duplicate work this round measured.
  *
  * What follows for the window, and it is the part a reader should take away: `recall.window = w` is the only
  * thing that bounds the marginal cost, and with w = 1024 against a 214-segment session it bounded nothing - the
- * window was the whole history, and the pair count is therefore quadratic in segments. The lever is w or the
+ * window was the whole history, and the pair count is therefore quadratic in segments. **That is what the default
+ * was changed for on 2026-10-05** (`recall.window` 1024 -> 16, `recall.depth` 2 -> 16: a window at or above the
+ * session's segment count scores every pair; `docs/FORMULAS.md` section "Recall window w" carries the cost table).
+ * The lever is w or the
  * cap, never a de-duplication of work that was never repeated. The client takes any number of questions in one
  * request, so the batching saves round trips and not questions; `scoredPairs` in the control plane counts the
  * pairs, and the graph is where that is decided.
@@ -34,7 +58,9 @@
  *
  * "No weights" is the right answer only when asking again would not help, and a measured round says it often
  * would have. That round produced 281 `s1_call` records of which 191 failed: 97 x `TypeError: fetch failed` (a
- * backend that was not reachable), 57 x `S1TimeoutError` at the 30 000 ms transport guard, and 37 x
+ * backend that was not reachable), 57 x `S1TimeoutError` at the transport guard - a fixed 30 000 ms then, and the
+ * guard has since become a function of the batch (`s1TransportGuardMs`), so the 57 is a count taken under a guard
+ * that no longer exists and is not comparable with one taken now - and 37 x
  * `S1HttpError: systemone 503: {"detail":"server busy"}` - the server itself asking for less at a time. Every
  * one of those windows was scored lexically instead, and the round ended with **zero** `s1-noul` edges in the
  * whole graph: the fallback did not merely cost accuracy, it cost the entire System-1 signal.
@@ -46,7 +72,15 @@
  * is counted in `S1RelevanceStats` rather than left silent - a retry nobody can see is how "the backend was
  * slow" stayed indistinguishable from "the backend was refusing" for a whole round.
  */
-import { S1CancelledError, S1HttpError, S1TimeoutError, S1_RETRYABLE_STATUS, noul, normalize } from '@s1cap/s1-client';
+import {
+  S1CancelledError,
+  S1HttpError,
+  S1TimeoutError,
+  S1_RETRYABLE_STATUS,
+  noul,
+  normalize,
+  s1TransportGuardMs,
+} from '@s1cap/s1-client';
                                                    
                                                        
 import { S1_DEFERRED } from '@s1cap/core';
@@ -74,9 +108,10 @@ const MAX_SEGMENT_CHARS = 256;
  *
  * Three, because this scorer runs on the upkeep queue's critical path - the segment behind it waits - and because
  * the measured 503s were a server reporting itself busy, where a fourth attempt is a bet the third already lost.
- * A constant rather than a policy field, for the reason `S1_TRANSPORT_TIMEOUT_MS` is one: `s1.questionsPerCall`
- * describes the workload and belongs to the config, while how often a dead socket is asked again is a property of
- * the transport, and a knob there is a knob that silently decides how much of a session is scored lexically.
+ * A constant rather than a policy field, for the reason the transport guard is not one either - it is derived from
+ * the batch the call already carries, never set: `s1.questionsPerCall` describes the workload and belongs to the
+ * config, while how often a request is asked again is a property of the transport, and a knob there is a knob that
+ * silently decides how much of a session is scored lexically.
  */
 export const S1_RETRY_ATTEMPTS = 3;
 
@@ -84,7 +119,7 @@ export const S1_RETRY_ATTEMPTS = 3;
  * The first backoff wait; it doubles per attempt and is clamped by `S1_RETRY_MAX_DELAY_MS`.
  *
  * A second, not a millisecond: the failures this retries are a server saying "busy" (37 x 503 in the measured
- * round) or a request that died at the 30 s transport guard, where a wait shorter than a second is not long
+ * round) or a request that died at the transport guard, where a wait shorter than a second is not long
  * enough to be a different question and a wait of many seconds is paid by the segment waiting behind it. How
  * long a busy local backend needs is **not measured** - this is the number to revisit if `retries` keeps firing
  * and `gaveUpAfterRetries` keeps rising. Deliberately deterministic, with no jitter: retries here are sequential
@@ -104,19 +139,74 @@ export const S1_RETRY_BASE_DELAY_MS = 1_000;
 export const S1_RETRY_MAX_DELAY_MS = 1_500;
 
 /**
- * The wall-clock a single window may spend retrying, measured from its first attempt on `opts.now`.
+ * The wall-clock a window may spend before its retries are refused, as the sum of the guards it will actually meet.
  *
- * The transport guard is 30 s and the measured round had 57 calls that died at exactly 30 000 ms: at that price
- * the second attempt is already a minute, and a third is refused. The bound is on the whole window and not on one
- * wait, because what must not happen is a window holding the upkeep queue for minutes while it retries; a window
- * that answers late is worth less than one that answers. Fast failures (a 503 in tens of milliseconds) never
- * reach this bound - `S1_RETRY_ATTEMPTS` stops them first - so in practice this budget is the timeout path's.
+ * It was `S1_RETRY_BUDGET_MS = 60_000`, a fixed number sized for the fixed 30 s guard: 30 + 1 s of backoff + 30 =
+ * 61 s, so one retry of a timed-out request was the whole budget and a second was already refused. The guard is now
+ * `s1TransportGuardMs(batch)` (`s1-client`), and a fixed budget against a batch-sized guard does not merely go
+ * stale - it inverts per batch size. At 20 questions the guard is 35 s and one retry still fitted 60 s; at 40
+ * questions a single timeout *was* 60 s, so the budget refused the retry outright; at 64 it was 90 s and exceeded
+ * the budget before the first attempt had returned. One policy therefore meant "one retry" at this project's
+ * default `questionsPerCall` (20, `types.ts`) and "no retry at all" at the sizes a saturated server produces, while
+ * still reading as a configured bound.
+ *
+ * So the budget is the schedule it is meant to bound, added up: attempt 1 asks `q` questions and may hang for
+ * `s1TransportGuardMs(q)`, the second asks `reducedBatchSize(q)` after one backoff wait, the third asks
+ * `reducedBatchSize(reducedBatchSize(q))` after a second. No number here is chosen - the guards come from
+ * `s1-client`, the attempt count and the waits come from this file, and the reduction is the same function the
+ * retry uses - so the budget cannot describe a schedule the retry does not run:
+ *
+ * | questions | guard | + wait | half | + wait | quarter | budget |
+ * |---|---|---|---|---|---|---|
+ * | 20 (default) | 35 000 | 1 000 | 22 500 | 1 500 | 16 250 | 76 250 ms |
+ * | 40 | 60 000 | 1 000 | 35 000 | 1 500 | 22 500 | 120 000 ms |
+ * | 64 (server cap) | 90 000 | 1 000 | 50 000 | 1 500 | 30 000 | 172 500 ms |
+ *
+ * What it costs, at the sizes this project runs at. At 20 questions - the default - the timeout path does not move:
+ * the old 60 s budget already admitted this whole schedule (35 + 1 + 22.5 = 58.5 s before the third attempt could
+ * start), which is why the defect was invisible at the size the graph usually asks for. At 40 the old budget
+ * refused the retry outright, so the worst case moves from a single 60 s timeout to the full 120 s schedule: the
+ * window waits twice as long before falling back, and when the halved retry answers it is judged by the backend
+ * instead of lexically. At 64 it moves from a single 90 s timeout to 172.5 s, 1.9x. That wait is paid only when the
+ * backend is genuinely dead; a window whose backend is *refusing* (a 503 in tens of milliseconds) never reaches
+ * this bound, because `S1_RETRY_ATTEMPTS` stops it first. The trade is the one the round above argues for - a
+ * window that answers late is worth less than one that answers - and the bound the wait must not cross is the
+ * upkeep queue's, which is why the budget is the schedule the attempt bound already allows and not more.
+ *
+ * The clock is the window's, from its first attempt (`started`), so what it measures includes the chunks of the
+ * same window that answered. That is deliberate - the bound exists so one window cannot hold the upkeep queue - but
+ * the residual is worth stating: a window whose earlier chunks were themselves slow can still find the budget spent
+ * when a late chunk times out. At `perCall` 20 that is 76 s of earlier work, which at the measured ~3 s service
+ * time is roughly 25 chunks, so it is the tail of a full 1024-candidate window and not the ordinary case. It is
+ * also no longer reachable by a fresh window: the property this function exists to hold, and which the test beside
+ * it asserts, is that the first timeout of a window plus the retry it entitles always fits.
  */
-export const S1_RETRY_BUDGET_MS = 60_000;
+export function s1RetryBudgetMs(questionsPerCall        )         {
+  let size = Number.isFinite(questionsPerCall) ? Math.max(1, Math.trunc(questionsPerCall)) : 1;
+  let total = 0;
+  for (let attempt = 1; attempt <= S1_RETRY_ATTEMPTS; attempt += 1) {
+    total += s1TransportGuardMs(size);
+    if (attempt < S1_RETRY_ATTEMPTS) total += retryDelayMs(attempt);
+    size = reducedBatchSize(size);
+  }
+  return total;
+}
 
 /** The wait before retry number `attempt` (1-based): the base doubled per attempt, clamped. */
 function retryDelayMs(attempt        )         {
   return Math.min(S1_RETRY_MAX_DELAY_MS, S1_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+}
+
+/**
+ * The size of the next request after a failed attempt at `asked`: half of what was actually asked, floor one.
+ *
+ * Named and shared, rather than written twice: `s1RetryBudgetMs` budgets the guards of the requests the retry
+ * loop will actually send, and the retry loop sends whatever this function says. If the reduction changes, the
+ * budget changes with it, because there is one reduction. The floor of 1 is the smallest request the protocol can
+ * carry - a one-question request that failed is asked again at one question, not at zero.
+ */
+function reducedBatchSize(asked        )         {
+  return Math.max(1, Math.floor(asked / 2));
 }
 
 /**
@@ -130,6 +220,13 @@ function retryDelayMs(attempt        )         {
  * would add latency to every window of a round whose backend is simply not running, and the `failures` counter
  * plus the control-plane `s1_call` records are what would show it. If that evidence arrives, this is the line to
  * change. Errors are matched by class and `status`, never by message.
+ *
+ * The timeout is on this list, where `s1-client`'s own retry loop deliberately leaves it off: that loop re-sends
+ * the request it just sent, "and repeating it costs the whole guard again". A retry here does not repeat it - the
+ * request that comes back asks `reducedBatchSize` of the questions, so its guard is smaller with it (35 000 ms
+ * becomes 22 500 ms at a default batch). That is a different, smaller question and not a blind repeat, which is
+ * why the two policies differ rather than disagree; `s1RetryBudgetMs` above is what keeps the smaller request's
+ * guard affordable instead of leaving the retry to be refused by a budget sized for the old fixed one.
  */
 function isRetryable(err         )          {
   if (err instanceof S1TimeoutError) return true;
@@ -314,6 +411,15 @@ export function createS1Relevance(opts                    )              {
     // request answers.
     let requestSize = perCall;
     /**
+     * The wall-clock this window may spend before its retries are refused, fixed once per window from its cap.
+     *
+     * From `perCall` and not from the chunk's own size, because no chunk of this window asks for more than the cap,
+     * so the cap's schedule is the largest one the window can run and `s1RetryBudgetMs(perCall)` is the conservative
+     * reading of it: the budget may not refuse a retry that a smaller first attempt would have afforded. See
+     * `s1RetryBudgetMs` for the arithmetic and for what the bound is and is not.
+     */
+    const retryBudgetMs = s1RetryBudgetMs(perCall);
+    /**
      * What each chunk resolved to, collected rather than acted on inside the attempt loop.
      *
      * The release of the admission slot, the "the whole window falls back" decision and the lexical hand-off can
@@ -484,19 +590,26 @@ export function createS1Relevance(opts                    )              {
             // What the gate is told, and why it is this narrow. A *refusal* - a retryable status, which is Laya's
             // `503 server busy` and the 429/gateway family - is the backend saying "not now", and a run of them is
             // the saturation the breaker exists for. A transport timeout is the opposite signal at the same
-            // counter: the backend was working on the request for 30 s, so pausing would add a pause to a server
-            // that is merely slow. A cancellation is the caller's decision. Only the first is a refusal. A
+            // counter: the backend was working on the request for the whole transport guard, so pausing would add a
+            // pause to a server that is merely slow. A cancellation is the caller's decision. Only the first is a
+            // refusal. A
             // transport failure is neither, so it counts as the request having been sent and come back.
             refused = err instanceof S1HttpError && S1_RETRYABLE_STATUS.includes(err.status);
 
             const retryable = isRetryable(err);
             const elapsed = clock() - started;
-            if (!retryable || attempt >= S1_RETRY_ATTEMPTS || elapsed >= S1_RETRY_BUDGET_MS) {
+            if (!retryable || attempt >= S1_RETRY_ATTEMPTS || elapsed >= retryBudgetMs) {
+              // The attempt bound is named before the budget, because it is now possible for both to be true at the
+              // same moment and only one of them to be the reason. The budget is the guard schedule those attempts
+              // are allowed to run, so a window that times out on every one of them reaches `elapsed === budget`
+              // exactly when `attempt` reaches `S1_RETRY_ATTEMPTS`; blaming the budget there would name a bound that
+              // never fired. The counter is the same either way - `gaveUpAfterRetries` is one number - but the line
+              // a human reads should say which bound stopped the window.
               const why = !retryable
                 ? 'not retryable'
-                : elapsed >= S1_RETRY_BUDGET_MS
-                  ? `the window's ${S1_RETRY_BUDGET_MS}ms retry budget is spent`
-                  : `all ${S1_RETRY_ATTEMPTS} attempts used`;
+                : attempt >= S1_RETRY_ATTEMPTS
+                  ? `all ${S1_RETRY_ATTEMPTS} attempts used`
+                  : `the window's ${retryBudgetMs}ms retry budget is spent`;
               // A window abandoned *because it retried* is a different fact from one abandoned on its first failure:
               // the first says the backend kept refusing, the second says it was never asked twice. Both end in the
               // lexical fallback, and only this counter tells them apart afterwards.
@@ -510,8 +623,10 @@ export function createS1Relevance(opts                    )              {
             stats.retries += 1;
             // Halve what was actually asked, not the window's cap: a two-question request that failed must come back
             // as one question rather than as eight, and the floor of 1 is the smallest request the protocol can
-            // carry. The reduction sticks for the rest of the window (see `requestSize` above).
-            size = Math.max(1, Math.floor(batch.length / 2));
+            // carry. The reduction sticks for the rest of the window (see `requestSize` above). It is
+            // `reducedBatchSize` and not a halving written here, because `s1RetryBudgetMs` budgets the guards of
+            // exactly this sequence and the two must not be able to disagree about what the sequence is.
+            size = reducedBatchSize(batch.length);
             requestSize = size;
             retryDelay = retryDelayMs(attempt);
             opts.onWarn?.(

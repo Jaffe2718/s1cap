@@ -97,7 +97,8 @@ export interface S1DecideResult {
  * Explicit, and off unless the caller asks, because a hidden retry is a hidden policy: the caller is the one that
  * decides a judgement is worth another second. Only a refusal is retryable — Laya answers `503 server busy` with
  * `Retry-After` rather than queueing (docs/LAYA_RUNTIME.md §6b) — because repeating a refusal costs one wait while
- * repeating a 30 s timeout costs another 30 s.
+ * repeating a transport timeout costs the whole guard again, and that guard is now sized per batch
+ * (`s1TransportGuardMs`: 11.25 s at one question, 90 s at the server's 64-question cap).
  */
 export interface S1RetryPolicy {
   /** attempts for one call, including the first; 1 means no retry */
@@ -121,7 +122,8 @@ export interface S1ClientOptions {
    * This is **not** a deadline. There is deliberately no `timeoutMs` option: a request deadline is a transport
    * property, not something the method has a concept of, and making it a policy field is how a 2500 ms value
    * ended up silently deciding that half a session's pairs would be scored lexically instead of by the backend.
-   * The guard below is a constant that nobody tunes.
+   * The guard below is derived from the batch the call is already carrying (`s1TransportGuardMs`), so nobody
+   * tunes it and nobody has to remember to set it: the workload sets it.
    */
   signal?: AbortSignal;
   /** see `S1RetryPolicy`; omitted means one attempt, exactly as before this option existed */
@@ -131,13 +133,122 @@ export interface S1ClientOptions {
 }
 
 /**
- * The transport guard: how long one HTTP request may hang before it is treated as dead.
+ * The transport guard's fixed part: everything a call costs before the model has done any work.
  *
- * Not a knob, and exported only so a test can advance a mocked timer to it instead of waiting. Measured calls
- * against a warm Laya server peak at ~2.4 s for a full batch of twenty questions, so 30 s is an order of
- * magnitude outside the distribution: it fires when a socket is dead, never when a model is merely thinking.
+ * Covers the round trip, the body read and `json.loads` (measured at 18 ms against the local Laya server, flat at
+ * every batch size), the fixed overhead a cold or contended server adds before it starts a forward pass, and the
+ * queue wait of the first request in the server's own admission window. It is **also the floor the guard never
+ * drops below**, and that is the point of it: the guard's real purpose - a dead socket is detected without
+ * waiting for the model to have finished something it never started - is bought here, because 10 s is 21x the
+ * measured latency of a one-question call (539 ms on the coolest measured GPU state) and still 8x the *soaked*
+ * per-question cost, so nothing legitimate is cut off by it.
  */
-export const S1_TRANSPORT_TIMEOUT_MS = 30_000;
+export const S1_TRANSPORT_BASE_MS = 10_000;
+
+/**
+ * The transport guard's per-question part: what one more question in the batch may cost.
+ *
+ * The service time is linear in the batch, so a constant cannot be both fast for one question and sufficient for
+ * sixty-four - which is exactly how the fixed 30 000 ms guard this replaces was falsified (see the note on
+ * `s1TransportGuardMs`). Taken from the one measured point that bounds the throttled case: a 40-question call
+ * took **40 800 ms** wall on a thermally soaked GPU at in-flight 1, i.e. 1 020.0 ms per question, rounded up to
+ * 1 250 (+23 %) because that measurement carries two known uncertainties - its payload's rows were clamped at
+ * `max_len` (its `input_tokens` is exactly 512 x questions), and the GPU clock it ran at is not recorded.
+ */
+export const S1_TRANSPORT_PER_QUESTION_MS = 1_250;
+
+/**
+ * How long the request for a batch of `questionCount` questions may hang before the socket is treated as dead.
+ *
+ * ## Why this is a function and not the constant it used to be
+ *
+ * It was `S1_TRANSPORT_TIMEOUT_MS = 30_000`, justified by "measured calls against a warm Laya server peak at
+ * ~2.4 s for a full batch of twenty questions ... it fires when a socket is dead, never when a model is merely
+ * thinking". **That premise is falsified in both directions, by measurement.**
+ *
+ *   - It does fire on a backend that is working. At in-flight 16 a 20-question call's wall p95 is 39.0 s and at
+ *     24-32 it is 49-50 s, against a *service* time of 2.4 s at every one of those levels - throughput is flat and
+ *     latency is linear, so the extra 37 s is the queue in front of the server's single inference lock. Those
+ *     calls were being served, one at a time, and the guard called them dead.
+ *   - It does not cover the largest batch. The server admits 64 questions (`MAX_QUESTIONS`, `serve.py:67`), and a
+ *     64-question call was measured at 9.6 s of service *soaked* and 39-50 s of wall at high in-flight - at or
+ *     past the constant, and past it outright by extrapolation on a worse clock.
+ *   - The round's own telemetry says the two ends of the range cannot share one number: round `20261004-0233` (C2)
+ *     has 634 `s1_call` records, of which **24 ended at `S1TimeoutError: systemone request timed out after
+ *     30000ms`** while the 604 that completed took at most 13 988 ms (p50 4 882 ms). A 30 s outcome and a 14 s
+ *     ceiling in the same distribution is the guard, not the model, deciding the outcome - and at
+ *     `admissionLimit: 8` the wall time of a 20-question call is roughly 8x the 3.06 s service time measured for
+ *     that shape, so queue wait alone is enough to reach 30 s without the socket being dead at all.
+ *
+ * The service time is linear in the batch (`srv ~= 18 + 25.3 q` on a cool GPU) while the guard was constant, so it
+ * could not be right at both ends of a range that now reaches 64 questions.
+ *
+ * ## What it covers, and what it does not
+ *
+ * | questions | guard | what it has to cover |
+ * |---|---|---|
+ * | 1 | 11 250 ms | 539 ms measured, cool |
+ * | 20 | 35 000 ms | 13 200 ms measured soaked; 39-50 s measured at in-flight 16-32, which is **queue**, not service |
+ * | 40 | 60 000 ms | **40 800 ms measured soaked** - the anchor the slope comes from |
+ * | 64 | 90 000 ms | ~65 280 ms by extrapolation of that anchor - **not measured; no soaked 64-question run exists** |
+ *
+ * The margin is deliberately ~1.4-1.5x over the measured anchor, and much larger at the concurrency the sibling
+ * measurement recommends, because at in-flight N the wall time is roughly N x the service time: at
+ * `s1.admissionLimit` 1 the guard is 11.4x the worst legitimate 20-question call and 9.2x the 64-question one, and
+ * at 2 it is 5.7x and 4.6x. That is the coupling worth stating: **this guard bounds a dead socket and the service
+ * time; it does not bound a queue.** At `admissionLimit` 8+ a 20-question call's p95 wall time was measured at
+ * 39 s, and no guard a dead socket can afford would have covered it - the fix for that end is the limit, not this
+ * number.
+ *
+ * A caller that is merely slow to *start* is not covered either, and cannot be: the response is single-shot, so
+ * fetch exposes no progress signal, and "no bytes yet" is the same fact for a dead socket and for a batch that has
+ * not begun. That is why the intercept exists and why the guard is not smaller for small batches.
+ */
+export function s1TransportGuardMs(questionCount: number): number {
+  const questions = Number.isFinite(questionCount) ? Math.max(1, Math.trunc(questionCount)) : 1;
+  return S1_TRANSPORT_BASE_MS + S1_TRANSPORT_PER_QUESTION_MS * questions;
+}
+
+/**
+ * How long a *probe* - `health()` or `models()` - may stay silent before its socket is treated as dead.
+ *
+ * ## Why the probes do not reuse `s1TransportGuardMs`
+ *
+ * That guard is sized to the inference a *decision* is buying: 10 s of fixed cost plus 1.25 s per question, so
+ * 11.25 s at one question and 90 s at the server's 64-question cap. A probe buys no inference at all - it asks
+ * whether the backend is there - so the batch guard's floor is 11.25 s of silence for a call whose whole answer is
+ * one boolean. Worse, the only caller prints that silence *as a measurement of the backend*: `s1-ping`
+ * (`packages/dsh-plugin/src/index.ts:2094-2105`) reports `ms` and says "did not answer /health in Nms", so an 11 s
+ * probe reports the guard's own floor as if it were the server's latency. A probe that is slow to say "not there"
+ * is the same defect as the hang, only finite.
+ *
+ * ## Why it is not the launcher's readiness budget either
+ *
+ * "A backend that is loading a checkpoint for the first time" is a real case, and it belongs to
+ * `LayaServer.waitForReady` (`packages/laya-runtime/src/launcher.ts:210-228`), which polls `/health` and
+ * `/v1/models` every `pollIntervalMs` (500 ms default) up to `startupTimeoutMs` (120 s default, 600 s from the CLI)
+ * and swallows each poll's connection error. A first run cannot even *hang* a probe: with `LAYA_PRELOAD=1` the
+ * checkpoints are built **before** uvicorn binds (docs/LAYA_RUNTIME.md §6), so during a download the port is closed
+ * and `/health` is refused instantly. The path that must tolerate a slow first start is the polling loop, and it
+ * does; the path that must answer quickly is this one, and before this constant existed it could not answer at all.
+ *
+ * ## The number
+ *
+ * 5 000 ms. The measured cost of a probe is the fixed part of a call - round trip, body read and `json.loads`, **18
+ * ms** against the local server - and the coolest measured call of any kind is 539 ms for a one-question decision.
+ * 5 s is 278x the former and 9.3x the latter, so a probe still answers when it is delayed behind work an order of
+ * magnitude more expensive than any `/health` handler can be. Thermal throttling multiplies *inference* service time
+ * (measured ~24x), not the round trip: 24 x 18 ms is 432 ms, 11x inside this bound. **The assumption this rests on**
+ * is that `/health` is not queued behind the inference path - the admission semaphore and the model lock live in the
+ * `/v1/systemone` route (docs/LAYA_RUNTIME.md §6b), and `LAYA_MAX_CONCURRENT` admits 16 calls at once - a
+ * concurrency one serialized handler could not offer. If that stops holding, the soaked one-question figure
+ * (24 x 539 ms, ~13 s) is what falsifies 5 s, and the fix is this number rather than the batch guard.
+ *
+ * `models()` shares the bound rather than getting its own: it is the same pre-flight question, answered without
+ * inference, and nothing in this repository calls it on a startup path - `/v1/models` exists only on the hosted Jev
+ * deployment, whose extra cost over a local probe is a TLS handshake and a WAN round trip, both far inside 5 s.
+ */
+export const S1_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Statuses that mean "refused, come back", not "your request is wrong".
@@ -208,7 +319,12 @@ export class S1Client {
    *
    * With a `retry` policy a *refused* call is attempted again, waiting the server's own `Retry-After`; the returned
    * `attempts` and `waitedMs` say what the answer took. A timeout is never retried — repeating it costs another
-   * timeout — and neither is a cancellation, which is the caller's decision rather than a backend failure.
+   * whole guard, which is 90 s at the server's 64-question cap — and neither is a cancellation, which is the
+   * caller's decision rather than a backend failure.
+   *
+   * The transport guard is `s1TransportGuardMs(Object.keys(questions).length)`: the batch size decides how long the
+   * socket may stay silent, because the service time is linear in the batch and a constant cannot be right at both
+   * one question and sixty-four.
    */
   async decide(
     state: unknown,
@@ -244,8 +360,12 @@ export class S1Client {
     opts: { signal?: AbortSignal } = {},
   ): Promise<Omit<S1DecideResult, 'attempts' | 'waitedMs'>> {
     const started = Date.now();
+    // The guard is sized by the batch: the service time is linear in it, so a single constant would either cut off
+    // a large batch that is working or leave a dead socket on a small one hanging for a minute. See the table on
+    // `s1TransportGuardMs` for the two measured anchors and the one extrapolation.
+    const guardMs = s1TransportGuardMs(Object.keys(questions).length);
     const guard = new AbortController();
-    const timer = setTimeout(() => guard.abort(), S1_TRANSPORT_TIMEOUT_MS);
+    const timer = setTimeout(() => guard.abort(), guardMs);
     // Two reasons to abort, kept distinguishable: our own transport guard, and the caller's cancellation. The
     // caller's signal wins the classification, because a cancelled session is not a slow backend.
     const signal =
@@ -287,8 +407,33 @@ export class S1Client {
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         if (opts.signal?.aborted === true) throw new S1CancelledError();
-        throw new S1TimeoutError(S1_TRANSPORT_TIMEOUT_MS);
+        throw new S1TimeoutError(guardMs);
       }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Run a probe under `S1_PROBE_TIMEOUT_MS`.
+   *
+   * The timer covers the **body read** as well as the response headers, which is why the work is passed in as a
+   * callback instead of guarding a `fetch` on its own: `fetch` resolves as soon as the headers arrive, so a socket
+   * that answers and then stalls mid-body would hang `res.json()` after any narrower guard had been disarmed.
+   * `#decideOnce` has the same shape for the same reason.
+   *
+   * The classification is the one the rest of the file uses: a deadline is `S1TimeoutError`, and anything else keeps
+   * its own type. There is no caller signal to give priority to here - neither probe accepts one - so the
+   * cancellation branch of `#decideOnce` has no counterpart.
+   */
+  async #probe<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const guard = new AbortController();
+    const timer = setTimeout(() => guard.abort(), S1_PROBE_TIMEOUT_MS);
+    try {
+      return await run(guard.signal);
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') throw new S1TimeoutError(S1_PROBE_TIMEOUT_MS);
       throw err;
     } finally {
       clearTimeout(timer);
@@ -298,23 +443,39 @@ export class S1Client {
   /**
    * GET /health — the readiness probe of Laya-style deployments.
    * Verified: `laya-serve` 0.3.21 exposes `/health` and `/v1/systemone` only.
+   *
+   * Bounded by `S1_PROBE_TIMEOUT_MS`, and a timeout is reported the way every other failure here is: as `false`.
+   * This method has a boolean contract - it answers "is the backend there" - so nothing above it can act on the
+   * difference between a refused socket, a black-holed one and a 500, and throwing would turn `/s1-ping`'s
+   * "unreachable, and here is how long it took" into a command that fails with a stack. What the guard changes is
+   * that "unreachable" is now also true of a socket that accepts a connection and then never answers.
    */
   async health(): Promise<boolean> {
     try {
-      const res = await this.#fetch(`${this.#baseUrl}/health`);
+      const res = await this.#probe((signal) => this.#fetch(`${this.#baseUrl}/health`, { signal }));
       return res.ok;
     } catch {
       return false;
     }
   }
 
-  /** GET /v1/models — available on the hosted Jev deployment, not on `laya-serve`. */
+  /**
+   * GET /v1/models — available on the hosted Jev deployment, not on `laya-serve`.
+   *
+   * Bounded by `S1_PROBE_TIMEOUT_MS`. Unlike `health()` this method throws, so a deadline is reported as
+   * `S1TimeoutError` rather than folded into the `S1HttpError` family: the scorer above this client already branches
+   * on that class to tell "too slow" from "refused" and from "cancelled" (`packages/dsh-plugin/src/s1-relevance.ts:229`
+   * and its `timedOut`/`cancelled` counters at `:585-586`), and an empty list stays distinguishable from a backend
+   * that never answered.
+   */
   async models(): Promise<string[]> {
     const headers: Record<string, string> = {};
     if (this.#apiKey) headers.authorization = `Bearer ${this.#apiKey}`;
-    const res = await this.#fetch(`${this.#baseUrl}/v1/models`, { headers });
-    if (!res.ok) throw new S1HttpError(res.status, `models ${res.status}`);
-    const json = (await res.json()) as { data?: { id?: string }[] } | string[];
+    const json = await this.#probe(async (signal) => {
+      const res = await this.#fetch(`${this.#baseUrl}/v1/models`, { headers, signal });
+      if (!res.ok) throw new S1HttpError(res.status, `models ${res.status}`);
+      return (await res.json()) as { data?: { id?: string }[] } | string[];
+    });
     if (Array.isArray(json)) return json;
     return (json.data ?? []).map((m) => m.id ?? '').filter(Boolean);
   }

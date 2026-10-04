@@ -7,8 +7,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createS1Relevance, S1_RETRY_ATTEMPTS, S1_RETRY_BASE_DELAY_MS, S1_RETRY_BUDGET_MS, S1_RETRY_MAX_DELAY_MS } from '../src/s1-relevance.ts';
-import { S1CancelledError, S1HttpError, S1TimeoutError } from '@s1cap/s1-client';
+import {
+  createS1Relevance,
+  S1_RETRY_ATTEMPTS,
+  S1_RETRY_BASE_DELAY_MS,
+  S1_RETRY_MAX_DELAY_MS,
+  s1RetryBudgetMs,
+} from '../src/s1-relevance.ts';
+import { S1CancelledError, S1HttpError, S1TimeoutError, s1TransportGuardMs } from '@s1cap/s1-client';
 import { AssociationGraph } from '@s1cap/core';
 import type { Segment } from '@s1cap/core';
 
@@ -189,10 +195,11 @@ test('the rendered window is bounded, and how much of it was sent is reported', 
 test('a timeout and a cancellation are counted as themselves, not as one kind of failure', async () => {
   const timeouts = createS1Relevance({
     // Injected so the retries below cost no wall-clock time: a timeout is retryable, so this fake is asked three
-    // times and would otherwise sleep through the backoff.
+    // times and would otherwise sleep through the backoff. The error carries the guard the client would really have
+    // applied to a one-question request - `s1TransportGuardMs`, not the 30 000 ms fixed guard that no longer exists.
     sleep: async () => {},
     decide: async () => {
-      throw new S1TimeoutError(30_000);
+      throw new S1TimeoutError(s1TransportGuardMs(1));
     },
   });
   await timeouts(current, [segment('a', 'x')]);
@@ -246,13 +253,17 @@ test('a 503 is retried with a smaller batch, so a busy server costs a smaller re
 });
 
 test('a transport timeout is retryable, and the retry is smaller because the request was the problem', async () => {
-  // The other 57 failures died at the 30 000 ms guard. There is no evidence in a dead socket that the *question*
-  // was wrong, so this one is retried - against the injected clock, so the 30 s is asserted rather than waited.
+  // 57 of the measured failures died at the transport guard - a fixed 30 000 ms in that round, and the guard has
+  // since become `s1TransportGuardMs(batch)`, so the fake below throws the guard the client would really apply to
+  // the request it was handed rather than a number from a guard that no longer exists. There is no evidence in a
+  // dead socket that the *question* was wrong, so this one is retried - against the injected clock, so the guard is
+  // asserted rather than waited.
   const sizes: number[] = [];
   const delays: number[] = [];
   const warnings: string[] = [];
   const clock = { t: 0 };
   const relevance = createS1Relevance({
+    questionsPerCall: 2,
     now: () => clock.t,
     sleep: async (ms) => {
       delays.push(ms);
@@ -260,10 +271,11 @@ test('a transport timeout is retryable, and the retry is smaller because the req
     },
     onWarn: (message) => warnings.push(message),
     decide: async (_state, questions) => {
-      sizes.push(Object.keys(questions).length);
+      const asked = Object.keys(questions).length;
+      sizes.push(asked);
       if (sizes.length === 1) {
-        clock.t += 30_000;
-        throw new S1TimeoutError(30_000);
+        clock.t += s1TransportGuardMs(asked);
+        throw new S1TimeoutError(s1TransportGuardMs(asked));
       }
       return { answers: answerByCandidate(questions) };
     },
@@ -281,7 +293,13 @@ test('a transport timeout is retryable, and the retry is smaller because the req
     warnings.some((w) => w.includes('retryable; retrying in')),
     'the line a human reads says the failure was retryable and what the retry will ask',
   );
-  assert.ok(clock.t <= S1_RETRY_BUDGET_MS, `a retried 30 s timeout still fits the window budget (clock ${String(clock.t)}ms)`);
+  // The `2` is this window's own cap, so the budget compared against is the one the window was actually given:
+  // one guard plus its backoff is well inside it. This used to compare against `S1_RETRY_BUDGET_MS`, a fixed 60 s
+  // that described a 30 s guard and has been replaced by the schedule it bounds.
+  assert.ok(
+    clock.t <= s1RetryBudgetMs(2),
+    `a timed-out guard plus its backoff fits the window's own budget (clock ${String(clock.t)}ms)`,
+  );
 });
 
 test('a cancelled session is never retried, and no retry counter moves', async () => {
@@ -339,7 +357,9 @@ test('the backoff doubles and is clamped, and the schedule is asserted instead o
       delays.push(ms);
     },
     decide: async () => {
-      throw new S1TimeoutError(30_000);
+      // The guard for the two-question request this window asks, not a fixed 30 000 ms: the error's own number is
+      // not asserted here, but a fake that names a guard the client cannot produce is a fake that hides a change.
+      throw new S1TimeoutError(s1TransportGuardMs(2));
     },
   });
 
@@ -360,19 +380,24 @@ test('the backoff doubles and is clamped, and the schedule is asserted instead o
 });
 
 test('a window stops retrying once its retry budget is spent, so the upkeep queue is not held behind it', async () => {
-  // Two attempts of 40 s each on the injected clock, plus the real backoff wait between them: the first fits
-  // inside the 60 s budget, the second does not, and the third is refused. This is the bound that keeps one slow
-  // segment from stalling the whole queue behind it.
+  // Each attempt is made to cost half the window's budget, which is the shape this bound exists for: the first
+  // fits, the second overspends it, and a third is refused. Both the budget and the per-attempt cost are derived
+  // from `s1RetryBudgetMs` rather than written as numbers, so this test cannot pass against a budget that has since
+  // grown past its own arithmetic - it did pass against the fixed 60 s one, which is why the numbers were written
+  // out here before.
+  const perCall = 16;
+  const attemptCostMs = Math.ceil(s1RetryBudgetMs(perCall) / 2);
   const attempts: number[] = [];
   const clock = { t: 0 };
   const relevance = createS1Relevance({
+    questionsPerCall: perCall,
     now: () => clock.t,
     sleep: async (ms) => {
       clock.t += ms;
     },
     decide: async () => {
       attempts.push(clock.t);
-      clock.t += 40_000;
+      clock.t += attemptCostMs;
       throw new S1HttpError(503, 'systemone 503: {"detail":"server busy"}');
     },
   });
@@ -383,6 +408,95 @@ test('a window stops retrying once its retry budget is spent, so the upkeep queu
   const stats = relevance.stats();
   assert.equal(stats.retries, 1, 'one retry was affordable');
   assert.equal(stats.gaveUpAfterRetries, 1, 'and the window that ran out of budget is counted like the one that ran out of attempts');
+});
+
+test('the retry budget is the guard schedule it bounds, so a bigger batch cannot silently lose its retry', async () => {
+  // The defect this pins. `S1_RETRY_BUDGET_MS` was a fixed 60 000 ms sized for the fixed 30 s guard that
+  // `s1-client` no longer has, and one policy then did three different things: at 20 questions a timeout was 35 s
+  // and the whole schedule fitted (35 + 1 + 22.5 = 58.5 s), at 40 a single timeout *was* 60 s and the retry was
+  // refused, and at 64 it was 90 s and exceeded the budget before the first attempt returned. The sizes where it
+  // did nothing are the sizes a saturated server produces, and it did nothing while still reading as a configured
+  // bound. `s1RetryBudgetMs` is now the sum of the guards the attempt schedule will actually meet, taken from the
+  // client's `s1TransportGuardMs`, so the two cannot drift apart again.
+  //
+  // The expansion, written out from the client's own function rather than from this module's: guard(q), the first
+  // backoff, guard(q/2), the second backoff, guard(q/4).
+  assert.equal(
+    s1RetryBudgetMs(20),
+    s1TransportGuardMs(20) + S1_RETRY_BASE_DELAY_MS + s1TransportGuardMs(10) + S1_RETRY_MAX_DELAY_MS + s1TransportGuardMs(5),
+    'the default batch size: 35 000 + 1 000 + 22 500 + 1 500 + 16 250 = 76 250 ms',
+  );
+  assert.equal(
+    s1RetryBudgetMs(40),
+    s1TransportGuardMs(40) + S1_RETRY_BASE_DELAY_MS + s1TransportGuardMs(20) + S1_RETRY_MAX_DELAY_MS + s1TransportGuardMs(10),
+    'the size the old fixed budget refused outright: 120 000 ms',
+  );
+  assert.equal(
+    s1RetryBudgetMs(64),
+    s1TransportGuardMs(64) + S1_RETRY_BASE_DELAY_MS + s1TransportGuardMs(32) + S1_RETRY_MAX_DELAY_MS + s1TransportGuardMs(16),
+    "the server's cap, where one guard was already past the old budget: 172 500 ms",
+  );
+
+  // The property that makes the budget a bound on the wait and not a second, hidden attempt limit: the first
+  // timeout of a window, plus the backoff it schedules, plus the smaller request it entitles the window to, must
+  // fit. The first of those two assertions is the one that fails against a fixed budget: at 40 questions the guard
+  // alone is 60 000 ms, so `60 000 > 60 000 + 1 000` is false and no retry could have happened.
+  for (const perCall of [1, 2, 5, 20, 40, 64]) {
+    const budget = s1RetryBudgetMs(perCall);
+    const firstGuard = s1TransportGuardMs(perCall);
+    assert.ok(
+      budget > firstGuard + S1_RETRY_BASE_DELAY_MS,
+      `at ${perCall} questions one timeout plus its backoff must fit the budget (${String(firstGuard)} + ${String(S1_RETRY_BASE_DELAY_MS)} < ${String(budget)})`,
+    );
+    assert.ok(
+      budget >= firstGuard + S1_RETRY_BASE_DELAY_MS + s1TransportGuardMs(Math.max(1, Math.floor(perCall / 2))),
+      `and so must the halved request the retry will send at ${perCall} questions (budget ${String(budget)})`,
+    );
+    if (perCall > 1) {
+      assert.ok(s1RetryBudgetMs(perCall) > s1RetryBudgetMs(perCall - 1), `the budget grows with the batch (${perCall})`);
+    }
+  }
+
+  // And behaviourally, where the old fixed budget refused the retry: the real guard for the real batch, followed by
+  // a backend that answers - twice, so the whole three-attempt schedule is exercised and the budget is the only
+  // thing that could have stopped it.
+  for (const perCall of [40, 64]) {
+    const sizes: number[] = [];
+    const clock = { t: 0 };
+    const relevance = createS1Relevance({
+      questionsPerCall: perCall,
+      now: () => clock.t,
+      sleep: async (ms) => {
+        clock.t += ms;
+      },
+      decide: async (_state, questions) => {
+        const asked = Object.keys(questions).length;
+        sizes.push(asked);
+        if (sizes.length < S1_RETRY_ATTEMPTS) {
+          clock.t += s1TransportGuardMs(asked);
+          throw new S1TimeoutError(s1TransportGuardMs(asked));
+        }
+        const answers: Record<string, { type: string; noul: number }> = {};
+        for (const key of Object.keys(questions)) answers[key] = { type: 'noul', noul: 0.5 };
+        return { answers };
+      },
+    });
+
+    const many = Array.from({ length: perCall }, (_unused, i) => segment(`h${i}`, `candidate ${i}`));
+    const weights = await relevance(current, many);
+    assert.equal(weights?.length, perCall, `at ${perCall} questions a timeout costs a retry, not the window`);
+    assert.ok(weights?.every((w) => w === 0.5), 'and every candidate is judged by the backend');
+    assert.deepEqual(
+      sizes.slice(0, S1_RETRY_ATTEMPTS),
+      [perCall, Math.floor(perCall / 2), Math.floor(perCall / 4)],
+      'the schedule the budget was written for: the whole batch, then half, then a quarter',
+    );
+    const stats = relevance.stats();
+    assert.equal(stats.retries, S1_RETRY_ATTEMPTS - 1, 'every retry the attempt bound allows was affordable');
+    assert.equal(stats.gaveUpAfterRetries, 0, 'and no window was abandoned by a budget it never reached');
+    assert.equal(stats.timedOut, S1_RETRY_ATTEMPTS - 1, 'the injected timeouts are counted as timeouts');
+    assert.equal(stats.answeredQuestions, perCall, 'the whole window was answered, in the reduced requests');
+  }
 });
 
 test('4xx is the request\'s problem and is not retried, while 429 is the server\'s and is', async () => {

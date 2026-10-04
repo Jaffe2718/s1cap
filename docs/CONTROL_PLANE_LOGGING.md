@@ -90,49 +90,24 @@ Cost and timing must join to turns for the paper, but joining must not move cont
 - **Reproducibility:** the two logs together are a complete, replayable record — session content and
   governance decisions — without either contaminating the other.
 
-## 6. What observation mode writes today (M1)
+## 6. What the two streams look like in a live round
 
-`observation: log` (the default when the plugin is enabled) runs SEGMENTER → RECALL → ASSEMBLER on **every**
-LLM call and appends one `assembly` record per call. The prompt the model receives is returned untouched:
-this milestone changes no tokens, which is what makes it safe to run against a live session.
+`observation: log` (the default when the plugin is enabled) runs SEGMENTER → RECALL → ASSEMBLER on **every** LLM call
+and appends one `assembly` record per call. The prompt the model receives is returned untouched: that is what makes
+it safe to run against a live session, and it is what lets the two streams be compared at all.
 
-A real record from a DSH **0.1.7-rc.2** round (2026-09-28; `~/.dsh/.s1cap/control.jsonl`, relative paths resolve
-against `DSH_HOME`). The release is part of the record's meaning, so it is stated: this is evidence about that
-line, and the fields it lacks are not fields the record never had. Beside it, what the release in use writes.
-The live pre-flight of the 2026-10-02 round (DSH **0.2.0-rc.2**, `observation: tape`, its telemetry paths pointed
-into the round's own `evidence/PROBE/`) wrote **both** streams: 22 `control.jsonl` records — `assembly` ×4,
-`context_delivery` ×4, `s1_call` ×14 — and 15 `session.jsonl` lines, all parseable. Here is that instance's last
-`assembly` record, verbatim:
+**A record to read is read from the round, not from this file:** `<round>/evidence/<cell>/` holds the S1CAP stream
+(`control.jsonl`) and the harness's own `RawEvent` stream (`session.jsonl`) verbatim. What this section used to carry
+instead — two verbatim `assembly` records, one per DSH release, and the narrative around them — was a dated record
+and is in the archive. What they established, and what the code does now:
 
-```json
-{"windowN":1024,"scoredPairs":55,"judgedPairs":55,"type":"assembly","schema":1,"ts":1790944753873,"sessionId":"…","seq":12,"candidates":0,"selected":10,"bfsDepth":0,"budgetUsed":2537,"budgetTotal":118800,"blocks":{"pinned":1499,"stateProxy":31,"recalled":633,"tail":119,"anchor":255},"prefixTokensStable":1499,"layoutOrder":["pinned","stateProxy","anchor","recalled","tail"],"xFirst":true,"layoutStableTokens":1785,"cutAfterBlock":"anchor","tokensAfterCut":752,"recallTree":{},"fallback":"recency-window"}
-```
-
-The schema is **additive** across those two releases, which is the rule this document opens with: the fields the
-older sample has are all still there, and 0.2.0-rc.2 adds `windowN`, `scoredPairs`/`judgedPairs`, `layoutOrder`,
-`xFirst`, `layoutStableTokens`, `cutAfterBlock`/`tokensAfterCut` and `recallTree`. Two of the added fields answer
-questions the sample below left open: `blocks.pinned` is **1499** (and `prefixTokensStable` equals it), where the old
-sample had 0; and `scoredPairs == judgedPairs` (55/55 here, 0/21/28/55 across the four steps) is the per-step form
-of the coverage number the report prints.
-
-The contrast is the point of keeping both, so the 0.1.7-rc.2 record is reproduced unchanged:
-
-```json
-{"type":"assembly","schema":1,"ts":1790601861099,"sessionId":"…","seq":0,"candidates":0,"selected":0,
- "bfsDepth":0,"budgetUsed":7,"budgetTotal":118800,
- "blocks":{"pinned":0,"stateProxy":0,"recalled":0,"tail":0,"anchor":6},"prefixTokensStable":0,
- "fallback":"recency-window"}
-```
-
-Three things that round taught us, all now reflected in code:
-
-- **`blocks.pinned` was 0.** The `agent/pre-step` payload's `messages` array did not carry the system prompt
-  in this profile, so the pinned block — and with it `prefixTokensStable` — is empty. Sourcing the system
-  prompt from the harness's own system-prompt surface is the next block's job; until then the budget
-  accounting under-counts the fixed prefix. **On 0.2.0-rc.2 that job is visibly done** — the live record above
-  carries `blocks.pinned: 1499` with `prefixTokensStable: 1499` (700/700 at its step 0) — which is why the two
-  records are kept side by side rather than one replacing the other.
-- **`blocks.stateProxy` was 1 for an absent T.** `estimateTokens('')` returns 1 by design (a text estimate is
-  never zero), so an empty state proxy was charged a token; `assemble()` now charges 0.
-- **`sessionId` was missing.** Added to `AssemblyEvent` as an optional field (the schema rule is *add, never
-  rename*): without it, records from several sessions sharing one control-plane file cannot be attributed.
+- **the schema is additive across releases — add, never rename** (`AssemblyEvent`,
+  `packages/core/src/types.ts`), so a field a newer release adds is evidence about that release only, and a field
+  an older record lacks is not a field the record never had.
+- **`blocks.pinned` is the fixed prefix the harness supplied**, and `prefixTokensStable` equals it. A zero means the
+  `agent/pre-step` payload carried no system prompt in that profile and the budget is under-counting the prefix — not
+  that there is no prefix. It is non-zero from DSH 0.2.0-rc.2's live record (700/700 at its step 0, 1 499 later).
+- **an absent state proxy costs 0 tokens**, not the 1 a text estimate would return for an empty string.
+- **`sessionId` is on the record**, so records from several sessions sharing one control-plane file can be attributed.
+- **a window the backpressure gate did not admit is deferred, not judged** — `scoredPairs`, `judgedPairs` and
+  `deferredPairs` are three numbers rather than one ratio, and `docs/FORMULAS.md` §5.1 owns their definitions.

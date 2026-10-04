@@ -11,7 +11,7 @@
  * messages — so a replay of the same step produces the same observation byte for byte
  * (`packages/core/test/observer.test.ts`).
  */
-                                                                          
+                                                                                       
 import { AssociationGraph } from './assoc-graph.js';
 import { segmentEvent, estimateTokens, isS1capInjected } from './segmenter.js';
 import { assemble, totalTokens } from './assembler.js';
@@ -20,6 +20,56 @@ import { adaptMessages } from './harness-adapter.js';
 import { TELEMETRY_SCHEMA_VERSION } from './telemetry.js';
 import { buildStateProxy } from './state-proxy.js';
                                                     
+
+/**
+ * The rule: which segment kinds are **input events**, i.e. the session events a step's recall may be seeded from.
+ *
+ * It comes from two sentences of the originating brief, quoted verbatim in `types.ts` §`AssemblyTrigger`. Idea 3
+ * drives the recall from "the user input *or* the model's own self-directed input" `x`; idea 2 defines a session
+ * event as "user input x, or LLM output o, tool-call results, etc.". Both halves of that disjunction are input
+ * events, so every session-event kind is a seed and exactly one kind is not:
+ *
+ *   kind             seed?   why
+ *   --------------   -----   ----------------------------------------------------------------------------------
+ *   `user`           yes     idea 2's "user input x" — the first half of idea 3's disjunction
+ *   `assistant`      yes     idea 2's "LLM output o" — the second half, "the model's own self-directed input"
+ *   `trace`          yes     the same model output under another name: an assistant message that carries reasoning
+ *                            parts is labelled `trace` (`harness-adapter.ts`), so excluding it would leave the
+ *                            defect unfixed for any model that reasons. Round `20261004-0233` logged 25 `trace`
+ *                            segments and **zero** `assistant` ones, and its own frozen root is the proof
+ *   `toolCall`       yes     the model's own act under idea 2's "etc." — the invocation is the model's decision,
+ *                            and its arguments are the intent a later step can be related to
+ *   `toolResult`     yes     named outright by idea 2: "tool-call results"
+ *   `systemPinned`   **no**  the one exclusion. It is not a session event at all: the pinned prefix (the rendered
+ *                            system prompt, developer instructions, the harness's own notices) precedes
+ *                            everything in the request by construction and is placed exactly once, in the head.
+ *                            Seeding a walk from it would make the step recall *from its own instructions*, and it
+ *                            is the block every other one is positioned relative to
+ *
+ * A `Record<SegmentKind, boolean>` and not a set or a `kind !== 'systemPinned'` test, because the exhaustiveness
+ * is the point: a seventh kind is a type error here and has to be classified deliberately rather than silently
+ * joining the seeds. This table is the single place the rule lives.
+ */
+const INPUT_EVENT                               = {
+  user: true,
+  assistant: true,
+  trace: true,
+  toolCall: true,
+  toolResult: true,
+  systemPinned: false,
+};
+
+/**
+ * Is this segment an input event — a session event the step's recall may be seeded from? See `INPUT_EVENT` above,
+ * which is the only place the answer is decided.
+ *
+ * Used twice in `observeStep`, and both call sites have to agree: the anchor the walk is rooted on (`windowAnchor`)
+ * and the payload-side anchor the mismatch diagnostic compares it against. Two different predicates there would
+ * make the diagnostic fire on every mid-turn step, which is noise rather than a report.
+ */
+export function isInputEvent(segment         )          {
+  return INPUT_EVENT[segment.kind];
+}
 
                                    
                     
@@ -74,6 +124,19 @@ import { buildStateProxy } from './state-proxy.js';
                                                                          
      
                                             
+     
+                                                                                                              
+                                                                                                       
+    
+                                                                                                                  
+                                                                                                                    
+                                                                                                                   
+                                                                                                     
+    
+                                                                                                                   
+                                                                                             
+     
+                         
                         
                               
                               
@@ -99,9 +162,11 @@ import { buildStateProxy } from './state-proxy.js';
     
                                                                                                                
                                                                                                                  
-                                                                                                                 
-                                                                                                             
-                                                                                    
+                                                                                                                
+                                                                                                                   
+                                                                                                               
+                                                                                                                   
+                           
      
                                                                                                                             
      
@@ -315,31 +380,53 @@ export async function observeStep(
   // The graph's ordered segments are the session's own append order, so they include everything the payload
   // carried and everything before it. That is the window a model call needs.
   //
-  // The anchor is the newest `user` segment *in that window*, and finding it is where a whole run's recall
-  // silently pointed at the wrong turn. The line above computes a position inside the payload's segment list;
-  // this one used to apply it to the graph's array (`window[anchor]`). The two index spaces coincide only when
-  // the graph's order begins where the payload's does, which is the rare case: the payload holds the current
-  // question *after* the payload's own first segment, so a payload whose last user turn sits at index 2 indexed
-  // the graph's third-oldest segment. Measured over the same diagnostic round: 273 of 277 invocations rooted the
-  // walk on `34b2115f-…-#3`, the tail chunk of turn 1's AGENTS.md block, and the task's own three chunks were
-  // re-offered as candidates 190, 189 and 188 times. The tree was a faithful account of a walk from the wrong
-  // question, and no counting of its nodes could have shown that.
+  // The anchor is the newest *input event* in that window — `isInputEvent` above — and getting that predicate
+  // wrong is where a whole run's recall silently pointed at the wrong turn. Two independent defects have been
+  // found here.
   //
-  // Resolved in the graph, and not by looking the payload's own last user segment up in the graph, because the
-  // payload is the lossy list (the comment above): a step whose payload carries only an older message would then
-  // anchor on that older message, which is the same defect one turn smaller. The window is append-ordered and
-  // holds everything the step carries, so its last `user` segment IS the newest question this step has; every
-  // other block is written relative to it (`pool` below excludes it, `unjudgedWithin` looks back from it), and
-  // assembling from any other segment would describe a prompt nobody is going to send.
+  // The first was an index space. The line above computes a position inside the payload's segment list; this one
+  // used to apply it to the graph's array (`window[anchor]`). The two index spaces coincide only when the graph's
+  // order begins where the payload's does, which is the rare case: the payload holds the current question *after*
+  // the payload's own first segment, so a payload whose last user turn sits at index 2 indexed the graph's
+  // third-oldest segment. Measured over the same diagnostic round: 273 of 277 invocations rooted the walk on
+  // `34b2115f-…-#3`, the tail chunk of turn 1's AGENTS.md block, and the task's own three chunks were re-offered as
+  // candidates 190, 189 and 188 times. The tree was a faithful account of a walk from the wrong question, and no
+  // counting of its nodes could have shown that.
+  //
+  // The second is the predicate itself, and it survived that fix because the fix kept it: the anchor was "the
+  // newest `user` segment". That is a chat-transcript rule. It holds while a session alternates one user turn with
+  // one model turn, and it stops advancing the moment the loop takes more than one step per turn — the model's own
+  // messages arrive as `assistant` (or `trace`), its tool invocations as `toolCall`, their results as `toolResult`,
+  // and none of those is a `user` segment. So from the turn's second step on, the newest `user` segment stays the
+  // turn's opening question for the rest of the turn, and every step re-seeds the walk from it.
+  //
+  // Measured in round `20261004-0233`, cell C2, from that round's own control plane (`evidence/C2/control.jsonl`,
+  // 25 assemblies): the `recallTree` root changed once and then stayed `7b0dd492-…-#3` for the last 20 consecutive
+  // assemblies while the step counter climbed from 23 to 116. Every one of those walks explored the same frozen
+  // neighbourhood — `candidates` plateaued at 26-28, `selected` at 20, `bfsDepth` at 2 — and because the selection
+  // never moved, the delivered payload was byte-identical from step to step, so the payload-id guard refused the
+  // re-delivery and only 11 of the 25 steps received anything at all.
+  //
+  // That session's own segment kinds are the proof that no `user`-only condition could have advanced: it logged
+  // 15 `user`, 25 `trace`, 42 `toolCall` and 42 `toolResult` segments and **no `assistant` segment at all** (every
+  // model message carried reasoning parts, so the adapter labelled it `trace`), and 14 of the 15 `user` segments
+  // were S1CAP's own deliveries, which ingestion drops (`isS1capInjected`). The frozen root was the one genuine
+  // `user` segment left in the graph. A rule that admitted only `user`, `assistant` and the tool kinds would still
+  // freeze there.
+  //
+  // `isInputEvent` is therefore the brief's own rule, applied: both halves of idea 3 drive the recall. The window
+  // is append-ordered and holds everything the step carries, so its newest input event is the step's own `x`;
+  // every other block is written relative to it (`pool` below excludes it, `unjudgedWithin` looks back from it),
+  // and assembling from any other segment would describe a prompt nobody is going to send.
   const window            = input.graph.orderedSegments();
-  const windowAnchor = lastIndexWhere(window, (s) => s.kind === 'user');
+  const windowAnchor = lastIndexWhere(window, isInputEvent);
   // The payload's own anchor is still computed, and is now used for one thing only: a diagnostic when the two
-  // disagree. Silence there would leave the next reader of this file to rediscover which space each index lives
-  // in, which is what this fix cost.
-  const anchor = lastIndexWhere(segments, (s) => s.kind === 'user');
-  // The payload's own anchor is used for one thing only, now that the walk is rooted in the graph: a diagnostic
-  // when the two disagree. Silence there would leave the next reader of this file to rediscover which space each
-  // index lives in, which is what this fix cost.
+  // disagree — the payload's own segment list and the graph's append order are different arrays, and silence here
+  // would leave the next reader of this file to rediscover which space each index lives in, which is what the
+  // first fix above cost. It is resolved with the *same* predicate as the window's for that reason: with the
+  // payload read as "newest user segment" and the graph as "newest input event", every mid-turn step would report
+  // a disagreement that is not one, and the diagnostic would stop being read.
+  const anchor = lastIndexWhere(segments, isInputEvent);
   if (anchor >= 0 && windowAnchor >= 0 && windowAnchor !== anchor) {
     const idAt = (list                    , i        )         => list[i]?.id ?? '';
     try {
@@ -388,21 +475,25 @@ export async function observeStep(
   // Everything in the window except the anchor, the anchor's own sibling chunks, and the pinned prefix, in
   // append order.
   //
-  // This used to be "the segments before the anchor", which looked equivalent and was not: the anchor is the
-  // last user segment, and the model's output for the current task - its messages, tool calls and tool results -
-  // arrives *after* it in the append-only log. Slicing before the anchor therefore discarded exactly the newest
-  // turns, and `tail` came out empty in every live record (blocks.tail = 0 across a whole run) while the k most
-  // relevant verbatim turns were quietly not in the prompt at all.
+  // This used to be written "the segments before the anchor", and the two were taken to be equivalent. They were
+  // not: the anchor was then the newest `user` segment, and the model's output for the current task - its
+  // messages, tool calls and tool results - arrives *after* it in the append-only log. Slicing before the anchor
+  // therefore discarded exactly the newest turns, and `tail` came out empty in every live record (blocks.tail = 0
+  // across a whole run) while the k most recent verbatim turns were quietly not in the prompt at all. With the
+  // anchor now the newest input event, nothing but pinned segments follows it and the two spellings *would*
+  // coincide - which is why the filter stays: it is the spelling whose correctness does not depend on where the
+  // anchor is, so the next change to `isInputEvent` cannot silently reintroduce the empty tail.
   //
-  // The sibling exclusion is the seed fix's other half. The anchor is the *last chunk* of its event, not the
-  // event: a long user message is split into chunks sharing a `chunkOf` parent (`segmenter.ts`), so the question
-  // the model is answering currently sits in the graph as several segments and exactly one of them is the anchor.
-  // Without this line the rest are ordinary history - in `tail` when they are the last k, in `history` and
-  // therefore in the fallback otherwise - and a recall hit on one is delivered as "an earlier user turn, quoted
-  // verbatim" naming the question's own id. Measured in round `20261002-2037`: both of the run's deliveries quote
-  // the task prompt, and the delivered body is its middle chunk; `recall-C2.txt` shows the prompt's three chunks
-  // offered as candidates 190 / 189 / 188 times. Re-quoting the current question is both false and redundant, so
-  // the exclusion is on the identity of the parent (`chunkOf ?? id`) rather than on the chunk.
+  // The sibling exclusion is the seed rule's other half. The anchor is the *last chunk* of its event, not the
+  // event: a long event is split into chunks sharing a `chunkOf` parent (`segmenter.ts`), so the segment the walk
+  // starts from sits in the graph as one of several, and - on a turn-opening step - the question the model is
+  // answering is one of them. Without this line the rest are ordinary history - in `tail` when they are the last
+  // k, in `history` and therefore in the fallback otherwise - and a recall hit on one is delivered as "an earlier
+  // turn, quoted verbatim" naming the current event's own id. Measured in round `20261002-2037`: both of the run's
+  // deliveries quote the task prompt, and the delivered body is its middle chunk; `recall-C2.txt` shows the
+  // prompt's three chunks offered as candidates 190 / 189 / 188 times. Re-quoting the event the walk starts from
+  // is both false and redundant, whatever kind it is - the exclusion is on the identity of the parent
+  // (`chunkOf ?? id`) rather than on the chunk, which is what makes it follow the anchor to a `toolResult` as well.
   const anchorParent = current.chunkOf ?? current.id;
   const pool = window.filter(
     (s) => s.id !== current.id && (s.chunkOf ?? s.id) !== anchorParent && s.kind !== 'systemPinned',
@@ -427,17 +518,37 @@ export async function observeStep(
     // cosmetic problem. Excluding here covers both the S1 selection and the recency fallback, since the
     // assembler draws candidates from `history` in both cases.
     .filter((s) => !isS1capInjected(s.id));
+  // --- T's boundary, which is the task and not the recall anchor ---
+  //
+  // T = π(r_1,…,r_ntr) is the model's reasoning **for one task** ("an observable textual proxy for task state",
+  // `state-proxy.ts`), and `buildStateProxy` serialises the `assistant`/`trace` segments that *follow* the segment
+  // it is handed as `anchorId` — its contract for that argument is "id of the current task segment x". It used to
+  // be handed the recall anchor, and the two were the same segment by accident of the old rule: the recall anchor
+  // was the newest `user` segment, which on a turn-opening step is the question that opened the task. They are not
+  // the same segment now — the recall anchor is the newest input event and moves at every step — so handing T that
+  // id would slice T's input at the very end of the log: T would come out empty on every step after the first,
+  // and the state proxy would vanish from the two cells that exist to deliver it while every counter on the record
+  // stayed healthy. The task boundary is unchanged and is still the newest `user` segment, which is what the old
+  // expression for the recall anchor always computed: the question the task was opened with.
+  //
+  // The fallback is the recall anchor, and it only arises in a window with no `user` segment at all — a session
+  // whose every event is a model or tool event. T is the empty string there either way, because nothing the model
+  // produced for a task can precede the task's own question.
+  const taskAnchor = lastIndexWhere(window, (s) => s.kind === 'user');
+  const taskSegment = taskAnchor >= 0 ? (window[taskAnchor] ?? current) : current;
   // One-entry memo of the last built T. `perTask` is the default policy precisely so this can be a single slot:
-  // within a task T does not change, and when the task changes the anchor id changes with it.
+  // within a task T does not change, and when the task changes the task segment's id changes with it. Keyed on
+  // `taskSegment` rather than on the recall anchor on purpose — a moving key would rebuild T on every step and
+  // quietly turn the default `perTask` policy into a per-step one.
   const proxyCache = input.proxyCache ?? { id: '', text: '' };
   // `perTask` reuses the memo across the steps of one task; `perTurn` rebuilds every step, which is what that
   // policy means and is not free.
-  const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === current.id;
+  const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === taskSegment.id;
   const proxyText = reuseProxy
     ? proxyCache.text
     : buildStateProxy({
         segments: window,
-        anchorId: current.id,
+        anchorId: taskSegment.id,
         maxChars: input.policy.tas.tMaxChars,
         updatePolicy: input.policy.tas.updatePolicy,
         now: input.now,
@@ -445,7 +556,7 @@ export async function observeStep(
   // Write the memo back only for `perTask`. A `perTurn` policy would find a matching id and reuse a proxy it was
   // supposed to rebuild, which is the one way a cache this cheap can be wrong rather than merely redundant.
   if (input.proxyCache !== undefined && input.policy.tas.updatePolicy === 'perTask' && !reuseProxy) {
-    input.proxyCache.id = current.id;
+    input.proxyCache.id = taskSegment.id;
     input.proxyCache.text = proxyText;
   }
 
@@ -466,6 +577,11 @@ export async function observeStep(
     history,
     // The anchor's sibling chunks, so a *graph* hit on one of them is dropped too: the walk does not read `pool`.
     excludeIds: siblingIds,
+    // The block's order from this session's previous step, mutated in place to this step's order. It is the
+    // caller's, like the T memo above and for the same reason: `observeStep` is a pure function of its input, so a
+    // per-call order map would be an empty one every step — which is exactly the instability the ordering exists to
+    // remove, and would look identical on the record.
+    ...(input.recallOrder !== undefined ? { recallOrder: input.recallOrder } : {}),
   });
 
   // Measured against the window the view was actually taken from, not the payload: with an empty payload the
@@ -504,7 +620,16 @@ export async function observeStep(
     blocks: result.budget.byBlock,
     prefixTokensStable: result.cacheStability.prefixTokensStable,
     layoutOrder: result.layout.order,
-    xFirst: input.policy.xFirst,
+    // The paper's axis, recorded as the arm it selected rather than as a mechanism name: a reader of a round can
+    // tell Trace as State from Trace Append without holding the enum in their head, and the two values are the
+    // project's names for the paper's two conditions (`packages/core/src/types.ts`).
+    //
+    // **No `questionPlacement` beside it any more (deleted 2026-10-05).** The question is the last block of
+    // `layoutOrder` in every assembly this build produces, so a field that recorded where it sits would record one
+    // value forever; and the axis it named could produce `[T, q, x]`, a layout the paper does not have. Rounds
+    // recorded before that date still carry it, and the reader of such a round has `layoutOrder` beside it, which
+    // says the same thing in the layout's own words.
+    tracePlacement: input.policy.tracePlacement,
     layoutStableTokens: result.cacheStability.layoutStableTokens,
     cutAfterBlock: result.cacheStability.cutAfterBlock,
     tokensAfterCut: result.cacheStability.tokensAfterCut,

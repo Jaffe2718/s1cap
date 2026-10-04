@@ -163,10 +163,10 @@ Read from the installed `laya/serve.py`, not from documentation:
 Still open: GPU/CPU device behaviour on the target machine (`LAYA_DEVICE`), and whether future
 releases add CLI arguments.
 
-## 6b. Admission control under load (measured 2026-10-01)
+## 6b. Admission control under load
 
-The 503s of round `20261001-1300` — a four-cell run against one shared backend — are **not** a compute shortage.
-`laya/serve.py` admits like this:
+`laya/serve.py` admits like this — this is the constraint the client-side backpressure design answers, so it is
+stated from the installed source rather than from documentation:
 
 ```python
 if admission.locked():                     # every one of LAYA_MAX_CONCURRENT slots taken
@@ -174,51 +174,47 @@ if admission.locked():                     # every one of LAYA_MAX_CONCURRENT sl
 await admission.acquire()
 ```
 
-It is a *non-blocking* level check: excess load is refused the moment the semaphore is full, never queued, so
-any burst above the cap loses its tail instantly. Measured against the running server, with a payload shaped like
-real traffic (a ~3 k-token state and three `noul` questions):
-
-| in-flight | default cap 16 | cap 64 |
-|---|---|---|
-| 8 | 8 ok, p50 2.0 s | 8 ok, p50 2.7 s |
-| 16 | 16 ok, p50 3.5 s | 16 ok, p50 3.5 s |
-| 24 | **16 ok / 8 × 503** | 24 ok, p50 4.9 s |
-| 32 | 16 ok / 16 × 503 | 32 ok, p50 6.4 s |
-| 48 | 16 ok / 32 × 503 | 48 ok, p50 10.5 s |
-| 64 | 16 ok / 48 × 503 | 64 ok, p50 **22.4 s** (p95 49 s) |
-| 128 | — | 64 ok / 64 × 503 |
-
-Two conclusions, and they point opposite ways from the obvious fix:
+It is a *non-blocking* level check: excess load is **refused the moment the semaphore is full, never queued**, so any
+burst above the cap loses its tail instantly. Two conclusions, and they point opposite ways from the obvious fix —
+both measured against the running server with a payload shaped like real traffic (a ~3 k-token state and three `noul`
+questions); the table is a dated measurement and lives with the round that took it
+(`.s1cap-ablation/round-20261001-1300/`), not here:
 
 - **Raising `LAYA_MAX_CONCURRENT` trades 503s for latency, and buys no throughput.** Throughput peaks at an
   in-flight count of roughly 16–32 and *falls* beyond it; at 64 the median is 22 s and the 95th percentile is
-  49 s, which the client's `S1_TRANSPORT_TIMEOUT_MS = 30_000` guard turns straight back into `S1TimeoutError`.
+  49 s, which the client's transport guard turns straight back into `S1TimeoutError`. That guard was a fixed
+  `30_000` ms when this was measured and is now `10_000 + 1_250 x questions` (`packages/s1-client`), so the loss at
+  this in-flight count still happens - 35 s at twenty questions against a 49 s p95 - while the batch sizes the guard
+  used to cut off outright (40 and 64 questions) are now covered.
   A bigger cap does not make more System-1 available; it moves the loss from the server to the client.
-- **The shedding is a burst artifact, not a capacity shortage.** In round `20261001-1300` the four cells issued
-  2 016 calls over the ~36 minutes of the run — about 0.9 calls/s against a server that sustains several times that
-  — yet 732 of them (36%) came back 503 and 126 more hit the 30 s guard. (The 1 880 this sentence used to cite was
-  a mid-run snapshot; the count kept growing for minutes after the last turn, because association upkeep is
-  asynchronous.) The average was far under capacity; the *instantaneous* bursts were far over it, and this server
-  refuses rather than smooths.
+- **The shedding is a burst artifact, not a capacity shortage.** Round `20261001-1300` ran four cells against one
+  shared backend at about 0.9 calls/s — against a server that sustains several times that — and still lost more than
+  a third of its calls to 503s. The average was far under capacity; the *instantaneous* bursts were far over it, and
+  this server refuses rather than smooths.
 
-So the fix belongs on the client side of the deadline, not in the cap:
+So the fix belongs on the client side of the deadline, not in the cap — and that is where it now lives, in code
+rather than in a note:
 
-- **Let the excess wait.** Either a bounded retry that honours `Retry-After: 1` (two attempts is enough for a
-  1 s turnover) with `attempts` and `waitedMs` recorded in the `s1_call` record, or a small local queue in front
-  of Laya holding in-flight at 16–32 and queueing the rest. Both convert a lost judgement into a slower one.
-- **Cut the fragmentation.** `s1.questionsPerCall: 20` is not what happens: measured calls carry **1–3 questions**
-  (`questions` field of the `s1_call` records). More questions per request means fewer, larger bursts — the
-  cheapest reduction in peak in-flight available.
+- **the in-flight cap and the circuit breaker** — `packages/dsh-plugin/src/s1-backpressure.ts`; the knob is
+  `s1.admissionLimit`, whose default and the measurement behind it are `packages/core/src/types.ts` and
+  `bench/cells/C2.json`'s `_meta.admissionLimit`. Raising `LAYA_MAX_CONCURRENT` is deliberately not among them.
+- **a window the gate did not send is deferred, not judged** — `S1_DEFERRED` in
+  `packages/core/src/assoc-graph.ts`: the graph holds its cursor over it and the pairs are counted in
+  `deferredPairs`, so the omission is a number with a reason rather than a lower coverage nobody can see.
+- **`s1.retryAttempts` repeats a *refusal* only** — never a timeout (which costs another timeout) and never a
+  cancellation (which is the caller's decision); the wait is the server's own `Retry-After`, bounded, and every call
+  records `attempts` and `waitedMs` beside its cost, because a judgement that had to be retried is weaker evidence
+  than one that did not.
 
-Neither is a substitute for reporting coverage: a cell whose calls were 39% refused is not a cell that received
-its configured System-1 governance, and `judgedPairs / scoredPairs` is the number that says so.
-
-**Implemented 2026-10-01: `s1.retryAttempts` (1–5, default 1).** The policy is explicit and off by default, so
-nothing changes unless a profile asks for it; the plugin turns it into an `S1Client` `retry` policy that repeats
-only a *refusal* — never a timeout (which costs another timeout) and never a cancellation (which is the caller's
-decision). The wait is the server's own `Retry-After`, bounded by a budget derived from the attempt count, and
-every call records `attempts` and `waitedMs` beside its cost, on success and on failure alike, because a judgement
-that had to be retried is weaker evidence than one that did not.
+None of that substitutes for reporting coverage: a cell whose calls are mostly refused is not a cell that received
+its configured System-1 governance, and the number that says so is the share of the **pairs the session's arrival
+order offered** that the graph actually settled — the floor row, with `judgedPairs / scoredPairs` the secondary
+reading and the settled pairs' split by scorer beside it (a settled pair may have been settled by the local lexical
+fallback; the `scores` entry's `source` says which). `docs/FORMULAS.md` §5.1 owns both, and
+`scripts/cell-report.mjs` is what computes them; the pair count the denominator needs is neither `scoredPairs` nor
+`scoredPairs + deferredPairs` (corrected 2026-10-05 in two rounds, one whose walk recovered and one whose walk
+stopped, and the sentences that stood here are quoted verbatim in that document's corrections of the same date —
+the ratio they printed is the one §5.1 no longer states).
 
 ## 7. Tests
 

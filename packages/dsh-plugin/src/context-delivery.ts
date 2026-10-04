@@ -48,7 +48,9 @@
  *
  * - Insert *after the last claimed message*. The claimed messages are what the harness will append to the log
  *   for this step, so that is where a block about the current turn belongs; earlier would put it before the
- *   question it answers.
+ *   question it answers. When this step claimed nothing the block goes at the end of the increment instead,
+ *   which for an empty one is the same position — and that branch is reachable only when the caller says the
+ *   step issues a request anyway (`trigger` below).
  * - Remove the previous injection from the inbox, and skip when an equal payload is already present. A delivered
  *   block becomes part of the log, so without this it is re-delivered every step and the log grows one copy per
  *   step until the context is nothing but S1CAP's own output.
@@ -56,9 +58,42 @@
  *   are the harness's transcript, and a tool result among them carries a `tool_call_id` the provider matches.
  * - Refuse on a rejected step, and report a skip instead of hiding it: "assembled" and "delivered" are different
  *   states, and every counter in this project used to report the first while the experiments needed the second.
+ *
+ * ### What changed on 2026-10-04: the state proxy `T` is delivered, through this same channel
+ *
+ * The method this project ports is a placement contrast on a second pass, and the whole of it is the variable `T`:
+ *
+ *     Trace as State:   M([T, x, q])     trace BEFORE the long context
+ *     Trace Append:     M([x, T, q])     the same trace, AFTER the long context (the control)
+ *
+ * "Trace as State" (arXiv 2609.02702) §3.2 is the source: `T` is the model's own reasoning trace, serialized in
+ * source order by a fixed serializer that "preserves the included reasoning text in source order and adds fixed
+ * labels and delimiters". S1CAP computed `T`, recorded it on every assembly, budgeted for it, and then dropped it:
+ * the loop below walked past the `stateProxy` slot, so C0, C1 and C2 all presented the *same* value of the one
+ * variable the headline result is about. `docs/STATUS.md` §N6 carried "may an authored state proxy `T` be
+ * delivered at all" as an open question. The paper settles it: the method *is* the delivery of `T`.
+ *
+ * None of the four rules above changes, and each of them is why this is an insertion rather than a rewrite:
+ *
+ * - The anchor is untouched, so `T` lands after the last claimed message exactly like the quoted turns do.
+ * - Nothing is removed or rewritten, so every harness message this module did not add is as untouched as it was
+ *   before `T` existed; `dropped` is still 0 and `kept` is still `messages.length`.
+ * - The duplicate check is *not* weakened by the addition. The payload digest is computed over the whole delivered
+ *   text, so an unchanged `T` beside an unchanged selection is refused exactly as before, and a changed `T` is a
+ *   genuinely new payload - which the per-session payload-id set in `index.ts` then also treats as new, because it
+ *   keys on the same digest. That is the rule working, not the rule being bent: `updatePolicy: perTask` (the
+ *   default in C1 and C2) makes `T` byte-stable within a task, so a long turn does not re-deliver it per step.
+ *
+ * **What is still not reachable from here, stated rather than glossed.** The insertion anchor fixes the delivered
+ * message *after* the current turn's own messages, so what the model reads is `[..., x, T, recalled, ...]`: `T` is
+ * before the long context, which is the half the method is named for, and it is after `x`, which the paper's
+ * `[T, x, q]` is not. Reproducing the paper's literal order needs a channel that delivers the whole layout, which
+ * `docs/ARCHITECTURE.md` carries as the `packages/proxy` write-back and this file explicitly is not. This change
+ * makes the *variable* real; it does not make the layout order real.
  */
 
 import { S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
+import type { AssemblyTrigger } from '@s1cap/core';
 
 /** A segment as far as delivery is concerned: id and text for rendering, chunkOf for chunk parents. */export interface DeliverableSegment {
   id: string;
@@ -67,15 +102,46 @@ import { S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
   chunkOf?: string;
 }
 
+/**
+ * What this module needs to build the model view, and the switch that decides whether it may.
+ *
+ * `trigger` is `policy.assemblyTrigger`, passed through by the caller: which steps the caller assembles on.
+ * `'claimed-only'` keeps the guards in `deliverContext` exactly as this module shipped them. `'every-step'` — the
+ * default since 2026-10-04, because the brief requires recall on the model's own self-directed input — is
+ * the caller asserting that this step will issue a model request although its decision carries no messages — the
+ * packaged loop appends the decision and then streams the request built from the session log regardless — and it
+ * is what makes the end-insertion branch reachable for an *empty* decision, which was the unreachable half this
+ * file's own guard comment used to record. It is required, so a caller has to state which mode it is in, and the
+ * runtime test is written as `!== 'every-step'`: a missing or unexpected value is the conservative one and never
+ * a silent delivery into an empty step.
+ */
 export interface ContextDeliveryInput {
   /** `policy.deliver`: the cells that own context management deliver, the baseline does not */
   enabled: boolean;
   /** the assembler's block order, e.g. ['pinned','stateProxy','anchor','recalled','tail'] */
   order: readonly string[];
-  /** the TAS state proxy T, when the cell builds one */
+  /**
+   * The TAS state proxy `T`, verbatim, when the cell builds one — and **its presence is the gate**.
+   *
+   * `policy.tas.on` reaches this module through the layout, not as a flag: `assemble()` puts `stateProxy` on
+   * `AssemblyLayout` only when `policy.tas.on` (`packages/core/src/assembler.ts`), and `index.ts` forwards it only
+   * when it is there. So "`stateProxy` is a non-empty string here" is "`tas.on` is true and there is a trace to
+   * send", and delivering it is the default rather than a switch: the method does nothing without `T` in the
+   * request. An empty or whitespace-only value is `tas.on` with an empty `T` — `buildStateProxy` returns `''` when
+   * there is no anchor — and there is then nothing to deliver.
+   *
+   * The field is deliberately gated on its own value rather than on the `stateProxy` token in `order`: the block
+   * order is the assembler's vocabulary, and a delivery module that depended on that exact token would go silent
+   * the day the layout around it is renamed. If a future change moves `T` to a different shape or key, this
+   * interface and the one call in `index.ts` that fills it are the only two things that have to follow it.
+   */
   stateProxy?: string;
   recalled: readonly DeliverableSegment[];
-  /** the current turn's own segment (x) — already in the transcript via the claimed messages, never re-sent */
+  /**
+   * The step's newest input event (x) — the user's question at a turn-opening step, and the model's own message,
+   * tool call or tool result on every step after it (`observer.ts`, `isInputEvent`). Already in the transcript via
+   * the claimed messages, so it is never re-sent.
+   */
   anchor: DeliverableSegment;
   /** `decision.messages` from the harness, untouched */
   messages: readonly unknown[];
@@ -87,6 +153,7 @@ export interface ContextDeliveryInput {
   claimed?: readonly unknown[];
   /** `position.step` from the pre-step payload; the harness's own guard uses it (see above) */
   step?: number;
+  trigger: AssemblyTrigger;
 }
 
 export interface ContextDeliveryResult {
@@ -96,7 +163,13 @@ export interface ContextDeliveryResult {
   reason: string;
   /** the replacement list; null means "return the harness's own list unchanged" */
   messages: unknown[] | null;
-  /** the blocks the injected message carried, in order: what the model was actually given */
+  /**
+   * The blocks the injected message carried, in order: what the model was actually given.
+   *
+   * `'stateProxy'` appears here from 2026-10-04 and did not before, which is the change the record exists to make
+   * visible. A round that reads this array to answer "did the trace reach the model?" gets a different answer now
+   * than any recorded round can give, and that has to be a fact in the artifact rather than a surprise in a diff.
+   */
   blocks: string[];
   /** harness messages present in the delivered list */
   kept: number;
@@ -169,6 +242,44 @@ function renderSegment(seg: DeliverableSegment): string {
 }
 
 /**
+ * The paper's fixed delimiters (§3.2), exported because they are the delivered format and a reader of the request
+ * needs to know them: the serializer "adds fixed labels and delimiters", and those are the labels. They are what
+ * makes `T` legible as a *trace block* rather than as a fresh user message — which matters because the harness
+ * appends the injected message to the log as a `user` message, and an undelimited summary in that position reads
+ * as something the user said.
+ *
+ * These live here rather than in `packages/core/src/state-proxy.ts` on purpose: they are the names of the wire
+ * delimiters, and both modules have to agree on them. Core owns the content AND the frame; this file owns the
+ * composition of the injected message (which blocks, in what order, joined how).
+ *
+ * That split was wrong in the first version of this pair, and the way it was wrong is worth keeping: this file
+ * wrapped `T` in the delimiters because the paper's §3.2 sentence - "the serializer π ... adds fixed labels and
+ * delimiters" - was read as a wire concern, while the serializer in core emitted them too because the same
+ * sentence makes π itself the thing that adds them. π is core's module, so the delimiters are core's, and the
+ * result of the two readings meeting was a doubled pair in the model's context: `<trace_start>` / intro /
+ * `<trace_start>` / trace / `<trace_end>` / `<trace_end>`. Measured in round `20261004-0205`, both delivering
+ * cells, and the guard below did not catch it because it tested `startsWith` against a body that begins with the
+ * intro line rather than with the delimiter.
+ */
+export const TRACE_START = '<trace_start>';
+export const TRACE_END = '<trace_end>';
+
+/**
+ * `T` as it goes on the wire: the serializer's own text, **verbatim**, passed through untouched.
+ *
+ * Verbatim is the whole contract. `T` is derived, not generated — every line in it is the model's own text or a
+ * tool call it made (`state-proxy.ts`) — and re-writing it here would put S1CAP's words into the model's context
+ * in the one place the method requires the model's own words. Rewriting would include re-framing it: the frame is
+ * part of what the serializer produces, so adding one here produces two.
+ *
+ * A body that is empty is the one thing handled: `tas.on` with no anchor yields `''`, and an empty block must
+ * cost zero tokens and occupy no line in the message.
+ */
+function renderStateProxy(text: string): string {
+  return text.trim();
+}
+
+/**
  * Build the list of messages the model is shown, or report why it cannot.
  *
  * The delivered list is the harness's own list with one message added. Nothing is removed, reordered or
@@ -184,30 +295,67 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
   // **And this module's guards are the only place that rule is reachable**, which `docs/STATUS.md` used to state
   // the other way round: it said a step with nothing claimed must insert at the **end**, since index 0 would put a
   // note about the task ahead of the system instructions. The insertion point below still implements exactly that
-  // (`at < 0 -> messages.length`), and the branch is unreachable for the case the doc names first - an *empty*
-  // decision - because the refusal on the next line returns before it, and the line after that refuses for any
-  // non-array too. Only a decision that is non-empty but claims nothing reaches the end-insertion, which is the
-  // test at the bottom of `test/context-delivery.test.ts`. The two statements were left contradicting each other
-  // because the refusal's *reason* is the open question (the empty decision is also the harness's turn-termination
-  // signal - see `index.ts`'s pre-step comment); until that is decided, the doc and this guard say the same thing.
+  // (`at < 0 -> messages.length`), and it is reachable for the case the doc names first - an *empty* decision -
+  // exactly when the caller passes `trigger: 'every-step'`, which is the switch this file used to say it did not
+  // have: it recorded the doc and the guard as contradicting each other on this point and left them that way
+  // because "the refusal's *reason* is the open question". It is still the open question, and it is now the
+  // **caller's** to answer per step rather than this module's to answer for everyone:
+  //
+  //   - `'claimed-only'`: both refusals are unchanged, so an empty decision is declined here exactly as it was.
+  //     This was the default until 2026-10-04, and round `20261004-0205` ran it — 2 assemblies in C2's 53 steps.
+  //   - `'every-step'`: the caller has asserted that the harness will build a request from this step anyway, so
+  //     only the *general* refusal is lifted — the block goes at the end and the step is left otherwise alone.
+  //     The empty decision is still both things at once (a step the loop may stop on, and a step that sent a
+  //     request: round `20261003-2104` records 33 steps, 33 `LLM calls`, one per step, turn ended
+  //     `1:completed`), and this module is not the place that decides which one a given step is.
+  //
+  // The first-step guard is *not* lifted by `'every-step'`: the harness's own `step === 1 && messages.length === 0`
+  // is a turn-boundary test, the host's own instructions plugin declines there too, and the evidence above is
+  // about the steps after the first.
   if (input.step === 1 && input.messages.length === 0) {
     return NOT_DELIVERED('step 1 with no claimed messages: the harness treats this as no step at all');
   }
   if (!Array.isArray(input.messages) || input.messages.length === 0) {
-    return NOT_DELIVERED('the decision carried no messages');
+    // Lifted for the empty list under `every-step`, and for the empty list only: a decision whose `messages` is
+    // not a list at all is a shape this module does not understand, and inserting a list where the harness had
+    // something else would be a rewrite rather than the insertion the header promises.
+    const emptyList = Array.isArray(input.messages) && input.messages.length === 0;
+    if (!emptyList || input.trigger !== 'every-step') {
+      return NOT_DELIVERED('the decision carried no messages');
+    }
   }
 
-  // Only one block is delivered: the quoted turns.
+  // Two kinds of block now go into the one inserted message, and the state proxy is first.
   //
-  // The state proxy is not, and that is a decision about the method rather than about this file. T is a summary
-  // S1CAP writes, so delivering it would put S1CAP's own text into the model's context — the same category as
-  // the prose that was removed from this block earlier, and the requirement is that S1CAP's operations do not
-  // enter the LLM's context at all: it filters the harness's own context to reduce the LLM's workload, and adds
-  // nothing of its own. T stays an internal structure: it can inform relevance and ordering, and it is still
-  // computed and recorded, but the model is not shown it. `xFirst` never depended on T — T sits at index 1 of
-  // both layouts, and the flag only moves the anchor.
+  // **This paragraph used to argue the opposite, and the argument was wrong.** It read: T is a summary S1CAP writes,
+  // so delivering it would put S1CAP's own text into the model's context, "the same category as the prose that was
+  // removed from this block earlier", and the requirement is that S1CAP's operations do not enter the LLM's context
+  // at all. That requirement is real and it still holds for *prose* — it is why this file carries no preamble and
+  // no explanation. What it does not hold for is `T`, and the error was treating them as the same kind of thing.
+  // They are not: the prose was S1CAP writing *about* the context into the conversation, which is a category error
+  // under any reading. `T` is the model's own trace, serialized; the paper's method is the delivery of it, and
+  // "S1CAP adds nothing of its own" is true of it in the only sense that matters — every line in `T` is a rendering
+  // of something the model said or a tool returned (`packages/core/src/state-proxy.ts`), never a sentence S1CAP
+  // wrote about the model. Consequence, and it is the whole point of the change: until this line changed, C0, C1 and
+  // C2 all presented the *same* value of the variable the paper's headline result is about.
+  //
+  // **`T` first, and not because `order` says so.** The paper's contrast is about `T`'s position relative to the
+  // long context, and the long context here is the `recalled` block — so `T` goes before it, whatever the layout
+  // order happens to be. `order` is walked only for `recalled`: depending on the assembler's own slot name for `T`
+  // would couple delivery to a token this module does not own, and would fail *silently* — an empty delivered list
+  // is a valid answer — if that token were ever renamed.
+  //
+  // `T` alone is a delivery. A cell with `tas.on` and an empty selection (`recall.tier1: 'off'`) used to have
+  // nothing to insert at all; it now has exactly the thing the method is about, and the block count on the record
+  // says so. That is a change of what such a cell *is*, not a tuning detail, and it is why the delivery is reported
+  // rather than inferred.
+  const proxy = renderStateProxy(typeof input.stateProxy === 'string' ? input.stateProxy : '');
   const parts: string[] = [];
   const blocks: string[] = [];
+  if (proxy !== '') {
+    parts.push(proxy);
+    blocks.push('stateProxy');
+  }
   for (const block of input.order) {
     if (block === 'recalled') {
       for (const seg of input.recalled) {
@@ -217,13 +365,15 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
     }
   }
   if (parts.length === 0) {
-    // Nothing selected. Delivering an empty block would cost tokens on every step of every turn and tell the
-    // model nothing, so the step is left exactly as the harness built it.
+    // Nothing selected and no `T` to send. Delivering an empty block would cost tokens on every step of every turn
+    // and tell the model nothing, so the step is left exactly as the harness built it. The reason is kept
+    // character-for-character: `cell-report.mjs` and the refusal counts are read through this string.
     return NOT_DELIVERED('nothing to insert: relevance selected no turns');
   }
 
-  // No preamble, no explanation, no instruction. What the model reads is quoted session content with a
-  // provenance line, and nothing else.
+  // No preamble, no explanation, no instruction. What the model reads is `T` inside the paper's delimiters and
+  // quoted session content with a provenance line, and nothing else — in that order, because the trace is what the
+  // information is for.
   const text = parts.join('\n\n');
   const payloadId = payloadIdFor(text);
 
@@ -240,6 +390,11 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
   // is kept as the cheap first test and as the correct rule *if* some other middleware ever re-splices the block
   // into an inbox; the guard that actually runs is the per-session payload-id set in `index.ts`
   // (`preStepMiddleware`), which keys on what S1CAP itself delivered instead of on what the harness hands back.
+  //
+  // Under `trigger: 'every-step'` this loop scans an empty list on exactly the steps the switch is for, so the
+  // per-session set in `index.ts` is not a second line of defence there - it is the only one, and it is what
+  // bounds a round's deliveries to one per distinct payload per session (DEFECT-GATE.md, Update 5, item 5). It
+  // has to keep working; `observer.test.ts` pins it on this path rather than only on a decision that claimed.
   for (const message of input.messages) {
     if (textOf(message) === text) {
       return NOT_DELIVERED('this exact context is already in the transcript: not delivered twice', blocks);
@@ -270,14 +425,25 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
   // payload that carried no `messages`. The block then goes at the end. Inserting at index 0 instead would put
   // it ahead of the system prefix, which is the one position guaranteed to be wrong: it breaks the cache-stable
   // head and puts a note about the task before the instructions that define it.
+  //
+  // For an *empty* increment — the state `'every-step'` is what makes reachable — `messages.length` is 0, so the
+  // end and index 0 are the same position, and it is still the end of what the harness will append for this step.
   const index = at < 0 ? messages.length : at + 1;
   const delivered = [...messages.slice(0, index), injected, ...messages.slice(index)];
 
   return {
     delivered: true,
+    // Two sentences, because the two insertions are different facts and the record has to be readable without the
+    // step's decision beside it: a block placed after the question this step asked, and a block placed at the end
+    // of an increment that claimed nothing at all (the `'every-step'` case, where the payload's message count is 0
+    // and this message is the whole of the step's increment).
     reason:
-      `inserted one message after the last claimed message (index ${index} of ${messages.length}) carrying ` +
-      `${blocks.length} block(s): ${blocks.join(', ')}; nothing removed or rewritten`,
+      at < 0
+        ? `inserted one message at the end of the step's increment (index ${index} of ${messages.length}; nothing ` +
+          `in the decision was claimed) carrying ${blocks.length} block(s): ${blocks.join(', ')}; nothing removed ` +
+          `or rewritten`
+        : `inserted one message after the last claimed message (index ${index} of ${messages.length}) carrying ` +
+          `${blocks.length} block(s): ${blocks.join(', ')}; nothing removed or rewritten`,
     messages: delivered,
     blocks,
     kept: messages.length,

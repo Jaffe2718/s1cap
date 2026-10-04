@@ -15,8 +15,10 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
-import { parseProvider } from '../src/credentials.ts';
+import { defaultPolicy } from '@s1cap/core';
+import { parseProvider, parseTuningArgs } from '../src/credentials.ts';
 
 /** The element shape the stub `createElement` returns: enough of a tree to walk and to read text from. */
 interface StubElement {
@@ -214,7 +216,10 @@ function stubFetch(state: { calls: { method: string; body: string }[]; provider:
       relevanceThreshold: 0.6,
       window: 512,
       anchorWaitMs: 0,
-      xFirst: true,
+      // The arm, in the host's own spelling — the shape `/s1cap-7340/tuning` answers with. There is no question
+      // field: the question's position was deleted from the policy on 2026-10-05 (the paper places it last in every
+      // condition), so the route reports one layout axis and the panel renders one selector.
+      tracePlacement: 'trace-as-state',
       provider: state.provider,
     };
     return {
@@ -350,6 +355,58 @@ test('the Off text says what Off does and does not do, because "Off" reads as "n
   }
 });
 
+test('the panel offers exactly one layout control: the paper\'s arm', async () => {
+  const panel = await mountPanel();
+  try {
+    const selects = findAll(panel.view(), (element) => element.type === 'select');
+    assert.equal(selects.length, 1, 'one selector, for the trace placement — the only layout axis');
+    const trace = selects.find((element) => element.props['id'] === 's1cap-trace');
+    assert.ok(trace !== undefined, 'rendered under a stable id');
+    assert.equal(
+      findAll(panel.view(), (element) => element.props['id'] === 's1cap-question').length,
+      0,
+      'and no question selector: that axis is deleted, not relabelled',
+    );
+
+    const traceValues = trace.children.map((option) => String((option as StubElement).props['value']));
+    assert.deepEqual(traceValues, ['trace-as-state', 'trace-append'], "the paper's two arms, and nothing else");
+
+    // The contract that keeps a selector from being a dead control: the host's own parser accepts every value the
+    // panel can send, which is the same test the radio above is held to. `trace=` is the keyed spelling the PUT body
+    // uses.
+    for (const value of traceValues) {
+      assert.equal(parseTuningArgs('trace=' + value).tracePlacement, value, `the host accepts trace=${value}`);
+    }
+
+    // The retired question spellings, from whichever surface writes them: the host refuses the question-first value
+    // (`[T, q, x]`, which no layout produces) and notes the question-last one, and the panel offers neither as a
+    // choice. This is the assertion that the *panel* did not keep a control for a value the host refuses.
+    assert.equal(parseTuningArgs('q=first').refused?.length, 1, 'question first is refused by the host');
+    assert.equal(parseTuningArgs('q=last').notes?.length, 1, 'question last is retired and noted');
+    assert.equal(parseTuningArgs('xFirst=on').refused?.length, 1, 'under the old key too');
+
+    // The default shown when nothing has answered is the paper's method. A panel that defaulted to the control arm
+    // would present the experiment the wrong way round on screen.
+    assert.equal(trace.props['value'], 'trace-as-state', 'Trace as State is the default arm on screen');
+
+    // A save carries the arm, and carries no question token: writing `q=last` on every save would put a spelling on
+    // the wire that the host reads only to report as retired.
+    await panel.press('Save tuning');
+    const put = panel.state.calls.filter((call) => call.method === 'PUT').at(-1);
+    assert.ok(put !== undefined, 'the save reached the route');
+    assert.match(put.body, /(^|\s)trace=trace-as-state(\s|$)/, `the arm is sent, got: ${put.body}`);
+    assert.equal(/(^|\s)q=/.test(put.body), false, `and no question setting is sent, got: ${put.body}`);
+
+    // The note under the selector states the invariant the deleted control used to contradict, so its absence reads
+    // as a decision rather than as a control that was lost.
+    const text = textOf(panel.view());
+    assert.match(text, /question is last in every layout/, 'the panel says where the question is');
+    assert.match(text, /end of every input/, 'and quotes the paper sentence that fixed it');
+  } finally {
+    panel.restore();
+  }
+});
+
 test('both save buttons send provider=none, so the switch does not depend on which one is pressed', async () => {
   const panel = await mountPanel();
   try {
@@ -369,6 +426,48 @@ test('both save buttons send provider=none, so the switch does not depend on whi
       1,
       'and exactly the Off radio reads back as checked',
     );
+  } finally {
+    panel.restore();
+  }
+});
+
+test('the panel\'s own w and d bounds are the policy\'s, and they moved with the 2026-10-05 defaults', async () => {
+  // Why this exists: the panel's bounds are a **second copy** of `NUMBER_RULES` (`packages/core/src/config.ts`),
+  // because `client.js` is the browser half and cannot import the policy. A copy that drifts is the failure this
+  // project keeps finding — a value one surface offers and the other drops, silently, because `parseTuningArgs`
+  // discards rather than clamps. So the copy is read out of the source file and compared with the policy here, and
+  // the rendered `min`/`max` attributes are checked against it, since those are the half the user actually sees.
+  //
+  // The four numbers this pins: `w`'s floor moved 64 -> **4** and `d`'s ceiling 6 -> **16** with the defaults
+  // (`w` 1024 -> 16, `d` 2 -> 16). `test/credentials.test.ts` pins the host's half of the same four.
+  const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8');
+  const constant = (name: string): number => {
+    const match = new RegExp(`const ${name} = (\\d+);`).exec(source);
+    assert.ok(match !== null, `client.js must declare ${name}`);
+    return Number(match[1]);
+  };
+  const defaults = defaultPolicy().recall;
+  assert.equal(constant('DEFAULT_WINDOW'), defaults.window, 'the panel shows the policy\'s window as its default');
+  assert.equal(constant('DEFAULT_DEPTH'), defaults.depth, 'and the policy\'s depth');
+  assert.equal(constant('MIN_WINDOW'), 4, 'the window floor the core validator carries');
+  assert.equal(constant('MAX_DEPTH'), 16, 'the depth ceiling the core validator carries');
+  assert.equal(constant('MIN_DEPTH'), 1);
+
+  // And the rendered control carries them, so the browser refuses what the host would drop instead of offering it.
+  const panel = await mountPanel();
+  try {
+    const windowInput = findAll(panel.view(), (element) => element.props['id'] === 's1cap-window')[0];
+    const depthInput = findAll(panel.view(), (element) => element.props['id'] === 's1cap-depth')[0];
+    assert.ok(windowInput !== undefined && depthInput !== undefined, 'both knob inputs render');
+    assert.equal(windowInput.props['min'], '4', 'the window input refuses a value below the policy floor');
+    assert.equal(depthInput.props['min'], '1');
+    assert.equal(depthInput.props['max'], '16', 'the depth input refuses a value above the policy ceiling');
+
+    // The rule the panel states in prose matches the bound it enforces — the failure mode being a help text that
+    // advertises a range the validator no longer has.
+    const text = textOf(panel.view());
+    assert.match(text, /1\.\.16|1 and 16/, 'the note names the depth range it enforces');
+    assert.match(text, /window w is how many/, 'and states what the window is for');
   } finally {
     panel.restore();
   }

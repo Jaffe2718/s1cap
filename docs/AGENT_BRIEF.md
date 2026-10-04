@@ -69,7 +69,7 @@ benchmarks, variant sizes, pricing tables — is in the sources themselves and i
 
 | Fact | Why the protocol depends on it |
 |---|---|
-| Paper T (arXiv:2609.02702, "Trace as State"): a fresh pass ordered `[T, x, q]` — trace **before** the context, question **last** — beats the matched control in 26 of 27 model×task×metric combinations, and the paper places the question last in *both* conditions because models drift otherwise. **Transplant principle: task state discovered late (in reasoning traces) must be available *before* the history on the next pass, and the current instruction stays last.** | the layout rule and the reason `x` stays last (§3.3, §4 of this file); the TAS factor in §5 |
+| Paper T (arXiv:2609.02702, "Trace as State"): a fresh pass ordered `[T, x, q]` — trace **before** the context, question **last** — beats the matched control in 26 of 27 model×task×metric combinations, and the paper places the question last in *both* conditions because models drift otherwise. **Transplant principle: task state discovered late (in reasoning traces) must be available *before* the history on the next pass, and the current instruction stays last.** **Notation, stated once because both this row and §3.3/§4 depend on it: in the paper `x` is the long context and `q` is the question; in this project `x` is the user's latest input and S1CAP's recalled history plays the paper's `x`.** | the layout rule and the reason `x` stays last (§3.3, §4 of this file); the TAS factor in §5 |
 | Jev: cloud `/v1/systemone`, three answer types (`noul` yes/no, `choice` probabilities + confidence, `score` ordered levels), input-priced with free output | the two System-1 roles (association, decision) and the batching shape (§3.2, §3.4) |
 | Jev's documented weaknesses: literal reading, unusable math/dates, **context rot on large state**, **steerable by adversarial content**, and **no guarantee that probabilities sum to 1** | the pre-filter before any segment becomes `state`, and normalization server-side (§3.5, §3.4) |
 | Laya: open weights, honest limits — the base checkpoint is **near-chance zero-shot** on typed decisions and fails above ~20 options at defaults | the rule that zero-shot local Laya is never the relevance scorer: use cloud Jev or a fine-tune (§5) |
@@ -113,19 +113,31 @@ the values become.
 ### 3.2 Association graph (three tiers)
 - **Tier 0 (metadata, free)** must work with **no** System-1 backend answering — that is what makes degradation total.
 - **Tier 1** is one batched call per scoring window, with the questions-per-call cap as the **context-rot guard**. Only
-  the implemented mode exists; a cell must name the mechanism that actually runs.
+  the implemented mode exists; a cell must name the mechanism that actually runs. **Since 2026-10-05 the window it
+  is batched over is a *row* and the row is bought on demand**: the call happens because a step's recall asked for
+  that row (`AssociationGraph.recallDemand`, wired in `packages/dsh-plugin/src/step-observer.ts`), not because the
+  segment arrived. At this build's defaults a row is `min(index, w) <= 16` questions against a cap of 20, so one
+  row is one call — the *batched* half of the sentence is what makes a row a single request rather than up to
+  sixteen. The cost that moves with that change is `recall.depth`'s: the pairs a step pays for are the rows its walk
+  reached, so a deeper walk is a larger bill (`docs/FORMULAS.md`, correction 2026-10-05 (ninth)).
 - **Tier 2** is lazy verification, only for edges that could enter assembly, with a defined abstention fallback.
 - **The scoring window bounds pair scoring only — never what exists in the graph.** Segments outside it keep their edges
-  and stay reachable by the BFS. This distinction is the whole point of the window
+  and stay reachable by the BFS — reached from the newer endpoint of a pair, because the walk expands only into
+  segments earlier in the session's append order (`docs/FORMULAS.md` §3.2, and the 2026-10-05 update at the end of
+  this file). This distinction is the whole point of the window
   (`docs/ARCHITECTURE.md` "Parameter: recall.window", `docs/FORMULAS.md` "Recall window w").
 
 ### 3.3 Assembly
 - Budget is the window minus the output reserve minus measured fixed overhead — never the raw window.
 - Selection is a bounded BFS then a greedy knapsack, deduplicated against the verbatim tail by segment id, every block
   carrying a provenance header.
-- **Never dropped, never reordered:** the pinned prefix, the current input `x`, and the verbatim tail.
-- **`x` last is a requirement, not a preference** (§1, paper T). `T` existing at all and the position of `x` are **two
-  independent switches** — TAS is not x-first; a preset that moves them together is a preset's choice.
+- **Never dropped, never reordered:** the pinned prefix, the current input `x` (the step's newest input event — the
+  recall anchor, `packages/core/src/observer.ts`), and the verbatim tail.
+- **`x` last is a requirement, not a preference** (§1, paper T), and it is the last block of every layout by
+  construction. `T` existing at all (`tas.on`) and the arm that positions it (`tracePlacement`) are **two independent
+  fields**, and only the second is the paper's variable: `tracePlacement` places `T` before the long context or behind
+  it. The question is not one of them — the paper holds `q` last in every condition, so no field moves it, and the
+  fields that do exist, their values and their defaults are `AssemblyPolicy`'s, not this file's.
 - **Fallback:** the rule that fires is the *segment-count* floor — fewer than one selected segment is not a selection, so
   the block degrades to the chronological window and the event is logged. The token-share floor is **off**, and the
   measurement that turned it off is `docs/FORMULAS.md` §3.5. Either floor writes `fallback`; both are recorded on the
@@ -237,10 +249,17 @@ follows is the protocol.
   net cost effect is measured per update policy; the selection claim rides the same contrast, which is why **H1 is
   retired and folded here, not renumbered** — two hypotheses on one contrast cannot be separated afterwards.
 - **H4 — transfer.** The `C0`→`C2` deltas persist on a second harness (opencode) at a 10 % subsample.
-- **And what `C0` vs `C2` measures today is the recall lane, not TAS.** The arm under test has one delivery channel,
-  which inserts the recalled block and nothing else; the state proxy is deliberately never sent; TAS's ordering reaches
-  the model only through the model-view write-back, which does not exist and is a separate project. **Until it does, no
-  arm can attribute anything to the ordering switches**, and neither recorded round's contrast measured TAS: in round
+- **And what the two registered contrasts measure today is the trace's *presence*, not its *position*.** As of
+  2026-10-04 the arm under test is not the only cell that delivers: `C1` is the **TAS** arm — the paper's Trace as
+  State arrangement, `[T, x, q]`, the state proxy `T` delivered alone with the System-1 lane absent — so `C0 → C1` is
+  a clean single-variable contrast and `C1 → C2` is
+  what recall selection adds (the registration is `docs/CELLS-RUN.md` "The arms, and what the contrast is", and the
+  statement of record is the comment above `cellPolicy()` in `packages/core/src/types.ts`). What is still unmeasured
+  is the paper's actual variable: delivery appends and renders `T` before the recalled block by construction, so no
+  arm has presented **Trace Append** (`[x, T, q]`), and the field that names TAS against it
+  (`policy.tracePlacement`) reaches the recorded `layout.order` and
+  not the delivered text. **Until the model-view write-back exists, no arm can attribute anything to the ordering
+  switches** (`docs/ARCHITECTURE.md`, `packages/proxy`), and neither recorded round measured TAS: in round
   `20261001-1300` *both* arms delivered nothing, so their per-step difference compares two recordings of a layout, not
   two model inputs. The round's selection figures are the recall lane's — the best hit rate beside the largest counts on
   all three components, which is exactly why the counts are the measurement and the hit rate is not.
@@ -333,7 +352,196 @@ readbacks, not on a `/s1 why` command — that command was a design note and doe
 | Laya · EdgeJev · Kev · laya-mlx | github.com/NandhaKishorM/laya · github.com/yzfly/edgejev · github.com/jaredpalmer/kev · github.com/mizoreww/laya-mlx |
 | JevBench leaderboard | benchmarkheaven.com/jev-models |
 | DeepSeek pricing · GLM pricing | api-docs.deepseek.com/quick_start/pricing · docs.z.ai/guides/overview/pricing |
-| DSH plugin mechanics (peer contracts, profile layout) | registry.npmjs.org/dsh-command-context-trim + the local install (~/.dsh/profiles) |
+| DSH plugin mechanics (peer contracts, profile layout) | registry.npmjs.org/dsh-command-context-trim — **an external community package, and the local-install claim is unverified**: it is not present in the DSH 0.2.0-rc.2 distribution, so read the mechanics from the installed DSH source (`scripts/scan-dsh-asar.cjs`), not from that package |
 | opencode · pi-system-one | opencode.ai/docs/providers · registry.npmjs.org/pi-system-one |
 | Benchmarks | swebench.com/verified.html · tbench.ai · github.com/sierra-research/tau2-bench |
 | Related work (full verified list) | docs/RELATED_WORK.md |
+
+---
+
+## Update 2026-10-04 — three rows of this document corrected, for the record
+
+Recorded per `docs/DOC-CONTRACT.md` §4. **These three were edited in place** — each is a live statement of a
+current fact in a live document, and leaving it standing would have left the document asserting something the code
+no longer does. The superseded text is carried here so the change is auditable.
+
+1. **§1, the Paper T row (line 72).** It read "a fresh pass ordered `[T, x, q]` — trace before the context,
+   question last" and gave the transplant principle, then pointed at §3.3 and §4 of this file as what depends on it.
+   It did not say which `x` it meant, while this project's `x` is the user's latest input and the paper's `x` is the
+   long context — so the row this file's layout rule rests on could not be read without guessing. **Added one
+   sentence stating the mapping**; the paper's facts are untouched, because they were right.
+2. **§"Metrics, hypotheses, success rule" (was line 241).** It read "**And what `C0` vs `C2` measures today is the
+   recall lane, not TAS.** … the state proxy is deliberately never sent; TAS's ordering reaches the model only
+   through the model-view write-back". The state proxy **is** delivered since 2026-10-04, `C1` is the paper's arm,
+   and the registered contrasts are `C0 → C1` and `C1 → C2`. **Corrected**, and the conclusion kept in its surviving
+   form: what is still unmeasured is the trace's *position*, because the channel appends. The two recorded rounds'
+   statements below it are history and are left as written.
+3. **§10, the sources table (was line 341).** "registry.npmjs.org/dsh-command-context-trim **+ the local
+   install** (~/.dsh/profiles)" asserted a local install of a package that is **not present in the DSH 0.2.0-rc.2
+   distribution**. The same correction as `docs/PROPOSAL.md`'s 2026-10-04 append: the package name resolves to
+   nothing in that release, and whether it was removed, renamed or never existed cannot be determined from an
+   archive snapshot. **The local-install claim is marked unverified rather than deleted**, because this project has
+   already shipped one defect closed on an unverified package-name hypothesis (`D4b`).
+
+`docs/RELATED_WORK.md` and `README.md` cite the same repository; both are bare citations of an external project,
+which is a different claim from an installed one, and neither needed this correction.
+
+The registration this file now defers to is `docs/CELLS-RUN.md` "The arms, and what the contrast is"; the decision
+is `docs/STATUS.md` §10; the code's own statement of record is the comment above `cellPolicy()` in
+`packages/core/src/types.ts`.
+
+---
+
+## Update 2026-10-05 — one layout field was renamed and the second was **deleted**; §3.3 and §6 corrected in place
+
+Recorded per `docs/DOC-CONTRACT.md` §4. Both were live statements of a current fact — one in this file's assembly
+rules, one in its contrast paragraph — so they were corrected in place, for the reason the 2026-10-04 update gives: leaving
+either standing would leave this file asserting something the code no longer has. The superseded text is carried here
+verbatim.
+
+**What moved.** `AssemblyPolicy.xFirst: boolean` is now `questionPlacement: 'first' | 'last'` (default `'last'`), and
+`AssemblyPolicy.stateProxyPosition: 'before-context' | 'after-context'` is now
+`tracePlacement: 'trace-as-state' | 'trace-append'` (default `'trace-as-state'`). The mapping is exact — `true` →
+`'first'`, `false` → `'last'`; `'before-context'` → `'trace-as-state'`, `'after-context'` → `'trace-append'` — and a
+profile that still sets an old spelling is translated rather than silently run as the default
+(`LEGACY_LAYOUT_KEYS`, `packages/core/src/config.ts`, which reports the substitution as a warning). Names, values and
+defaults are owned by `packages/core/src/types.ts`, `packages/core/src/config.ts` and the presets; §5's own rule —
+"**This file states the design and never restates the values**" — is unchanged.
+
+**Why.** The paper (arXiv:2609.02702, section 4.1) places the question **last in every condition** — "the question appears at
+the end of the prompt … place it at the end of every input" — and its two arms are `[T, x, q]` (Trace as State) and
+`[x, T, q]` (Trace Append), **order the only difference**. `xFirst` moved the *question*, the one element the paper
+fixes, and its name presented that as the paper's variable; `stateProxyPosition` was already the paper's axis, so it
+took the paper's names.
+
+**What it cost, measured — round `20261004-0233`'s own `layoutOrder` records.** `C1` and `C2` recorded
+`pinned, stateProxy, anchor, recalled, tail` (the question second, neither paper arm) because both set `xFirst: true`;
+`C0` (`xFirst: false`, TAS off) recorded `pinned, recalled, tail, anchor`, the paper's baseline `M([x, q])`. The block
+order each `tracePlacement` value produces is the table in `packages/core/src/assembler.ts`'s header.
+
+**Superseded wording, verbatim.**
+
+1. §3.3, assembly rules — *"**`x` last is a requirement, not a preference** (§1, paper T). `T` existing at all and the
+   position of `x` are **two independent switches** — TAS is not x-first; a preset that moves them together is a
+   preset's choice."* The independence is unchanged; the fields it names are `tas.on` and `questionPlacement`, and the
+   paper's variable is `tracePlacement`, which is neither. *(Superseded the same day — the second update below records
+   that `questionPlacement` was deleted rather than kept, so that clause names a field the build no longer has.)*
+2. §6, the contrast paragraph — *"… and `policy.stateProxyPosition` reaches the recorded `layout.order` and not the
+   delivered text."* The field is `policy.tracePlacement`.
+
+---
+
+## Update 2026-10-05 (second) — the question axis was **deleted**, not renamed; §3.3 corrected in place
+
+Recorded per `docs/DOC-CONTRACT.md` §4, beside the update above and not in place of it. **Nothing in the update above
+is rewritten**: its field mapping is a dated record and is superseded here, and the two clauses below that name
+`questionPlacement` as a field are annotated and quoted rather than edited. §3.3's rule is live prose, so it was
+corrected in place for the reason that update itself gives.
+
+**What moved — and it is a deletion rather than a rename.** `AssemblyPolicy.questionPlacement: 'first' | 'last'` is
+**gone from the tree**. `AssemblyPolicy.tracePlacement: 'trace-as-state' | 'trace-append'` is **the only layout axis**,
+and the question `q` is **last by construction in every layout**: `assemble()` appends the anchor unconditionally, the
+stable-head token count no longer adds the question's tokens, and `cutAfterBlock` has no `'anchor'` branch. The orders
+the build produces are the table in `packages/core/src/assembler.ts`'s header and are not restated here.
+
+**Why the axis was deleted, stated as the argument this file has to keep.** The paper's section 4.1
+(arXiv:2609.02702) places
+the question last in *every* condition — "Models may not behave as intended unless the question appears at the end of
+the prompt. We therefore separate the question from the long context and place it at the end of every input" — and its
+two arms are `[T, x, q]` (**TAS**, Trace as State) and `[x, T, q]` (Trace Append), "order as the only difference".
+This project's older `xFirst` boolean moved the *question*, the one element the paper fixes, and its name presented
+that as the paper's variable. **Renaming it to `questionPlacement: 'first' | 'last'` kept the mistake alive**: it left
+"the question's position is a variable" expressible, and `'first'` produced `[T, q, x]`, which is **neither paper
+arm**. A field whose other value lays out a condition the paper does not have is not a variable, so the axis was
+deleted.
+
+**What happens to an old profile — the split, pointed at rather than copied.** `LEGACY_LAYOUT_KEYS`
+(`packages/core/src/config.ts`) reads `xFirst` and `questionPlacement` and reports: a spelling that asks for what
+every layout now does is a **warning** ("retired: … nothing was applied because nothing needed to be"), and a spelling
+that asks for the question *first* is an **error** that quotes the paper sentence that retired it and names
+`tracePlacement`. The same split is enforced on the panel's command line and its PUT route, and the panel no longer
+offers a question control. The keys, the values and the messages are the code's and are not restated here.
+
+**The evidence, from round `20261004-0233`'s own `layoutOrder` records.** `C0`
+`["pinned","recalled","tail","anchor"]`; `C1` and `C2` `["pinned","stateProxy","anchor","recalled","tail"]` — the
+question second in the TAS cells, which is neither paper arm.
+
+**Superseded wording, verbatim.**
+
+- The closing clause of the bullet above (the update above's *"Superseded wording"* item 1): *"The independence is
+  unchanged; the fields it names are `tas.on` and `questionPlacement`, and the paper's variable is `tracePlacement`,
+  which is neither."* It named a field the build no longer has; the corrected bullet in §3.3 names `tas.on` and
+  `tracePlacement` and says the question is not a field at all.
+- §3.3, the rule corrected above: *"`T` existing at all (`tas.on`) and the question's position
+  (`questionPlacement`) are **two independent fields**, and neither is the paper's variable"*. Both halves are now
+  wrong in a second way: it counted a deleted axis as a field, and it was written beside a correction whose own
+  heading called the change a *rename*.
+
+**Outstanding in this file, and deliberately not corrected here.** §5 ("Experiment design …", lines 181–200) still
+carries the pre-2026-10-04 registration — *"two of the three cells are controls … `C1`, a second control that delivers
+nothing"*, *"only one cell turns the third one on"*, *"the two controls are the harness's own message list and nothing
+else, so they differ by nothing"*, *"`C1` stays as a second control arm"* — which `docs/STATUS.md` §10's addendum and
+`cellPolicy('C1')`'s `deliver: true` superseded on 2026-10-04. That is a different correction with its own evidence
+and is left to its own pass. **The rename adds two phrases to that pass**, because they name the old composition
+rather than the field: §5's *"The ordering pair"* and *"The ordering switches are a **recorded** difference in every
+arm"* — under the rename the layout fields are the *same* in every cell on purpose (no preset carries either), and
+what separates the recorded orders is `tas.on`. The arms themselves are named in `docs/CELLS-RUN.md` "The arms, and
+what the contrast is": the baseline, **TAS** (the paper's Trace as State arrangement, `[T, x, q]`), and that plus the
+System-1 lane — while the paper's other arm, **Trace Append** (`[x, T, q]`), is named by the placement axis rather
+than run by a cell.
+
+---
+
+## Update 2026-10-05 (third) — the BFS expands only into **earlier** segments: §3.2's window invariant corrected in place
+
+Recorded per `docs/DOC-CONTRACT.md` §4, beside the two updates above and not in place of either.
+The §3.2 bullet is a live invariant, so the direction clause was **added in place**; the claim it makes about `w` is
+unchanged, and the bullet as it stood is quoted verbatim below.
+
+**What moved.** The recall walk expands only into segments **earlier in the session's append order** — a step never
+goes to a segment that arrived later (`packages/core/src/assoc-graph.ts`, `isBackwardStep`). The rule and its
+measurement are `docs/FORMULAS.md` §3.2 and the 2026-10-05 correction at the foot of that document.
+
+**Why the bullet needed the clause rather than a rewrite.** "Stay reachable by the BFS" is true of every pair `w`
+leaves in place, and a reader who knows the graph stores one score per pair — indexed in both directions, which
+`neighbors()` still is — can read it as reachable from either end. That reading is the defect the fix removes:
+round `20261004-0233`'s own trees have **255 forward edges of 540** (47.2 %, the widest idx 1 → 28) and the fixed
+build takes **0 of 360** (`packages/core/test/forward-edge-audit.ts`).
+
+**The superseded wording, verbatim.**
+
+> - **The scoring window bounds pair scoring only — never what exists in the graph.** Segments outside it keep their
+>   edges and stay reachable by the BFS. This distinction is the whole point of the window
+>   (`docs/ARCHITECTURE.md` "Parameter: recall.window", `docs/FORMULAS.md` "Recall window w").
+
+---
+
+## Update 2026-10-05 (fourth) — the recalled block moved behind the tail, **inside `x`**: the paper's two arms are unchanged
+
+Recorded per `docs/DOC-CONTRACT.md` §4, beside the three updates above and in place of none of them. The paragraph the
+report names is the **Why the axis was deleted** paragraph of the update above, which states the paper's variable and
+its two arms; that statement stands exactly as written, and this update is what a reader of it now needs beside it. No
+live rule in this file printed the block order, so nothing here was corrected in place.
+
+**What moved.** The recalled block now sits **immediately before the anchor**, behind the tail — it used to be third of
+five, with `tail` and `anchor` behind it. The block order each `tracePlacement` value produces is the table in
+`packages/core/src/assembler.ts`'s header and is not restated here.
+
+**Why the arms are untouched.** The sentence above is right as it stands: the paper's two arms are `[T, x, q]` (Trace
+as State) and `[x, T, q]` (Trace Append), "order as the only difference", and the variable is where `T` sits relative
+to the long context `x`. The recalled block is part of `x` — the paper's long context, which §1's notation row says
+S1CAP's recalled history plays — so a block that moves *inside* `x` leaves the variable where it was: `T` is still
+ahead of every block of `x` under `'trace-as-state'` and behind all of them under `'trace-append'`. **The arm did not
+move; the order inside it did.** `AssemblyLayout.order` (`packages/core/src/types.ts`) is the statement of record for
+which blocks make up `x`.
+
+**Why the block moved.** A prompt cache is a prefix cache: a change at any token breaks the match from that token to the
+end of the prompt, so everything placed behind a block that changes every step is re-prefilled with it. The recalled
+block is the block a re-selection moves; putting it last within `x` means a re-selection costs the question and nothing
+else. **Measured on round `20261004-1458` C2**: the whole-prompt invalidation span per delivered pair fell from **2,539
+to 2,111 tokens** with this move, on top of the ordering change that had already cut it from **6,179 to 2,539**.
+
+**What this update does not touch.** §3.3's live rules are unaffected: `x` is still the last block of every layout by
+construction, the pinned prefix / `x` / verbatim tail are still never dropped or reordered, and `T`'s position relative
+to the long context is still the only layout axis. The dated evidence in this file (round `20261004-0233`'s own
+`layoutOrder` records) is that round's record and is left as written, as is every quoted superseded sentence above.

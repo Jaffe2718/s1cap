@@ -1,96 +1,189 @@
 /**
- * STATE PROXY T — the serialized task state that Trace as State puts in place of the raw trace.
+ * STATE PROXY T — the serialized reasoning trace.
  *
- * The idea this implements is that a long reasoning trace is a bad thing to carry verbatim: it is large, it is
- * written for a reader who was there at the time, and the part of it that still matters a few turns later is
- * small. So the trace is replaced by a compact statement of *where the task stands* - the task, what has already
- * happened to it, and what the model last said it was about to do - and that statement is what goes into the
- * prompt. It is the `T` in `[P | T | recalled | tail | x]`.
+ * The paper: "Trace as State: Reasoning Traces as Conditional States for Long-Context Transformers" (Zou &
+ * Tang, arXiv:2609.02702), §3.2 "Reasoning Traces as a Textual State Proxy" and Appendix C "Prompt and State
+ * Templates". Three sentences from it are the whole of this file:
  *
- * Three properties it has to have, all of which follow from being a cache-stable block:
+ *   - "We view reasoning traces as an **observable textual proxy for task state**."
+ *   - "For each task, a serializer π held fixed across the placement conditions constructs the serialized trace
+ *      **T = π(r_1,…,r_ntr)**."
+ *   - "A fixed serializer preserves the reasoning traces while adding **only necessary delimiters such as
+ *     `<trace_start>` and `<trace_end>` and brief introductory text**."
  *
+ * **T is the trace, serialized — not a description of it.** This module used to hold the opposite premise (that
+ * a long trace is a bad thing to carry verbatim, and that what should go into the prompt is a compact statement
+ * of where the task stands, flattened into `task:` / `ran:` / `called:` / `next:` lines). That summariser is gone.
+ * It is not a stylistic simplification: the paper's result is a comparison of *placement* — `[T, x, q]` against
+ * `[x, T, q]` — and T is held fixed across the arms by construction ("a serializer π held fixed across the
+ * placement conditions"). Replacing T with something the port wrote itself changes the artefact under test, so
+ * the arm that was supposed to measure placement was measuring this module's line-truncation policy instead.
+ *
+ * What survives the change, because it is a property of a *serializer* and not of a summary:
+ *
+ *   - **Fixed frame, fixed everywhere.** `<trace_start>`, `<trace_end>`, one brief introductory line and a
+ *     blank line between consecutive runs are the only text added. They are constants, never derived, so π is
+ *     the same function in every arm and every turn.
+ *   - **Derived, not generated.** Every character of the body is text the model itself produced for this task,
+ *     so nothing in T can be a claim the model never made. This is also why it needs no System-1 call: the
+ *     expensive model does not participate in building it.
  *   - **Bounded.** `tas.tMaxChars` is a hard ceiling, not a target, because T sits in front of everything that
- *     varies and an unbounded T would drag the whole prompt's prefix with it.
- *   - **Derived, not generated.** Every line is a rendering of something the model actually said or a tool
- *     actually returned. T is a *proxy* for the trace, not a summary written by a model, so nothing in it can be
- *     a claim the model never made. This is also why it needs no System-1 call: the expensive model does not
- *     participate in building it.
- *   - **Stable per task.** With `updatePolicy: perTask` the text changes only when the task changes, which is
- *     what lets it sit in the byte-stable head ahead of the moving blocks.
+ *     varies and an unbounded T would drag the whole prompt's prefix with it. Its default is **50 000** because
+ *     that is the paper's number: "Some traces are so long that we truncate them to the first 50,000 characters
+ *     to keep the second-pass prompt within the model's context capacity." Note the direction — *first* — which
+ *     is `updatePolicy: 'perTask'` below.
+ *   - **Zero tokens when empty.** An empty T is the empty string, because the assembler accounts an empty T as
+ *     0 tokens and a non-empty one as `estimateTokens(...)` ("found by a real round: blocks.stateProxy was 1",
+ *     `assembler.ts`); a one-token estimate for "nothing" would quietly inflate every budget number the paper
+ *     reports.
+ *   - **Deterministic, and it never throws.** Same window, same bytes — which is what lets the caller memoise it
+ *     per task — and every degenerate input (no anchor, no trace text, a ceiling below the frame, `NaN`) is a
+ *     documented empty result rather than an exception on the step's critical path.
  */
                                           
 
-/** Share of the ceiling each section may take before the others are cut, so a long task cannot eat the budget. */
-const TASK_SHARE = 0.4;
-const NEXT_SHARE = 0.25;
-/** One line per action in the "done" section; the rest are dropped, most recent first. */
-const MAX_DONE_LINES = 8;
+/**
+ * The fixed frame of π, and the only text T adds to the model's own.
+ *
+ * The paper allows "brief introductory text" and names `<trace_start>` / `<trace_end>` as the necessary
+ * delimiters; these are that sentence, made concrete. They are constants rather than options precisely because
+ * the paper's serializer has to be held fixed across placement conditions — a knob here would be a knob on the
+ * variable the experiment is not about.
+ */
+const INTRO = 'Reasoning trace for this task so far, in the order it was produced:';
+const START = '<trace_start>';
+const END = '<trace_end>';
+
+/**
+ * The cut marker, on its own line, when the trace is longer than the ceiling.
+ *
+ * The old module appended a bare `…`, which reads like the model's own punctuation. A truncation this module
+ * performs is S1CAP's, not the model's, and T is written for a model that will reason over it — so it is
+ * labelled.
+ */
+const CUT = '[trace truncated]';
+
+/**
+ * Which segment kinds are the trace.
+ *
+ * The paper's `r_1,…,r_ntr` are *the model's own outputs for the problem*, and the paper's `x` is everything
+ * else — the long context the trace is being placed against. S1CAP's segment log is richer than the paper's
+ * `(r_j, a_j)` pairs, so the mapping has to be stated rather than assumed:
+ *
+ *   - `assistant`, `trace` — **included**. `trace` is an assistant message made of reasoning parts
+ *     (`harness-adapter.ts`), i.e. exactly an `r_j`; `assistant` is its visible answer `a_j`, which the paper
+ *     also places inside `π`'s input.
+ *   - `user` — **excluded**, and the reason is T's own task boundary rather than the anchor. A `user` segment is
+ *     the condition `x`, and T is the trace *of the task the current input belongs to*: `buildStateProxy`
+ *     serializes what follows its `anchorId` (below), so a `user` segment inside that window is a later turn's
+ *     question, not this task's reasoning. **This boundary deliberately did not move with the recall anchor.**
+ *     The anchor handed to the assembler is the step's *newest input event* — `user` on a turn-opening step and
+ *     `assistant` / `trace` / `toolCall` / `toolResult` after it (`observer.ts`, `isInputEvent`) — so it moves
+ *     within a turn, while this set is fixed. Handing that moving anchor to `buildStateProxy` would start T after
+ *     the model's own newest message and empty it on every step after the first: the two boundaries are different
+ *     on purpose, and the recall anchor is the one that moves.
+ *   - `toolCall`, `toolResult` — **excluded**. These are the environment's half of `x`, not the model's
+ *     reasoning: a tool result is evidence the model went to fetch, and S1CAP already has a selection channel
+ *     for it (`recalled`, `tail`). Putting it in T as well would both widen the state proxy past what the paper
+ *     calls a trace and pay for the same text twice per step.
+ *   - `systemPinned` — **excluded**. That is the fixed prefix `P`, which precedes T by definition.
+ *
+ * Widening this set is the one change that would quietly make S1CAP's `T` a different object from the paper's,
+ * so it is a constant with a comment rather than a filter that grew a branch.
+ */
+const TRACE_KINDS                      = new Set(['assistant', 'trace']);
 
                                   
                                                          
                                
                                          
                    
-                      
+     
+                                                                     
+    
+                                                                                                              
+                                                                                                            
+                                                                                                               
+                                                                      
+     
                    
-                         
+     
+                                                                      
+    
+                                                                                                                
+                                                                                                              
+                                                                                                                
+                                                                                                    
+    
+                                                                                                           
+                                                                                                            
+                                                                                                     
+                                                                                                      
+                                                                
+                                                                                                              
+                                                                                                            
+                             
+    
+                                                                                                               
+                                                                                                                 
+                                                                                                              
+                                                                                                              
+                                                                                                                
+                                                                                                   
+     
                                       
+     
+                                                                                                           
+                                                          
+     
               
  
 
-/** One line, one line length. Truncation is marked so a cut mid-word is not read as the model's own wording. */
-function line(text        , max        )         {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  if (flat === '') return '';
-  if (max <= 1) return '';
-  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
-}
-
-/** The single most useful sentence-ish prefix of a segment: a first line, not the whole thing. */
-function head(text        , max        )         {
-  const firstLine = text.split(/\r?\n/).find((l) => l.trim() !== '') ?? '';
-  return line(firstLine, max);
-}
-
 /**
- * Build T. Returns an empty string when there is no anchor, because an empty T costs zero tokens and the
- * assembler accounts for that specifically - a one-token estimate for "nothing" would quietly inflate every
- * budget number the paper reports.
+ * Build T — π(r_1,…,r_ntr): the model's own reasoning for this task, in source order, inside a fixed frame.
+ *
+ * Returns the empty string whenever there is nothing to serialize (no anchor in the window, no trace text after
+ * it, a zero ceiling, a ceiling too small for the frame), because an empty T costs zero tokens and the assembler
+ * accounts for that specifically.
  */
 export function buildStateProxy(input                 )         {
-  const ceiling = Math.max(0, Math.floor(input.maxChars));
+  const ceiling = Number.isFinite(input.maxChars) ? Math.max(0, Math.floor(input.maxChars)) : 0;
   if (ceiling === 0) return '';
 
   const anchorIndex = input.segments.findIndex((s) => s.id === input.anchorId);
   if (anchorIndex < 0) return '';
 
-  const task = head(input.segments[anchorIndex]?.text ?? '', Math.floor(ceiling * TASK_SHARE));
   // Everything the model produced *for this task* comes after the anchor in the append-only log, which is the
-  // same append-order fact the tail block is built on.
-  const after = input.segments.slice(anchorIndex + 1);
-
-  const done           = [];
-  for (const seg of after) {
-    if (seg.kind === 'toolResult') {
-      done.push(`ran: ${head(seg.text, 160)}`);
-    } else if (seg.kind === 'toolCall') {
-      done.push(`called: ${head(seg.text, 160)}`);
-    }
+  // same append-order fact the tail block is built on. Source order is the array's order: the contract for
+  // `segments` is append order and re-sorting here would paper over a caller that broke it rather than fail.
+  const parts           = [];
+  for (const seg of input.segments.slice(anchorIndex + 1)) {
+    if (!TRACE_KINDS.has(seg.kind)) continue;
+    // Verbatim means verbatim: no trimming, no whitespace flattening, no per-line clipping. An empty segment is
+    // the one thing dropped, because it contributes no characters and a blank line is not reasoning text.
+    if (seg.text === '') continue;
+    parts.push(seg.text);
   }
-  const kept = done.slice(Math.max(0, done.length - MAX_DONE_LINES));
+  const body = parts.join('\n\n');
+  if (body === '') return '';
 
-  // "Next" is the model's own most recent statement of intent, taken from its last assistant text after the
-  // anchor. It is the one line that must never be a guess, so it is quoted rather than paraphrased.
-  const lastAssistant = [...after].reverse().find((s) => s.kind === 'assistant');
-  const next = lastAssistant === undefined ? '' : head(lastAssistant.text, Math.floor(ceiling * NEXT_SHARE));
+  const head = `${INTRO}\n${START}\n`;
+  const foot = `\n${END}`;
+  const budget = ceiling - head.length - foot.length;
+  if (budget <= 0) return '';
 
-  const sections           = [];
-  if (task !== '') sections.push(`task: ${task}`);
-  if (kept.length > 0) sections.push(`done:\n${kept.map((d) => `  - ${d}`).join('\n')}`);
-  if (next !== '') sections.push(`next: ${next}`);
+  if (body.length <= budget) return `${head}${body}${foot}`;
 
-  const text = sections.join('\n');
-  // The ceiling is a ceiling: the sections are sized so this rarely bites, but a pathological anchor must not
-  // be able to push T past the budget it was given.
-  return text.length <= ceiling ? text : `${text.slice(0, Math.max(0, ceiling - 1))}…`;
+  // The cut has to be marked *and* accounted for: the frame survives either way, so a truncated T is still a
+  // well-formed `<trace_start>…<trace_end>` block rather than one whose closing delimiter was eaten.
+  const marked = 1 + CUT.length;
+  const tail = input.updatePolicy === 'perTurn';
+  if (budget <= marked) {
+    // No room for a marker. The bound still holds, which is the property that matters more than the label.
+    const kept = tail ? body.slice(body.length - budget) : body.slice(0, budget);
+    return `${head}${kept}${foot}`;
+  }
+  const room = budget - marked;
+  const kept = tail ? `${body.slice(body.length - room)}\n${CUT}` : `${body.slice(0, room)}\n${CUT}`;
+  return `${head}${kept}${foot}`;
 }
