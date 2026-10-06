@@ -1,0 +1,577 @@
+{
+  "schema": 1,
+  "createdAt": "2026-10-06T13:59:51.282Z",
+  "node": "v24.18.1",
+  "baselineCommit": "346d7865913c231208830f12383f050081e3cfe7",
+  "optimizedCommit": "b2a08c357bbc7b009944a7b9b40d0026616e53c3",
+  "repetitions": 5,
+  "scope": "Deterministic offline engineering evaluation; heuristic token estimates and synthetic relevance labels. No provider billing, model quality, live throughput, or task solve rate measured.",
+  "scaling": [
+    {
+      "steps": 32,
+      "compactionEvery": null,
+      "baseline": {
+        "steps": 32,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 32,
+        "injectedTokensEstimate": 27758,
+        "cumulativeVisibleTokensEstimate": 418038,
+        "coverageChecks": 228,
+        "elapsedMs": 41.778256
+      },
+      "optimized": {
+        "steps": 32,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 32,
+        "injectedTokensEstimate": 3269,
+        "cumulativeVisibleTokensEstimate": 56194,
+        "coverageChecks": 228,
+        "elapsedMs": 8.539897999999994
+      },
+      "injectedTokenReduction": 0.8822321492902947,
+      "cumulativeVisibleTokenReduction": 0.8655768135911089,
+      "timingSamplesMs": {
+        "baseline": [
+          42.06215700000001,
+          41.688489000000004,
+          41.778256,
+          41.75162999999998,
+          41.928067999999996
+        ],
+        "optimized": [
+          9.971673999999979,
+          8.539897999999994,
+          9.314964000000032,
+          8.463692999999978,
+          8.02560699999998
+        ]
+      }
+    },
+    {
+      "steps": 64,
+      "compactionEvery": null,
+      "baseline": {
+        "steps": 64,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 64,
+        "injectedTokensEstimate": 58654,
+        "cumulativeVisibleTokensEstimate": 1816126,
+        "coverageChecks": 484,
+        "elapsedMs": 173.06593499999997
+      },
+      "optimized": {
+        "steps": 64,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 64,
+        "injectedTokensEstimate": 6408,
+        "cumulativeVisibleTokensEstimate": 212609,
+        "coverageChecks": 484,
+        "elapsedMs": 27.447160000000167
+      },
+      "injectedTokenReduction": 0.8907491390186517,
+      "cumulativeVisibleTokenReduction": 0.8829326819835188,
+      "timingSamplesMs": {
+        "baseline": [
+          174.07027599999998,
+          173.85583299999996,
+          173.06593499999997,
+          173.02694100000008,
+          172.83666599999992
+        ],
+        "optimized": [
+          28.786071000000106,
+          27.579871000000026,
+          27.1031559999999,
+          26.5947299999998,
+          27.447160000000167
+        ]
+      }
+    },
+    {
+      "steps": 128,
+      "compactionEvery": null,
+      "baseline": {
+        "steps": 128,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 128,
+        "injectedTokensEstimate": 121377,
+        "cumulativeVisibleTokensEstimate": 7590142,
+        "coverageChecks": 996,
+        "elapsedMs": 376.0197900000003
+      },
+      "optimized": {
+        "steps": 128,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 128,
+        "injectedTokensEstimate": 12826,
+        "cumulativeVisibleTokensEstimate": 828804,
+        "coverageChecks": 996,
+        "elapsedMs": 53.55033800000001
+      },
+      "injectedTokenReduction": 0.8943292386531221,
+      "cumulativeVisibleTokenReduction": 0.8908052049619098,
+      "timingSamplesMs": {
+        "baseline": [
+          714.38778,
+          678.3281809999999,
+          376.0197900000003,
+          373.040567,
+          371.5099650000002
+        ],
+        "optimized": [
+          95.68266700000004,
+          52.890714000000116,
+          54.133928000000196,
+          49.23994100000027,
+          53.55033800000001
+        ]
+      }
+    },
+    {
+      "steps": 256,
+      "compactionEvery": null,
+      "baseline": {
+        "steps": 256,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 256,
+        "injectedTokensEstimate": 249817,
+        "cumulativeVisibleTokensEstimate": 31410634,
+        "coverageChecks": 2020,
+        "elapsedMs": 1544.8441070000008
+      },
+      "optimized": {
+        "steps": 256,
+        "compactionEvery": null,
+        "compactions": 0,
+        "injectedMessages": 256,
+        "injectedTokensEstimate": 26022,
+        "cumulativeVisibleTokensEstimate": 3321674,
+        "coverageChecks": 2020,
+        "elapsedMs": 195.78179999999884
+      },
+      "injectedTokenReduction": 0.8958357517702958,
+      "cumulativeVisibleTokenReduction": 0.89425001736673,
+      "timingSamplesMs": {
+        "baseline": [
+          1548.6240900000003,
+          1631.857137,
+          1544.8441070000008,
+          1531.742182,
+          1538.3277789999993
+        ],
+        "optimized": [
+          208.479241,
+          201.50329599999986,
+          188.35402799999974,
+          187.92396000000008,
+          195.78179999999884
+        ]
+      }
+    }
+  ],
+  "compaction": [
+    {
+      "steps": 128,
+      "compactionEvery": 16,
+      "baseline": {
+        "steps": 128,
+        "compactionEvery": 16,
+        "compactions": 7,
+        "injectedMessages": 128,
+        "injectedTokensEstimate": 121377,
+        "cumulativeVisibleTokensEstimate": 1232638,
+        "coverageChecks": 996,
+        "elapsedMs": 65.58100199999899
+      },
+      "optimized": {
+        "steps": 128,
+        "compactionEvery": 16,
+        "compactions": 7,
+        "injectedMessages": 128,
+        "injectedTokensEstimate": 17543,
+        "cumulativeVisibleTokensEstimate": 207700,
+        "coverageChecks": 996,
+        "elapsedMs": 14.954379999999219
+      },
+      "injectedTokenReduction": 0.8554668512156339,
+      "cumulativeVisibleTokenReduction": 0.8314995967997092,
+      "timingSamplesMs": {
+        "baseline": [
+          64.88776900000084,
+          65.88290500000039,
+          65.46974299999965,
+          65.65101800000048,
+          65.58100199999899
+        ],
+        "optimized": [
+          15.012384999999995,
+          14.954379999999219,
+          14.909343000001172,
+          15.266341999998986,
+          14.933843999999226
+        ]
+      }
+    },
+    {
+      "steps": 128,
+      "compactionEvery": 32,
+      "baseline": {
+        "steps": 128,
+        "compactionEvery": 32,
+        "compactions": 3,
+        "injectedMessages": 128,
+        "injectedTokensEstimate": 121377,
+        "cumulativeVisibleTokensEstimate": 2144510,
+        "coverageChecks": 996,
+        "elapsedMs": 109.19282999999996
+      },
+      "optimized": {
+        "steps": 128,
+        "compactionEvery": 32,
+        "compactions": 3,
+        "injectedMessages": 128,
+        "injectedTokensEstimate": 14837,
+        "cumulativeVisibleTokensEstimate": 296804,
+        "coverageChecks": 996,
+        "elapsedMs": 20.97395999999935
+      },
+      "injectedTokenReduction": 0.8777610255649753,
+      "cumulativeVisibleTokenReduction": 0.8615982205725317,
+      "timingSamplesMs": {
+        "baseline": [
+          109.33813299999929,
+          108.889545,
+          109.19282999999996,
+          109.11501199999839,
+          109.79649099999915
+        ],
+        "optimized": [
+          21.031370999999126,
+          21.040022999999564,
+          20.898332000000664,
+          20.97395999999935,
+          20.909571000000142
+        ]
+      }
+    }
+  ],
+  "recallAccuracy": {
+    "corpusSegments": 96,
+    "topics": 8,
+    "relevantDefinition": "Earlier segments with the same topic as the final anchor.",
+    "scorer": "Deterministic graded oracle: same-topic 0.62/0.82, adjacent-topic 0.42, otherwise 0.08.",
+    "cases": [
+      {
+        "window": 4,
+        "threshold": 0.35,
+        "truth": 11,
+        "selected": 1,
+        "tp": 0,
+        "fp": 1,
+        "fn": 11,
+        "precision": 0,
+        "recall": 0,
+        "f1": 0,
+        "rows": 1,
+        "questions": 4,
+        "elapsedMs": 0.06415699999888602,
+        "timingSamplesMs": [
+          0.06415699999888602,
+          0.0697470000013709,
+          0.06179400000110036,
+          0.05201900000065507,
+          0.08274800000071991
+        ]
+      },
+      {
+        "window": 4,
+        "threshold": 0.55,
+        "truth": 11,
+        "selected": 0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 11,
+        "precision": 0,
+        "recall": 0,
+        "f1": 0,
+        "rows": 1,
+        "questions": 4,
+        "elapsedMs": 0.02388299999984156,
+        "timingSamplesMs": [
+          0.02786500000001979,
+          0.038023000000976026,
+          0.02388299999984156,
+          0.014976000000388012,
+          0.011800000000221189
+        ]
+      },
+      {
+        "window": 4,
+        "threshold": 0.7,
+        "truth": 11,
+        "selected": 0,
+        "tp": 0,
+        "fp": 0,
+        "fn": 11,
+        "precision": 0,
+        "recall": 0,
+        "f1": 0,
+        "rows": 1,
+        "questions": 4,
+        "elapsedMs": 0.009325000000899308,
+        "timingSamplesMs": [
+          0.012458999999580556,
+          0.007587000000057742,
+          0.007532999999966705,
+          0.02477800000087882,
+          0.009325000000899308
+        ]
+      },
+      {
+        "window": 8,
+        "threshold": 0.35,
+        "truth": 11,
+        "selected": 3,
+        "tp": 1,
+        "fp": 2,
+        "fn": 10,
+        "precision": 0.3333333333333333,
+        "recall": 0.09090909090909091,
+        "f1": 0.14285714285714288,
+        "rows": 1,
+        "questions": 8,
+        "elapsedMs": 0.014966000000640634,
+        "timingSamplesMs": [
+          0.03570899999976973,
+          0.015090000000782311,
+          0.014966000000640634,
+          0.014870999999402557,
+          0.013539000001401291
+        ]
+      },
+      {
+        "window": 8,
+        "threshold": 0.55,
+        "truth": 11,
+        "selected": 1,
+        "tp": 1,
+        "fp": 0,
+        "fn": 10,
+        "precision": 1,
+        "recall": 0.09090909090909091,
+        "f1": 0.16666666666666669,
+        "rows": 1,
+        "questions": 8,
+        "elapsedMs": 0.010768000000098255,
+        "timingSamplesMs": [
+          0.010768000000098255,
+          0.010822000000189291,
+          0.01080300000103307,
+          0.010448999999425723,
+          0.010620999999446212
+        ]
+      },
+      {
+        "window": 8,
+        "threshold": 0.7,
+        "truth": 11,
+        "selected": 1,
+        "tp": 1,
+        "fp": 0,
+        "fn": 10,
+        "precision": 1,
+        "recall": 0.09090909090909091,
+        "f1": 0.16666666666666669,
+        "rows": 1,
+        "questions": 8,
+        "elapsedMs": 0.010438000001158798,
+        "timingSamplesMs": [
+          0.010443000001032487,
+          0.010329000000638189,
+          0.010438000001158798,
+          0.010527999998885207,
+          0.010179000000789529
+        ]
+      },
+      {
+        "window": 16,
+        "threshold": 0.35,
+        "truth": 11,
+        "selected": 6,
+        "tp": 2,
+        "fp": 4,
+        "fn": 9,
+        "precision": 0.3333333333333333,
+        "recall": 0.18181818181818182,
+        "f1": 0.23529411764705885,
+        "rows": 1,
+        "questions": 16,
+        "elapsedMs": 0.022119999999631546,
+        "timingSamplesMs": [
+          0.024186000000554486,
+          0.022880000000441214,
+          0.02199099999961618,
+          0.022119999999631546,
+          0.021982000000207336
+        ]
+      },
+      {
+        "window": 16,
+        "threshold": 0.55,
+        "truth": 11,
+        "selected": 2,
+        "tp": 2,
+        "fp": 0,
+        "fn": 9,
+        "precision": 1,
+        "recall": 0.18181818181818182,
+        "f1": 0.3076923076923077,
+        "rows": 1,
+        "questions": 16,
+        "elapsedMs": 0.017508000000816537,
+        "timingSamplesMs": [
+          0.017508000000816537,
+          0.01732600000104867,
+          0.01726500000040687,
+          0.018232000000352855,
+          0.018027000000074622
+        ]
+      },
+      {
+        "window": 16,
+        "threshold": 0.7,
+        "truth": 11,
+        "selected": 1,
+        "tp": 1,
+        "fp": 0,
+        "fn": 10,
+        "precision": 1,
+        "recall": 0.09090909090909091,
+        "f1": 0.16666666666666669,
+        "rows": 1,
+        "questions": 16,
+        "elapsedMs": 0.016722000000299886,
+        "timingSamplesMs": [
+          0.016652000000249245,
+          0.016722000000299886,
+          0.01593200000024808,
+          0.01705500000025495,
+          0.025120000000242726
+        ]
+      },
+      {
+        "window": 32,
+        "threshold": 0.35,
+        "truth": 11,
+        "selected": 12,
+        "tp": 4,
+        "fp": 8,
+        "fn": 7,
+        "precision": 0.3333333333333333,
+        "recall": 0.36363636363636365,
+        "f1": 0.34782608695652173,
+        "rows": 1,
+        "questions": 32,
+        "elapsedMs": 0.05008099999940896,
+        "timingSamplesMs": [
+          0.05315900000096008,
+          0.09037700000044424,
+          0.05008099999940896,
+          0.041683999999804655,
+          0.04330099999970116
+        ]
+      },
+      {
+        "window": 32,
+        "threshold": 0.55,
+        "truth": 11,
+        "selected": 4,
+        "tp": 4,
+        "fp": 0,
+        "fn": 7,
+        "precision": 1,
+        "recall": 0.36363636363636365,
+        "f1": 0.5333333333333333,
+        "rows": 1,
+        "questions": 32,
+        "elapsedMs": 0.024292000000059488,
+        "timingSamplesMs": [
+          0.029333000000406173,
+          0.024292000000059488,
+          0.036089999999603606,
+          0.0220050000007177,
+          0.02145600000039849
+        ]
+      },
+      {
+        "window": 32,
+        "threshold": 0.7,
+        "truth": 11,
+        "selected": 2,
+        "tp": 2,
+        "fp": 0,
+        "fn": 9,
+        "precision": 1,
+        "recall": 0.18181818181818182,
+        "f1": 0.3076923076923077,
+        "rows": 1,
+        "questions": 32,
+        "elapsedMs": 0.018820000001142034,
+        "timingSamplesMs": [
+          0.019162999999025487,
+          0.018820000001142034,
+          0.018949999999676947,
+          0.018355000000155997,
+          0.018770999999105697
+        ]
+      }
+    ]
+  },
+  "historicalTextReplay": {
+    "source": "round-20261001-long-001/turns.json",
+    "turnHashes": [
+      "2b1c2f0be6beb3ac6aea1a3c59325fc3e5d5c20ffcdb1ea4347afb8f004709c1",
+      "af2e849d252ae8b00091a330b4d958465cd61cde069a98b2d5a7115a4b6e37a4",
+      "b297a68c40ec360adf3abf6db0c8a27843b8f3acf89076e5bd014bd4befb26d7"
+    ],
+    "noCompaction": {
+      "baseline": {
+        "turns": 3,
+        "compactBeforeFinal": false,
+        "injectedMessages": 2,
+        "injectedTokensEstimate": 678,
+        "restoredFacts": 3
+      },
+      "optimized": {
+        "turns": 3,
+        "compactBeforeFinal": false,
+        "injectedMessages": 0,
+        "injectedTokensEstimate": 0,
+        "restoredFacts": 0
+      }
+    },
+    "compactBeforeFinal": {
+      "baseline": {
+        "turns": 3,
+        "compactBeforeFinal": true,
+        "injectedMessages": 2,
+        "injectedTokensEstimate": 678,
+        "restoredFacts": 3
+      },
+      "optimized": {
+        "turns": 3,
+        "compactBeforeFinal": true,
+        "injectedMessages": 1,
+        "injectedTokensEstimate": 281,
+        "restoredFacts": 1
+      }
+    }
+  }
+}
