@@ -118,7 +118,7 @@ Round `20261001-1300` ran four cells under an earlier labelling: `C1` (baseline)
 TAS alone then; a second control arm today, see §5) is today's **`C1`**, `C3` (recall selection with `tas.on: false`)
 was **dropped, no successor**, and `C4` (the full configuration) is today's **`C2`**. The round-label mapping is the
 table in `docs/AGENT_BRIEF.md` §5; the measured reason the fourth arm was dropped is in `bench/README.md`, over that
-round's own tables (`.s1cap-ablation/round-20261001-1300/ROUND-REPORT.md`).
+round's own tables (`round-20261001-1300's round report (directory pruned 2026-10-07)`).
 
 ## 6. Loop, authority and asynchrony
 

@@ -958,10 +958,21 @@ function derive({ control, snapshot, tape, stepInfo, messages }) {
           + (otherBlocks.length > 0 ? ` beside ${delivery.blocks.length - recallBlocks} non-recall block(s): `
             + `${otherBlocks.join(', ')}` : ''));
       }
-      if (ids.length !== a.selected) {
+      // **A delivery may name fewer segments than were selected, and since 2026-10-05 that is the normal case.**
+      // `context-delivery.ts` reads the harness's own projection and suppresses a segment whose id and text are
+      // already visible, so it emits only what the model is not already looking at: `selected` counts what the walk
+      // chose, and the payload names what had to be *sent*. The equality this line asserted was true of the
+      // append-only delivery it was written against and is false now - and because it `fail()`ed, a finished round
+      // whose logs are complete could not be drawn at all. The difference is the suppression: a recorded fact, not
+      // corruption, so it is counted and carried to the summary. The direction that cannot happen - more delivered
+      // lines than selected segments - is still refused.
+      if (ids.length > a.selected) {
         fail(`assembly #${k + 1} records selected=${a.selected} but its delivered payload names ${ids.length} `
-          + 'segment(s) — the count and the identity disagree');
+          + 'segment(s) — more was delivered than was selected, which no delivery path can produce');
       }
+      // The difference needs no new counter: the summary's `countOnly` is already
+      // `selectedTotal - (segments whose identity a payload names)`, which is exactly this suppression - a selected
+      // segment that the delivery did not have to re-inject because the model could already see it.
       selected = [];
       for (const id of ids) {
         if (snapshot.byId.has(id)) {
@@ -2099,6 +2110,10 @@ function fixtureInvocations(defects = {}) {
   if (defects.treeShape === 'depthMismatch') inv[1].bfsDepth = 3;
   if (defects.candidateCount) inv[1].candidates = 3;
   if (defects.selectedCount) inv[3].selected = 3;
+  // The direction that is still impossible: a payload naming more segments than the assembly selected. The other
+  // direction - fewer, which `selectedCount` produces - became legal with delta delivery on 2026-10-05, because a
+  // selected segment the model can already see is not re-injected.
+  if (defects.selectedCountTooLow) inv[3].selected = 1;
   return inv.map((a, i) => ({
     windowN: a.windowN,
     scoredPairs: i * 7,
@@ -2652,9 +2667,13 @@ function selfTest() {
     bad('a candidate count that disagrees with the walk',
       { candidateCount: true },
       'the walk\'s id list and its count disagree');
-    bad('a selected count that disagrees with the delivered payload',
-      { selectedCount: true },
-      'the count and the identity disagree');
+    // **This case asserted the wrong rule from 2026-10-05, and the correction is the point of the note.** It made a
+    // payload name *fewer* segments than were selected and required a refusal; with delta delivery that is the normal
+    // case (`context-delivery.ts` suppresses what the model can already see), and refusing it made a finished round
+    // undrawable. What is still impossible is the other direction, so that is what this checks.
+    bad('a delivered payload naming more segments than the assembly selected',
+      { selectedCountTooLow: true },
+      'more was delivered than was selected');
     bad('a wiring record that is not on the tape',
       { noWiring: true },
       'the knobs are read from it rather than assumed');

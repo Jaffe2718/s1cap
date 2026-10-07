@@ -1688,7 +1688,7 @@ is:
 
 ### Why short tasks cannot carry the measurement
 
-The numbers are the round's own, from `.s1cap-ablation/round-20261001-1414/ROUND-REPORT.md` and the tables and charts
+The numbers are the round's own, from `round-20261001-1414's round report (directory pruned 2026-10-07)` and the tables and charts
 in its `report/`. Read the report rather than this summary.
 
 - **Three turns of a LeetCode stimulus produce 6–7 steps and about 20 s of LLM time per cell** — 7 steps and

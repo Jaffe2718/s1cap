@@ -260,7 +260,7 @@ anchors on 2026-09-28 and labelled as such — not as a second copy of the list.
 > `tas.on: false`) is **dropped, no successor**; round `C4` (the full configuration) is today's **`C2`**. Every
 > figure below stays attributed to that round and to the label it ran under, and none is silently re-labelled. The
 > table itself, and the per-step reason the fourth arm was dropped, are kept once as frozen history of that round
-> in `.s1cap-ablation/round-20261001-1300/ROUND-REPORT.md`, whose cells are named `C1`–`C4`; `docs/CELLS-RUN.md`
+> in `round-20261001-1300's round report (directory pruned 2026-10-07)`, whose cells are named `C1`–`C4`; `docs/CELLS-RUN.md`
 > states the reading rule (a figure from that round is never a contrast, and its labels are never re-labelled into
 > today's scheme) without reproducing the table.
 

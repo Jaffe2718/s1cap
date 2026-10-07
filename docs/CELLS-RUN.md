@@ -10,15 +10,15 @@ needs): the round's *setup and prerequisites* and the *machine-specific launch f
 (which the pointers below name where a document still refers to "Setup"); the *back-pressure analysis*, the
 *S1-call-volume / pair-count* findings and the *stimulus-setting levers* (`recall.window`,
 `s1.questionsPerCall`) → the measured back-pressure in round `20261001-1300`'s own record
-(`.s1cap-ablation/round-20261001-1300/ROUND-REPORT.md`) and the retry/admission levers in `bench/README.md`, with the
+(`round-20261001-1300's round report (directory pruned 2026-10-07)`) and the retry/admission levers in `bench/README.md`, with the
 window's own algorithm, its pair-count result and **the values that ran** in `docs/FORMULAS.md` §"Recall window w" —
 **the window and the depth are `defaultPolicy()`'s since 2026-10-05 (`w = 16`, `d = 16`, with the cost they rest on in
 that section's 2026-10-05 correction; the presets carry `d` explicitly and inherit `w`)**; the unrouted part of that
 block is still in `.s1cap-ablation/MOVED-OUT-DOCS-MATERIAL.md` §A; the *report generator's row list and
 invocation* → `scripts/cell-report.mjs` (`METRICS` and its usage block) with the specification in
 `docs/FORMULAS.md` §5.1; the *retired three-turn fixture's description* → the last short-task round's record,
-`.s1cap-ablation/round-20261001-1414/ROUND-REPORT.md`; and round `20261001-1300`'s *label table and measured
-tables* → that round's own record, `.s1cap-ablation/round-20261001-1300/ROUND-REPORT.md`.
+`round-20261001-1414's round report (directory pruned 2026-10-07)`; and round `20261001-1300`'s *label table and measured
+tables* → that round's own record, `round-20261001-1300's round report (directory pruned 2026-10-07)`.
 
 ## The question this run answers
 
@@ -101,7 +101,7 @@ model-visible input differed by nothing cannot support a difference of 0.69× pe
 evidence about TAS. **Neither recorded round's contrast measured TAS, because neither round predates the delivery of
 `T`** — that is a statement about the two rounds on disk, not about the design above, which `C0 → C1` does now test
 for the trace's *presence*. Where the mappings and figures of that round are
-kept is in its own record (`.s1cap-ablation/round-20261001-1300/ROUND-REPORT.md`): its labels are per-round and are
+kept is in its own record (`round-20261001-1300's round report (directory pruned 2026-10-07)`): its labels are per-round and are
 never re-labelled into today's scheme, and every quotation of a round's numbers carries the round and the label the
 cell ran under.
 
