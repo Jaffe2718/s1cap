@@ -271,7 +271,7 @@ archive), and the phase that replaced it is a **test/optimize loop**: draw one l
 
 ## 9. Dated decision (2026-10-03) — per-step assembly, and the eviction regime it depends on
 
-Appended after round `20261003-2104`, whose report is the dated record (`.s1cap-ablation/round-20261003-2104/ROUND-REPORT.md`).
+Appended after round `20261003-2104`, whose report is the dated record (`round-20261003-2104's round report (directory pruned 2026-10-07)`).
 Figures are quoted from it only to make the decision legible; none of them is a second copy of anything the code owns.
 
 ### What the round measured
