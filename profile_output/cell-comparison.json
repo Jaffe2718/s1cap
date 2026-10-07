@@ -1,0 +1,641 @@
+{
+  "schema": 1,
+  "date": "2026-10-07",
+  "commit": "6ea8c668a9667afc27022eef42e75d9e31cd1665",
+  "node": "v24.18.1",
+  "scope": "Offline replay of the current three cell presets; C2 uses the local lexical fallback, not the Jev backend. No model answers, official task rewards, provider tokens, or agent latency measured.",
+  "fixtures": [
+    {
+      "topic": "atlas",
+      "key": "checksum",
+      "fact": "47"
+    },
+    {
+      "topic": "cedar",
+      "key": "port",
+      "fact": "6432"
+    },
+    {
+      "topic": "lumen",
+      "key": "schema",
+      "fact": "v9"
+    },
+    {
+      "topic": "rivet",
+      "key": "rollback",
+      "fact": "phase3"
+    }
+  ],
+  "repetitions": 5,
+  "policies": {
+    "C0": {
+      "tas": false,
+      "recall": "off",
+      "deliver": false,
+      "window": 16,
+      "threshold": 0.55
+    },
+    "C1": {
+      "tas": true,
+      "recall": "off",
+      "deliver": true,
+      "window": 16,
+      "threshold": 0.55
+    },
+    "C2": {
+      "tas": true,
+      "recall": "s1",
+      "deliver": true,
+      "window": 16,
+      "threshold": 0.55
+    }
+  },
+  "summary": {
+    "full/C0": {
+      "factsAvailable": 4,
+      "cases": 4,
+      "serializedTracePresent": 0,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "visibilitySkips": 0,
+      "medianLocalMs": 0.18463800000000674
+    },
+    "full/C1": {
+      "factsAvailable": 4,
+      "cases": 4,
+      "serializedTracePresent": 4,
+      "injectedTokensEstimate": 147,
+      "questions": 0,
+      "visibilitySkips": 0,
+      "medianLocalMs": 0.2235900000000015
+    },
+    "full/C2": {
+      "factsAvailable": 4,
+      "cases": 4,
+      "serializedTracePresent": 4,
+      "injectedTokensEstimate": 147,
+      "questions": 0,
+      "visibilitySkips": 4,
+      "medianLocalMs": 0.2447610000000111
+    },
+    "compacted/C0": {
+      "factsAvailable": 0,
+      "cases": 4,
+      "serializedTracePresent": 0,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "visibilitySkips": 0,
+      "medianLocalMs": 0.08327299999999127
+    },
+    "compacted/C1": {
+      "factsAvailable": 0,
+      "cases": 4,
+      "serializedTracePresent": 4,
+      "injectedTokensEstimate": 147,
+      "questions": 0,
+      "visibilitySkips": 0,
+      "medianLocalMs": 0.10505499999999302
+    },
+    "compacted/C2": {
+      "factsAvailable": 4,
+      "cases": 4,
+      "serializedTracePresent": 4,
+      "injectedTokensEstimate": 420,
+      "questions": 68,
+      "visibilitySkips": 0,
+      "medianLocalMs": 0.24274199999999269
+    }
+  },
+  "rows": [
+    {
+      "cell": "C0",
+      "topic": "atlas",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.34151800000000776,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "atlas",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.22745299999999702,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "atlas",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 11,
+      "scoringSkippedByVisibility": true,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.3311130000000162,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C0",
+      "topic": "cedar",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.18463800000000674,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "cedar",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 36,
+      "questions": 0,
+      "elapsedMs": 0.2235900000000015,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "cedar",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 11,
+      "scoringSkippedByVisibility": true,
+      "injectedTokensEstimate": 36,
+      "questions": 0,
+      "elapsedMs": 0.1987139999999954,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C0",
+      "topic": "lumen",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.11917899999997417,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "lumen",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.2008340000000146,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "lumen",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 11,
+      "scoringSkippedByVisibility": true,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.2447610000000111,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C0",
+      "topic": "rivet",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.1411499999999819,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "rivet",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.10334399999999277,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "rivet",
+      "compacted": false,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 11,
+      "scoringSkippedByVisibility": true,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.14956699999999046,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C0",
+      "topic": "atlas",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.07951099999999656,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "atlas",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.095641999999998,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "atlas",
+      "compacted": true,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 3,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 106,
+      "questions": 17,
+      "elapsedMs": 0.31176099999998996,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": true
+    },
+    {
+      "cell": "C0",
+      "topic": "cedar",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.08327299999999127,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "cedar",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 36,
+      "questions": 0,
+      "elapsedMs": 0.1119640000000004,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "cedar",
+      "compacted": true,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 3,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 103,
+      "questions": 17,
+      "elapsedMs": 0.24274199999999269,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": true
+    },
+    {
+      "cell": "C0",
+      "topic": "lumen",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.08065200000001482,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "lumen",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.09975000000000023,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "lumen",
+      "compacted": true,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 3,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 104,
+      "questions": 17,
+      "elapsedMs": 0.21987799999999424,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": true
+    },
+    {
+      "cell": "C0",
+      "topic": "rivet",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": false,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 0,
+      "questions": 0,
+      "elapsedMs": 0.0933949999999868,
+      "delivered": 0,
+      "traceBlock": false,
+      "recallBlock": false
+    },
+    {
+      "cell": "C1",
+      "topic": "rivet",
+      "compacted": true,
+      "factPresent": false,
+      "serializedTracePresent": true,
+      "selected": 0,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 37,
+      "questions": 0,
+      "elapsedMs": 0.10505499999999302,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": false
+    },
+    {
+      "cell": "C2",
+      "topic": "rivet",
+      "compacted": true,
+      "factPresent": true,
+      "serializedTracePresent": true,
+      "selected": 3,
+      "scoringSkippedByVisibility": false,
+      "injectedTokensEstimate": 107,
+      "questions": 17,
+      "elapsedMs": 0.2258560000000216,
+      "delivered": 1,
+      "traceBlock": true,
+      "recallBlock": true
+    }
+  ],
+  "timingSamplesMs": {
+    "full/atlas/C0": [
+      0.3998760000000061,
+      0.34293299999998794,
+      0.34151800000000776,
+      0.19642200000001253,
+      0.17336700000001315
+    ],
+    "full/atlas/C1": [
+      0.27982900000000654,
+      0.2574040000000082,
+      0.21402700000001573,
+      0.22745299999999702,
+      0.21100000000001273
+    ],
+    "full/atlas/C2": [
+      0.5400059999999769,
+      0.3435079999999857,
+      0.3311130000000162,
+      0.29434499999999275,
+      0.28225499999999215
+    ],
+    "full/cedar/C0": [
+      0.21144899999998756,
+      0.18121199999998794,
+      0.20361100000002352,
+      0.18463800000000674,
+      0.17496700000000942
+    ],
+    "full/cedar/C1": [
+      0.24252500000000055,
+      0.2235900000000015,
+      0.9440400000000011,
+      0.15482900000000654,
+      0.19006400000000667
+    ],
+    "full/cedar/C2": [
+      0.18726200000000404,
+      0.1987139999999954,
+      0.23579300000000103,
+      0.240366999999992,
+      0.18991299999999
+    ],
+    "full/lumen/C0": [
+      0.11115800000001741,
+      0.12473200000002294,
+      0.11917899999997417,
+      0.1117930000000058,
+      0.13601900000000455
+    ],
+    "full/lumen/C1": [
+      0.2219880000000103,
+      0.25939299999998866,
+      0.2008340000000146,
+      0.19770299999998997,
+      0.1869909999999777
+    ],
+    "full/lumen/C2": [
+      0.2525810000000206,
+      0.23305799999999977,
+      0.2447610000000111,
+      0.23800099999999702,
+      0.24543400000001725
+    ],
+    "full/rivet/C0": [
+      0.1503189999999961,
+      0.1411499999999819,
+      0.43177199999999516,
+      0.12500599999998485,
+      0.10974200000001133
+    ],
+    "full/rivet/C1": [
+      0.11558500000001004,
+      0.11669100000000299,
+      0.10168600000000083,
+      0.10334399999999277,
+      0.10248000000001412
+    ],
+    "full/rivet/C2": [
+      0.1534560000000056,
+      0.14656099999999128,
+      0.14956699999999046,
+      0.15897999999998547,
+      0.13991199999998116
+    ],
+    "compacted/atlas/C0": [
+      0.08502300000000673,
+      0.07814200000001392,
+      0.07951099999999656,
+      0.07910300000000348,
+      0.08618999999998778
+    ],
+    "compacted/atlas/C1": [
+      0.095641999999998,
+      0.09797299999999609,
+      0.09752899999998021,
+      0.09548200000000406,
+      0.09487000000001444
+    ],
+    "compacted/atlas/C2": [
+      0.42351999999999634,
+      0.37700799999998935,
+      0.31067500000000337,
+      0.2860409999999831,
+      0.31176099999998996
+    ],
+    "compacted/cedar/C0": [
+      0.0851600000000019,
+      0.09358100000000036,
+      0.08327299999999127,
+      0.08069100000000162,
+      0.08274299999999357
+    ],
+    "compacted/cedar/C1": [
+      0.11523099999999431,
+      0.10068999999998596,
+      0.09749800000000164,
+      0.9171660000000088,
+      0.1119640000000004
+    ],
+    "compacted/cedar/C2": [
+      0.2562629999999899,
+      0.2423870000000079,
+      0.23326900000000705,
+      0.26059699999999,
+      0.24274199999999269
+    ],
+    "compacted/lumen/C0": [
+      0.08236699999997654,
+      0.08764899999999898,
+      0.08065200000001482,
+      0.07825500000001284,
+      0.07883400000000051
+    ],
+    "compacted/lumen/C1": [
+      0.09809400000000323,
+      0.1195059999999728,
+      0.10394999999999754,
+      0.09712200000001303,
+      0.09975000000000023
+    ],
+    "compacted/lumen/C2": [
+      0.23288100000002032,
+      0.22064499999999043,
+      0.21119999999999095,
+      0.20335099999999784,
+      0.21987799999999424
+    ],
+    "compacted/rivet/C0": [
+      0.10487800000001357,
+      0.09272700000002487,
+      0.0933949999999868,
+      0.0827290000000005,
+      0.11259099999998057
+    ],
+    "compacted/rivet/C1": [
+      0.1043549999999982,
+      0.09837500000000432,
+      0.7320679999999982,
+      0.1436000000000206,
+      0.10505499999999302
+    ],
+    "compacted/rivet/C2": [
+      0.22887900000000627,
+      0.237275000000011,
+      0.2258560000000216,
+      0.21059999999999945,
+      0.2141730000000166
+    ]
+  }
+}
