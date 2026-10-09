@@ -96,11 +96,26 @@ never:    a single composite score
 never:    money - vendors reprice, tokens stay comparable
 ```
 
-## 6. Reproducibility
+## 6. Reproducibility, and how a figure reaches the reader
 
 A report is **generated, not written by hand**: every figure comes from a script, every command in it can be re-run as
-written, figures are **SVG** so they stay complete and embeddable, and a superseded value is kept as a dated `_meta`
-note rather than overwritten.
+written, and a superseded value is kept as a dated `_meta` note rather than overwritten.
+
+**A figure is the generating tool's own vector output, referenced unmodified.** The rule exists because a rasterised
+copy silently loses the thing that makes a figure checkable - its text, its vectors, and its ability to be read at any
+size - while looking exactly like the real one.
+
+- The record is the **SVG the tool wrote**, byte for byte: `cell-report.mjs` for the token, cost, time and governance
+  figures, `s1-activity.mjs` for the recall activity matrix, `rg-matrix.mjs` for the association-graph matrix.
+- The report embeds each figure **by its own filename, from the directory the tool wrote it into**, and that file is
+  never re-drawn, re-scaled, re-coloured or "cleaned up" by hand afterwards.
+- **A screenshot is never a figure.** A rasterised copy may be shown in a chat message so a reader can glance at it,
+  but it is not the record: it is not committed, not referenced from a report, and not the artifact a later reader is
+  pointed at. If a PNG of a figure exists at all, it is a convenience copy and is labelled as one.
+- When the surface a reader uses cannot render SVG (some previews cannot), ship an `index.html` **beside** the report
+  that displays the same SVG files, so the vector originals stay reachable either way.
+- The numbers inside a figure and the numbers in the report's tables come from the same records. If they disagree, the
+  report is wrong, not the figure.
 
 ## 7. The honesty clauses
 
