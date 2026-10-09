@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Session } from '@deepseek-ai/dsh-session';
+import type { SessionId } from '@deepseek-ai/dsh-session';
 import { deliverContext, visibleMessagesOf } from '../src/context-delivery.ts';
 import type { ContextDeliveryInput } from '../src/context-delivery.ts';
 import { preStepMiddleware } from '../src/index.ts';
+import { MessageId } from '@deepseek-ai/dsh-llm/brand';
+import type { UserMessage } from '@deepseek-ai/dsh-llm/message';
 import type { StepObserver } from '../src/step-observer.ts';
 
 const a = { id: 'a', kind: 'toolResult', text: 'port=5432; database=inventory' };
@@ -74,21 +77,21 @@ test('visibility failures are conservative and the session method keeps its rece
 });
 
 test('real DSH surface compaction and middleware permit re-delivery after replacement', async () => {
-  const session = Session.create('delta-test');
+  const session = Session.create('delta-test' as SessionId);
   const payload = { agent: { session }, messages: [], step: 2 };
   const observer = {
     observe: async () => ({ layout: { order: ['stateProxy', 'recalled', 'anchor'] } }),
     stats: () => ({ ingestOnly: 0 }),
   } as unknown as StepObserver;
-  const middleware = preStepMiddleware({}, { observer, cell: 'C2', assemblyTrigger: 'every-step',
+  const middleware = preStepMiddleware({ on() {} }, { observer, cell: 'C2', assemblyTrigger: 'every-step',
     emit: () => {}, deliver: (_built, _decision, _payload, visibleMessages) =>
       deliverContext(input({ visibleMessages })) });
   const next = async () => ({ kind: 'enter', messages: [] });
-  const first = await middleware(payload, next) as { messages: unknown[] };
+  const first = await middleware(payload, next) as { messages: UserMessage[] };
   assert.equal(first.messages.length, 1);
-  const event = session.append('user/message', first.messages[0], { surfaceOp: 'append' });
+  const event = session.append('user/message', first.messages[0]!, { surfaceOp: 'append' });
   assert.equal((await middleware(payload, next) as { messages: unknown[] }).messages.length, 0);
-  session.append('user/message', { id: 'summary', role: 'user', content: [{ type: 'text', text: 'Work in progress.' }] },
+  session.append('user/message', { id: MessageId('summary'), role: 'user', source: { kind: 'plugin', plugin: 'test' }, content: [{ type: 'text', text: 'Work in progress.' }] },
     { surfaceOp: { op: 'replace', start: event.seq, end: event.seq }, sourceEventSeqs: [event.seq] });
   assert.equal(visibleMessagesOf(payload)?.length, 1);
   assert.equal((await middleware(payload, next) as { messages: unknown[] }).messages.length, 1,

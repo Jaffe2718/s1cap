@@ -9,11 +9,16 @@
     "node": ">=22.19"
   },
   "scripts": {
+    "build": "node scripts/build-packages.mjs",
     "test": "node --test --experimental-strip-types \"packages/*/test/*.test.ts\"",
-    "typecheck": "tsc -p tsconfig.base.json --noEmit",
+    "typecheck": "node node_modules/typescript/bin/tsc -p tsconfig.base.json --noEmit",
     "dsh:add": "dsh plugin --profile web add file:./packages/dsh-plugin"
   },
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "typescript": "5.9.3"
+  }
 }

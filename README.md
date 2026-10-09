@@ -108,7 +108,8 @@ Local Laya backend: `@s1cap/laya-runtime` discovers the Python environment that 
 `<python> -m pip install "laya[serve]"`; configuration keys and the DSH profile patch are documented in
 [docs/LAYA_RUNTIME.md](docs/LAYA_RUNTIME.md).
 
-Type-checking needs TypeScript ≥ 5.8 (`erasableSyntaxOnly`): `npm i -D typescript@^5.8 && npm run typecheck`.
+The workspace pins TypeScript and Node types as development dependencies. After `pnpm install --frozen-lockfile`,
+run `pnpm typecheck`, `pnpm build`, and `pnpm test`; `node scripts/check-lib-fresh.mjs` verifies the shipped JavaScript matches the sources.
 pnpm is the intended workspace manager; on Windows PowerShell call `pnpm.cmd` (the `.ps1` shim is blocked by
 the default execution policy).
 

@@ -1,11 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2023"],
+    "lib": ["ES2023", "DOM"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "allowImportingTsExtensions": true,
     "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": false,
@@ -13,7 +15,13 @@
     "isolatedModules": true,
     "erasableSyntaxOnly": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@s1cap/core": ["./packages/core/src/index.ts"],
+      "@s1cap/laya-runtime": ["./packages/laya-runtime/src/index.ts"],
+      "@s1cap/s1-client": ["./packages/s1-client/src/index.ts"],
+      "dsh-s1cap": ["./packages/dsh-plugin/src/index.ts"]
+    }
   },
   "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "bench/**/*.ts"]
 }
