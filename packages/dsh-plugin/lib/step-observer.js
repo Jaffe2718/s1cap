@@ -46,8 +46,7 @@ import { AssociationGraph, CONTENT_EVENT_TYPES, S1_DEFERRED, adaptSessionEvent, 
                    
                      
 import { isS1capInjected } from '@s1cap/core';
-import { scoreDemandRows } from './demand-scheduler.js';
-import { contextVisibility } from './context-delivery.js';
+import { createDemandScheduler, scoreDemandRows } from './demand-scheduler.js';
 
                                       
                          
@@ -272,6 +271,8 @@ import { contextVisibility } from './context-delivery.js';
                                                     
                         
                              
+                                                                                                           
+                                                                           
  
 
 /**
@@ -566,14 +567,36 @@ export function createStepObserver(opts                     )               {
    * anchor. `S1_DEFERRED` - the admission gate's "not now" - is reported the same way, and is counted by the graph
    * as a demanded pair that got no answer rather than as `deferredPairs` (which is the eager path's accounting).
    */
+  const demandScheduler = createDemandScheduler(opts.policy.s1.admissionLimit);
   const scoreDemandedRows = async (
     rows                      ,
     deadline        ,
+    onRow                                                                               ,
+    probe                                         ,
+    step        ,
   )                                                      => {
     if (opts.scoreBatch === undefined) return rows.map(() => undefined);
-    return scoreDemandRows(rows, opts.scoreBatch, {
-      concurrency: opts.policy.s1.admissionLimit,
+    const score = opts.scoreBatch;
+    return scoreDemandRows(rows, (current, candidates) => {
+      const queuedAt = opts.now();
+      const row = rows.find((item) => item.id === current.id) ;
+      return demandScheduler.run(current.id, row.depth, () => opts.now() < deadline, async () => {
+        const startedAt = opts.now();
+        try { return await score(current, candidates); }
+        finally {
+          try {
+            probe({ schema: 0, kind: 's1-row-timing', step, row: current.id, depth: row.depth,
+              queueMs: Math.max(0, startedAt - queuedAt), scoreMs: Math.max(0, opts.now() - startedAt) });
+          } catch { /* Timing must not discard a valid S1 answer. */ }
+        }
+      });
+    }, {
+      // Enqueue the whole level so a later anchor can promote even a row that
+      // would otherwise be hidden behind another walk's local worker cursor.
+      // The shared scheduler alone bounds actual backend concurrency.
+      concurrency: rows.length,
       canStart: () => opts.now() < deadline,
+      onRow,
       onError: (row, err) => {
         stats.errors += 1;
         stats.lastError = `demand scoring for ${row.id}: ${String(err)}`;
@@ -620,7 +643,7 @@ export function createStepObserver(opts                     )               {
           now: opts.now(),
           window: opts.policy.recall.window,
         },
-        opts.scoreBatch === undefined ? undefined : (rows) => scoreDemandedRows(rows, deadline),
+        opts.scoreBatch === undefined ? undefined : (rows, onRow) => scoreDemandedRows(rows, deadline, onRow, probe, step),
         // Checked between levels and before each new row. Already admitted work
         // may finish after the deadline. `anchorWaitMs = 0` disables the wait, not recall: the walk then runs
         // unbounded in the background, which is exactly "scoring starts when the BFS recall is called" with no
@@ -724,9 +747,13 @@ export function createStepObserver(opts                     )               {
     // own - it watches the one the design requires, and the deadline is the same deadline the walk's budget is
     // bounded by. `started: true` says exactly that: the wait is the walk's, and the row it is waiting for is being
     // bought.
-    const walk = demandWalk(graph, sessionId, anchorId, probe, step, waitMs);
+    const waitStartedAt = opts.now();
+    demandScheduler.prioritize(anchorId);
+    let walkDone = false;
+    const walk = demandWalk(graph, sessionId, anchorId, probe, step, waitMs)
+      .finally(() => { walkDone = true; });
     if (unknownBefore === 0) return;
-    const deadline = opts.now() + waitMs;
+    const deadline = waitStartedAt + waitMs;
     // A poll ceiling as well as a deadline, because the deadline came from the injected clock: a caller whose `now()`
     // does not advance would otherwise spin on a resolved sleep until something else stopped it. At the documented
     // 50 ms interval, `waitMs` allows `waitMs / 50` polls, so a real wait is never cut short by this.
@@ -745,6 +772,8 @@ export function createStepObserver(opts                     )               {
       // The success is an outcome and belongs on the tape: without this line the only waits anyone can count are
       // the ones that failed, so "the wait works" was unfalsifiable from a round's own artifacts.
       if (unknown === 0) {
+        probe({ schema: 0, kind: 'anchor-wait-timing', step, anchor: anchorId,
+          elapsedMs: Math.max(0, opts.now() - waitStartedAt), budgetMs: waitMs, reason: 'completed' });
         reportAnchorWait(probe, step, 'completed', waitMs, polls, 0, true);
         return;
       }
@@ -753,8 +782,19 @@ export function createStepObserver(opts                     )               {
       // sleep the final act: work completed during it was thrown away and the diagnostic below reported a remainder
       // that was already judged. Measured on a fixture whose drain completes the row, that turned a finished wait
       // into a reported failure.
+      // Once neither this walk nor another owner can finish the row, waiting
+      // longer cannot improve selection. Keep the existing unknown-content fallback.
+      if (!graph.rowPending(anchorId)) break;
       if (polls >= maxPolls || opts.now() >= deadline) break;
-      await sleep(50);
+      let unsubscribe = () => {};
+      const completed = new Promise      ((resolve) => {
+        unsubscribe = graph.onRowComplete(anchorId, resolve);
+      });
+      try { await Promise.race([
+        sleep(Math.min(50, Math.max(0, deadline - opts.now()))), completed,
+        ...(walkDone ? [] : [walk]),
+      ]); }
+      finally { unsubscribe(); }
     }
     // Giving up is not a failure: assembly carries on, and the pairs it could not wait for are counted as
     // `unknownAdmitted`. The wait makes the fail-open rule rarer; it does not replace it - and the walk it started
@@ -762,6 +802,9 @@ export function createStepObserver(opts                     )               {
     // the next step that recalls from them. `walk` is deliberately not awaited here: the deadline is the step's,
     // not the walk's, and the walk's own tape line is written when it settles.
     void walk;
+    probe({ schema: 0, kind: 'anchor-wait-timing', step, anchor: anchorId,
+      elapsedMs: Math.max(0, opts.now() - waitStartedAt), budgetMs: waitMs,
+      reason: !graph.rowPending(anchorId) ? 'no-pending-scorer' : 'deadline' });
     reportAnchorWait(probe, step, 'gave-up', waitMs, polls, unknown, true);
   };
 
@@ -822,8 +865,15 @@ export function createStepObserver(opts                     )               {
       // The host keeps its copy in the log and builds the request from the log, so the model still reads what
       // was delivered. The session-content stream below is still fed these events, because that file is a
       // faithful record of the session and not a view of what S1CAP chose to measure.
-      const ingestable = raw.filter((ev) => !isS1capInjected(ev.id));
-      stats.upkeepSelfDropped += raw.length - ingestable.length;
+      const originalContent = raw.filter((ev) => !isS1capInjected(ev.id));
+      stats.upkeepSelfDropped += raw.length - originalContent.length;
+      // A content-only surface rewrite is a model view, not a new original tool
+      // result. Keep the archived chunks available for a later recall instead of
+      // overwriting their ids with the shortened projection. Still record raw below.
+      const replacement = typeof event === 'object' && event !== null &&
+        (event                      ).type === 'tool/result' &&
+        typeof (event                           ).surfaceOp === 'object';
+      const ingestable = replacement ? [] : originalContent;
       const segments = ingestable.flatMap((ev) => segmentEvent(ev));
       graph.addSegments(segments);
       // The session-content stream, written from the same RawEvents that just entered the graph, so the file and
@@ -971,17 +1021,8 @@ export function createStepObserver(opts                     )               {
           // included.
           beforeAssemble: async (anchorId        ) => {
             try {
-              if (options?.visibleMessages !== undefined && opts.policy.recall.tier1 !== 'off') {
-                // Drain first: newly arrived content must be included in the proof.
-                queue.drain();
-                const visibility = contextVisibility(options.visibleMessages);
-                const graph = graphFor(sessionId);
-                if (graph.orderedSegments().every((seg) => seg.kind === 'systemPinned' || visibility.containsSegment(seg))) {
-                  stats.recallVisibleSkips += 1;
-                  writeProbe({ schema: 0, kind: 'recall-visible', step, sessionId, segments: graph.segmentCount });
-                  return;
-                }
-              }
+              // Visibility suppresses duplicate delivery, never relevance
+              // decisions. S1 governs content that is still present as well.
               await waitForAnchorRow(writeProbe, step, sessionId, anchorId);
             } catch (err) {
               stats.errors += 1;
@@ -1168,6 +1209,17 @@ export function createStepObserver(opts                     )               {
 
     flushUpkeep()         {
       return queue.drain();
+    },
+
+    rejectedChunks(sessionId        , anchorId        )                     {
+      if (opts.policy.recall.tier1 !== 's1' || opts.scoreBatch === undefined) return [];
+      const graph = graphFor(sessionId);
+      const snapshot = graph.snapshot();
+      const ids = new Set((snapshot.scores ?? []).filter((pair) =>
+        pair.to === anchorId && pair.source === 's1-noul' &&
+        Number.isFinite(pair.w) && pair.w < opts.policy.recall.threshold,
+      ).map((pair) => pair.from));
+      return snapshot.segments.filter((segment) => ids.has(segment.id));
     },
 
     stats()                    {

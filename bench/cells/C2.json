@@ -15,8 +15,10 @@
   },
   "cell": "C2",
   "deliver": true,
-  "tas": { "on": true, "tMaxChars": 50000, "updatePolicy": "perTask" },
+  "tas": { "on": true, "tMaxChars": 2400, "updatePolicy": "milestone" },
   "recall": {
+    "deliveryMaxTokens": 2048,
+    "deliveryMaxSegments": 4,
     "threshold": 0.55,
     "depth": 16,
     "tier1": "s1"

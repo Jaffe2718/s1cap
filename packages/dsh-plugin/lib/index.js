@@ -39,6 +39,7 @@ import { S1Client, describeS1Backend, redactKey, resolveS1Backend, singleBackend
 import { ControlPlaneLog, createRgFileStore } from '@s1cap/core';
 import { createControlSink, resolveTelemetryPath } from './control-log.js';
 import { deliverContext, visibleMessagesOf } from './context-delivery.js';
+import { selectToolContext } from './context-selection.js';
                                                                    
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -713,6 +714,8 @@ function readPayloadSessionId(payload         )         {
                                                                  
                                     
                                     
+                                                                                               
+                                                                       
  
 
 export function preStepMiddleware(
@@ -760,6 +763,12 @@ export function preStepMiddleware(
    */
   const deliveredPayloads = new Map                     ();
   return async (payload, next) => {
+    const timingStartedAt = performance.now();
+    const timestamp = Date.now();
+    let downstreamMs = 0;
+    let observationMs = 0;
+    let contextMs = 0;
+    try {
     if (primeOnce !== undefined) {
       // Prime lazily, on the first step: at activation time other plugins may not have provided the
       // systemPrompt service yet, which is why an earlier attempt read it too early and pinned nothing.
@@ -773,7 +782,9 @@ export function preStepMiddleware(
  */
       }
     }
+    const downstreamStartedAt = performance.now();
     const decision = await next();
+    downstreamMs = performance.now() - downstreamStartedAt;
     const record = decision                                                                          ;
     const before = Array.isArray(record.messages) ? record.messages.length : 0;
     // `position.step`, for the one reason the delivery module reads it: the harness treats "step 1 with nothing
@@ -911,6 +922,7 @@ export function preStepMiddleware(
     // observer leaves it at zero, which is the correct answer for "nothing read this step".
     const ingestOnlyBefore = observer?.stats().ingestOnly ?? 0;
     const visibleMessages = visibleMessagesOf(payload);
+    const observationStartedAt = performance.now();
     try {
       // Segment, recall and assemble for real, and record the result in the control plane. `observe()` never
       // throws, and neither does this catch: a failed observation costs the record, never the step.
@@ -920,6 +932,8 @@ export function preStepMiddleware(
       });
     } catch (err) {
       ctx.logger?.warn?.(`[s1cap] pre-step observation failed (ignored): ${String(err)}`);
+    } finally {
+      observationMs = performance.now() - observationStartedAt;
     }
     const ingested = (observer?.stats().ingestOnly ?? 0) > ingestOnlyBefore;
     if (!deliverable) {
@@ -954,7 +968,9 @@ export function preStepMiddleware(
     // it returns the untouched decision: the failure mode of the intervention is that it does not happen, never a
     // broken round.
     if (options === undefined || observation === undefined) return decision;
+    const contextStartedAt = performance.now();
     try {
+      options.selectContext?.(observation, payload);
       // Re-read after the observation's awaits: a concurrent compaction may have
       // replaced the surface used for the scoring-admission check.
       const deliveryVisibleMessages = visibleMessagesOf(payload);
@@ -963,7 +979,8 @@ export function preStepMiddleware(
         // `assembled: true`, because it did: reaching this line means the walk ran, and the reason says only why
         // the *delivery* was declined. Three states produce `delivered: false` and this flag is what separates
         // this one from the two above (read-and-declined, and never read).
-        report(false, result.reason, { assembled: true, blocks: result.blocks, order: observation.layout.order });
+        report(false, result.reason, { assembled: true, blocks: result.blocks, order: observation.layout.order,
+          recallDelivery: result.recallDelivery });
         return decision;
       }
       // Already sent this exact payload to this session: refuse it, and say so in the record. Without this the
@@ -1003,6 +1020,7 @@ export function preStepMiddleware(
         inserted: result.inserted,
         blocks: result.blocks,
         payloadId: result.payloadId,
+        recallDelivery: result.recallDelivery,
         order: observation.layout.order,
       });
       return { ...(decision                           ), messages: result.messages };
@@ -1011,6 +1029,20 @@ export function preStepMiddleware(
       // this whole file exists to make impossible to miss.
       ctx.logger?.warn?.(`[s1cap] context delivery failed (decision passed through unchanged): ${String(err)}`);
       return decision;
+    } finally {
+      contextMs = performance.now() - contextStartedAt;
+    }
+    } finally {
+      // The host emits step/start after this middleware. Record the otherwise
+      // invisible gap separately; downstream middleware is not S1CAP overhead.
+      try {
+        const totalMs = performance.now() - timingStartedAt;
+        observer?.probe({ schema: 0, kind: 'pre-step-timing', timestamp,
+          sessionId: readPayloadSessionId(payload),
+          step: isRecord(payload) && typeof payload['step'] === 'number' ? payload['step'] : 0,
+          totalMs, downstreamMs,
+          pluginMs: Math.max(0, totalMs - downstreamMs), observationMs, contextMs });
+      } catch { /* Telemetry must never change the decision. */ }
     }
   };
 }
@@ -1723,6 +1755,8 @@ function applyInner(ctx               , raw                             )       
           w: config.recall.window,
           wait: config.recall.anchorWaitMs,
           tier1: config.recall.tier1,
+          deliveryMaxTokens: config.recall.deliveryMaxTokens,
+          deliveryMaxSegments: config.recall.deliveryMaxSegments,
         },
         tas: config.tas,
         // **`tail` and the two `s1` knobs a preset supplies, added 2026-10-05 so the record covers every path the
@@ -1954,9 +1988,18 @@ function applyInner(ctx               , raw                             )       
       // Nothing in this repository sets it to `'every-step'`: no cell, no preset, no profile. A round flips it in
       // one profile patch, which is what makes the flip one variable.
       assemblyTrigger: config.assemblyTrigger,
+      selectContext: (built, payload) => {
+        if (!config.deliver || config.recall.tier1 !== 's1' || observer === undefined) return;
+        const rejected = observer.rejectedChunks?.(built.event.sessionId, built.layout.anchor.id) ?? [];
+        const result = selectToolContext(payload, built, rejected, config.tail.k);
+        observer.probe({ schema: 0, kind: 'context-selection', sessionId: built.event.sessionId,
+          anchor: built.layout.anchor.id, rejectedChunks: rejected.length, ...result });
+      },
       deliver: (built, decision, payload, visibleMessages) =>
         deliverContext({
           visibleMessages,
+          recallMaxTokens: config.recall.deliveryMaxTokens,
+          recallMaxSegments: config.recall.deliveryMaxSegments,
           enabled: config.deliver,
           trigger: config.assemblyTrigger,
           order: built.layout.order,

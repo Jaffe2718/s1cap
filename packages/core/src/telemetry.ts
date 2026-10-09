@@ -312,6 +312,9 @@ export type TelemetryEvent =
  * says which of the two happened, and why not when it did not.
  */
 export interface ContextDeliveryEvent {
+  /** Actual delivery filtering; separate from the assembler's BFS candidate counts. */
+  recallDelivery?: { candidates: number; visible: number; duplicates: number; deferred: number;
+    delivered: number; tokens: number; maxTokens: number; maxSegments: number };
   type: 'context_delivery';
   schema: typeof TELEMETRY_SCHEMA_VERSION;
   ts: number;

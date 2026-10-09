@@ -32,6 +32,14 @@ judge env   interpreter, pytest version, and any compatibility shim the checkout
 source      the tape's kind:"wiring" record - the profile text is not evidence
 ```
 
+### Display names (owner instruction, 2026-10-09)
+
+Use `DSH`, `TAS`, and `S1CAP(TAS=ON/OFF, r=<actual>, d=<actual>, w=<actual>)` as the
+reader-facing arm names in report headings, tables and comparisons. Resolve the S1CAP values from the run's
+actual wiring/effective tuning records. Do not use internal cell codes as display names. Retain those codes in
+machine-readable artifacts and original evidence for traceability; use the figure generator's label option
+where supported, without editing generated SVG bytes afterwards.
+
 ## 2. Validity gates - passed before any number is published
 
 | Gate | Test | If it fails |

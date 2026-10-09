@@ -32,6 +32,8 @@ function probeLine(laya: boolean, torch = true, serve = false): string {
 function fakeDeps(overrides: Partial<Record<string, RunResult>> = {}, platform = 'win32'): DiscoveryDeps {
   return {
     platform,
+    // Keep mocked discovery independent of the Node installation running tests.
+    execPath: platform === 'win32' ? 'C:\\node\\node.exe' : '/usr/bin/node',
     env: { S1CAP_PYTHON: 'C:\\env-python\\python.exe' },
     async run(command: string, args: string[]): Promise<RunResult> {
       const key = `${command} ${args.join(' ')}`;

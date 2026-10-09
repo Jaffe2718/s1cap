@@ -314,6 +314,8 @@ export function adaptMessages(
       text,
       ts: opts.now,
       ...(sourceKind !== undefined ? { taskTag: sourceKind } : {}),
+      ...(kind === 'toolResult' && typeof message.toolCallId === 'string' ? { toolCallId: message.toolCallId } : {}),
+      ...(kind === 'toolResult' && typeof message.isError === 'boolean' ? { toolError: message.isError } : {}),
     });
     report.messages += 1;
     const label = sawReasoning && kind === 'assistant' ? 'trace' : kind;

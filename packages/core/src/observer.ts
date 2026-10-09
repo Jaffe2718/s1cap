@@ -19,6 +19,8 @@ import { adaptMessages } from './harness-adapter.ts';
 import type { AdapterReport } from './harness-adapter.ts';
 import { TELEMETRY_SCHEMA_VERSION } from './telemetry.ts';
 import { buildStateProxy } from './state-proxy.ts';
+import { milestoneState } from './milestone-state.ts';
+import type { TaskProxyCache } from './milestone-state.ts';
 import type { AssemblyEvent } from './telemetry.ts';
 
 /**
@@ -123,7 +125,7 @@ export interface ObserveStepInput {
    * here because `observeStep` is a pure function of its input: a per-call proxy cache would rebuild T on every
    * step, which is exactly the instability the block is placed to avoid.
    */
-  proxyCache?: { id: string; text: string };
+  proxyCache?: TaskProxyCache;
   /**
    * The order the recalled block was left in by this session's previous step, held by the caller for the same
    * reason `proxyCache` is and **mutated in place by `assemble()`** (see `AssembleInput.recallOrder`).
@@ -546,7 +548,9 @@ export async function observeStep(
   // policy means and is not free.
   const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === taskSegment.id &&
     proxyCache.text !== '';
-  const proxyText = reuseProxy
+  const proxyText = input.policy.tas.updatePolicy === 'milestone'
+    ? (input.policy.tas.on ? milestoneState(window, taskSegment.id, input.policy.tas.tMaxChars, proxyCache) : '')
+    : reuseProxy
     ? proxyCache.text
     : buildStateProxy({
         segments: window,

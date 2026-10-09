@@ -60,6 +60,8 @@ interface Harness {
   slept: number[];
   probes: Record<string, unknown>[];
   warns: string[];
+  /** Final walk telemetry is asynchronous even after the anchor unblocks assembly. */
+  walkCompleted: Promise<void>;
   /** the graph as the step left it, from the observer's own persistence calls */
   persisted(): RgSnapshot;
   /** let the row the fixture is holding open resolve - see `holdFirstRow` */
@@ -71,6 +73,8 @@ function harness(opts: { anchorWaitMs?: number; advanceMs?: number; holdFirstRow
   const slept: number[] = [];
   const probes: Record<string, unknown>[] = [];
   const warns: string[] = [];
+  let completeWalk: () => void = () => undefined;
+  const walkCompleted = new Promise<void>((resolve) => { completeWalk = resolve; });
   const ticks = { value: T0 };
   let persisted: RgSnapshot = seededGraph().snapshot();
   // The row the fixture may hold open, so a test can pin what the step did *while* a scoring call was in flight.
@@ -101,7 +105,10 @@ function harness(opts: { anchorWaitMs?: number; advanceMs?: number; holdFirstRow
       return S1_DEFERRED;
     },
     onWarn: (message) => warns.push(message),
-    onProbe: (line) => probes.push(line),
+    onProbe: (line) => {
+      probes.push(line);
+      if (line.kind === 'recall-demand') completeWalk();
+    },
     // No timer: the only thing that drains the queue is the wait itself, which is what the test is measuring.
     schedule: () => undefined,
     rgStore: {
@@ -120,7 +127,7 @@ function harness(opts: { anchorWaitMs?: number; advanceMs?: number; holdFirstRow
       ticks.value += opts.advanceMs ?? 6_000;
     },
   });
-  return { observer, asked, slept, probes, warns, persisted: () => persisted, releaseRow: () => releaseRow() };
+  return { observer, asked, slept, probes, warns, walkCompleted, persisted: () => persisted, releaseRow: () => releaseRow() };
 }
 
 /** One macrotask plus its microtasks: enough for the walk's unawaited promise chain to finish. */
@@ -179,8 +186,13 @@ test('the walk buys the anchor row the cursor cannot reach, so the step is not e
   assert.equal(line['started'], true, 'the wait started the walk that scored the row');
   assert.equal(h.warns.filter((warn) => warn.includes('anchor wait gave up')).length, 0, 'and it never gave up');
 
+  assert.equal(h.persisted().scores?.length, SEED, 'anchor scores are persisted when the step returns');
+
   // The walk's own line, which is where a round reads what the demand cost (`rows`, `pairs`) and what it got
   // (`judged`, `missed`) - the numbers that make the saving visible instead of inferred from a smaller total.
+  // Per-row publication unblocks the step before the whole walk settles. Only
+  // the final telemetry assertion waits for that completion, not the step above.
+  await h.walkCompleted;
   const demand = h.probes.find((probe) => probe.kind === 'recall-demand');
   assert.ok(demand !== undefined, 'the walk reports what it asked for');
   assert.equal(demand['rows'] >= 1, true, `at least the anchor's row: ${JSON.stringify(demand)}`);

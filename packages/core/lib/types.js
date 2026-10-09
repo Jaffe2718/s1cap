@@ -46,6 +46,9 @@ export const CORE_SCHEMA_VERSION = 1         ;
              
                    
                                                                       
+                      
+                      
+                                                                      
                    
  
 
@@ -211,10 +214,13 @@ export const CORE_SCHEMA_VERSION = 1         ;
                                                                        
        
                       
-                                                                     
-                                        
+                                                                                                          
+                                                      
     
            
+                                                                                         
+                               
+                                 
                                 
                                                          
                         
@@ -805,6 +811,8 @@ export function defaultPolicy()                 {
     cache: { reselectPolicy: 'perTask', blockTokens: 64 },
     tas: { on: true, tMaxChars: 50_000, updatePolicy: 'perTask' },
     recall: {
+      deliveryMaxTokens: 0,
+      deliveryMaxSegments: 0,
       threshold: 0.55,
       // 16, not 1024: the window does nothing until it is below the session's segment count, and on the round the
       // lane was measured against (`20261004-1239`, 228 segments) `1024` offered every pair while costing 26.7 min

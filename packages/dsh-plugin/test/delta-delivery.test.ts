@@ -17,6 +17,23 @@ const input = (overrides: Partial<ContextDeliveryInput> = {}): ContextDeliveryIn
 const text = (result: ReturnType<typeof deliverContext>): string =>
   (result.messages?.at(-1) as { content?: { text: string }[] })?.content?.[0]?.text ?? '';
 
+test('recall budget defers whole blocks and duplicate text under different ids is sent once',()=>{
+ const result=deliverContext(input({stateProxy:'',recalled:[a,{...a,id:'copy'},b],recallMaxSegments:1}));
+ assert.ok(text(result).includes(a.text));assert.ok(!text(result).includes(b.text));
+ assert.equal(result.recallDelivery?.duplicates,1);assert.equal(result.recallDelivery?.deferred,1);
+ const next=deliverContext(input({stateProxy:'',visibleMessages:result.messages!,recallMaxSegments:1}));
+ assert.ok(text(next).includes(b.text));assert.ok(!text(next).includes(a.text));
+ const tiny=deliverContext(input({stateProxy:'',recalled:[a],recallMaxTokens:1}));
+ assert.equal(tiny.delivered,false);assert.equal(tiny.recallDelivery?.deferred,1);
+ assert.equal(tiny.recallDelivery?.tokens,0);
+});
+
+test('compacted content under another id is not recalled again; altered content stays eligible',()=>{
+ const visible=[{id:'summary',role:'user',content:[{type:'text',text:a.text}]}];
+ assert.equal(deliverContext(input({stateProxy:'',recalled:[a],visibleMessages:visible})).delivered,false);
+ assert.equal(deliverContext(input({stateProxy:'',recalled:[{...a,text:'port=6432'}],visibleMessages:visible})).delivered,true);
+});
+
 test('a changing selection sends only the delta, with the same facts still visible', () => {
   const first = deliverContext(input({ recalled: [a] }));
   const second = deliverContext(input({ visibleMessages: first.messages! }));

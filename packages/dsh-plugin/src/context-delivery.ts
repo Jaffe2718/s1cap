@@ -92,7 +92,8 @@
  * makes the *variable* real; it does not make the layout order real.
  */
 
-import { S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
+import { adaptMessages, adaptSessionEvent, segmentEvent, estimateTokens, S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
+import type { RawEvent } from '@s1cap/core';
 import type { AssemblyTrigger } from '@s1cap/core';
 import { createHash } from 'node:crypto';
 
@@ -148,6 +149,9 @@ export interface ContextDeliveryInput {
   messages: readonly unknown[];
   /** Current model-visible surface, after compaction. Undefined means visibility is unknown. */
   visibleMessages?: readonly unknown[];
+  /** Delivery-only caps: zero/undefined preserves legacy behavior. Whole segments are deferred, never cut. */
+  recallMaxTokens?: number;
+  recallMaxSegments?: number;
   /**
    * The pre-step payload's `messages` — the harness's `claimed`. Used only to find the insertion point, never
    * modified. When it is absent, or nothing in the decision belongs to it, the block goes at the end, which for
@@ -182,6 +186,12 @@ export interface ContextDeliveryResult {
   inserted: number;
   /** the payload digest, so a later step can recognise this injection by content */
   payloadId: string;
+  recallDelivery?: RecallDeliveryAccounting;
+}
+
+export interface RecallDeliveryAccounting {
+  candidates: number; visible: number; duplicates: number; deferred: number;
+  delivered: number; tokens: number; maxTokens: number; maxSegments: number;
 }
 
 const NOT_DELIVERED = (reason: string, blocks: string[] = []): ContextDeliveryResult => ({
@@ -245,19 +255,59 @@ export function contextVisibility(messages: readonly unknown[]): {
   containsTrace(trace: string): boolean;
 } {
   const byId = new Map<string, string>();
+  const eventsById = new Map<string, RawEvent>();
+  const chunksByParent = new Map<string, Map<string, string>>();
   const injections: string[] = [];
+  const visibleTexts: string[] = [];
   for (const message of messages) {
     if (!isRecord(message) || typeof message['id'] !== 'string') continue;
     const id = message['id'];
-    const text = textOf(message);
+    // Use the ingestion serializer for the visibility proof too. DSH assistant
+    // messages contain reasoning, text and structured tool calls; concatenating
+    // only .text loses the separators and tool-call payloads stored in the graph.
+    const options = { sessionId: 'visibility', startSeq: 0, now: 0 };
+    const event = adaptMessages([message], options).events[0];
+    const text = event?.text ?? '';
+    if(text!=='')visibleTexts.push(text);
     byId.set(id, text);
+    if (event !== undefined) eventsById.set(id, event);
     if (id.startsWith(S1CAP_INJECTED_ID_PREFIX)) injections.push(text);
+    // tool/call events are also ingested separately under callId. On the model
+    // surface the same call lives inside its assistant message, not as a message
+    // with that id. Match both its identity and its serialized name/arguments.
+    if (message['role'] === 'assistant' && Array.isArray(message['content'])) {
+      for (const part of message['content']) {
+        if (!isRecord(part) || part['type'] !== 'tool-call' || typeof part['id'] !== 'string') continue;
+        const call = adaptSessionEvent({ type: 'tool/call', data: {
+          callId: part['id'], name: part['name'], arguments: part['arguments'],
+        } }, options).events[0];
+        if (call !== undefined) {
+          byId.set(call.id, call.text);
+          eventsById.set(call.id, call);
+        }
+      }
+    }
   }
   return {
     containsSegment(segment) {
-      const original = byId.get(segment.chunkOf ?? segment.id);
-      return (segment.text !== '' && original?.includes(segment.text) === true) ||
-        injections.some((text) => text.includes(renderSegment(segment)));
+      // Content may remain under a different message id after compaction.
+      // Only exact bytes prove visibility; no semantic/fuzzy suppression.
+      if((segment.kind==='toolResult'||segment.kind==='user')&&segment.text!==''&&visibleTexts.some(text=>text===segment.text||
+        (segment.text.length>=128&&text.includes(segment.text))))return true;
+      const parent = segment.chunkOf ?? segment.id;
+      const original = byId.get(parent);
+      if (segment.text !== '' && original?.includes(segment.text) === true) return true;
+      // The segmenter normalizes paragraph separators when packing a chunk.
+      // Reproduce that transform lazily; never treat an id alone as visibility.
+      if (segment.chunkOf !== undefined && eventsById.has(parent)) {
+        let chunks = chunksByParent.get(parent);
+        if (chunks === undefined) {
+          chunks = new Map(segmentEvent(eventsById.get(parent)!).map((chunk) => [chunk.id, chunk.text]));
+          chunksByParent.set(parent, chunks);
+        }
+        if (segment.text !== '' && chunks.get(segment.id) === segment.text) return true;
+      }
+      return injections.some((text) => text.includes(renderSegment(segment)));
     },
     containsTrace: (trace) => trace !== '' && injections.some((text) => text.includes(trace)),
   };
@@ -388,6 +438,10 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
   const blocks: string[] = [];
   const visibility = contextVisibility(input.visibleMessages === undefined ? [] : [...input.visibleMessages, ...input.messages]);
   const emitted = new Set<string>();
+  const emittedContent = new Set<string>();
+  const cap=(n:number|undefined):number=>typeof n==='number'&&Number.isFinite(n)?Math.max(0,Math.floor(n)):0;
+  const recallDelivery:RecallDeliveryAccounting={candidates:input.recalled.length,visible:0,duplicates:0,deferred:0,
+    delivered:0,tokens:0,maxTokens:cap(input.recallMaxTokens),maxSegments:cap(input.recallMaxSegments)};
   // Legacy callers may supply T without naming its slot. Otherwise follow the
   // assembler's trace-placement order, including the Trace Append control.
   const order = input.order.includes('stateProxy') ? input.order : ['stateProxy', ...input.order];
@@ -400,18 +454,27 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
     } else if (block === 'recalled') {
       for (const seg of input.recalled) {
         const rendered = renderSegment(seg);
-        if (emitted.has(rendered)) continue;
-        if (visibility.containsSegment(seg)) continue;
+        if (emitted.has(rendered)||emittedContent.has(seg.text)) {recallDelivery.duplicates++;continue;}
+        if (visibility.containsSegment(seg)) {recallDelivery.visible++;continue;}
+        // Charge the joining separator too; this is an estimated token cap.
+        const tokens=estimateTokens('\n\n'+rendered);
+        if((recallDelivery.maxTokens>0&&recallDelivery.tokens+tokens>recallDelivery.maxTokens)||
+           (recallDelivery.maxSegments>0&&recallDelivery.delivered>=recallDelivery.maxSegments)){
+          recallDelivery.deferred++;continue;
+        }
         parts.push(rendered);
         blocks.push('recalled');
         emitted.add(rendered);
+        emittedContent.add(seg.text);
+        recallDelivery.delivered++;recallDelivery.tokens+=tokens;
       }
     }
   }
   if (parts.length === 0) {
     // Either nothing was selected or every selected block remains visible.
     // In both cases an empty injection carries no information.
-    return NOT_DELIVERED('nothing to insert: no missing trace or recalled turns on the visible surface');
+    return {...NOT_DELIVERED(recallDelivery.deferred>0?'missing recall deferred by delivery budget':
+      'nothing to insert: no missing trace or recalled turns on the visible surface'),recallDelivery};
   }
 
   // No preamble, no explanation, no instruction. What the model reads is `T` inside the paper's delimiters and
@@ -493,5 +556,6 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
     dropped: 0,
     inserted: 1,
     payloadId,
+    recallDelivery,
   };
 }

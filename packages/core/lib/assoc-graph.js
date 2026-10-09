@@ -123,6 +123,8 @@ function isBackwardStep(from                    , to                    )       
  */
                             
                              
+                                                                                        
+                                                                          
                                                                      
 
 /**
@@ -298,6 +300,30 @@ export class AssociationGraph {
    * in flight, and it is small only while the two are close; see `#scored` above for what that costs a restart.
    */
   #settled = new Set        ();
+  #rowListeners = new Map                         ();
+
+  /** Whether this row is owned by a scoring operation (including another walk). */
+  rowPending(id        )          {
+    return this.#taken.has(this.#at.get(id) ?? -1);
+  }
+
+  /** Wake a waiter when the owner records or releases this row. */
+  onRowComplete(id        , listener            )             {
+    const index = this.#at.get(id) ?? -1;
+    const listeners = this.#rowListeners.get(index) ?? new Set            ();
+    listeners.add(listener);
+    this.#rowListeners.set(index, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.#rowListeners.delete(index);
+    };
+  }
+
+  #notifyRow(index        )       {
+    for (const listener of this.#rowListeners.get(index) ?? []) {
+      try { listener(); } catch { /* Diagnostics/waiters must not break graph writes. */ }
+    }
+  }
   /** cumulative pair comparisons - the number recall.window is meant to bound */
   #scoredPairs = 0;
   /**
@@ -439,6 +465,7 @@ export class AssociationGraph {
   /** Settle a taken entry: it is scored (or had no window) and will never be offered again. */
   #settle(index        )       {
     this.#taken.delete(index);
+    this.#notifyRow(index);
     if (index < this.#scored) return;
     this.#settled.add(index);
     // The cursor advances over the settled prefix and forgets what it passes, so `#settled` stays bounded by the
@@ -455,6 +482,7 @@ export class AssociationGraph {
    */
   #release(index        )       {
     this.#taken.delete(index);
+    this.#notifyRow(index);
   }
 
   /**
@@ -1105,8 +1133,8 @@ export class AssociationGraph {
   /**
    * Score one level's claimed rows and settle them, releasing any that nobody answered.
    *
-   * The `finally` is the single place a claim is resolved, exactly as in `scoreNew`: an answer, a refusal, a
-   * throw, or a malformed weight list all leave the entry either settled or free, and never owned by a walk that
+   * Finished rows are resolved immediately; `finally` releases any remaining claims after a throw.
+   * An answer, refusal or malformed weight list leaves the entry settled or free, never owned by a walk that
    * has gone away. A row that is *not* answered is released **unsettled and unwritten** - no lexical row is
    * written in its place - so a later walk asks again. That is the one deliberate difference from `scoreNew`'s
    * fallback: a sweep that loses its backend still has to fill the session's cursor, while a walk that loses its
@@ -1144,17 +1172,11 @@ export class AssociationGraph {
         }
         return level;
       }
-      let answers                                                        ;
-      try {
-        answers = await scorer(rows);
-      } catch {
-        // A scorer that throws is a scorer that answered nothing, and the level is treated as one: the walk is on
-        // a step's path and must not die of it. The entry goes back free, and the reason the call failed is the
-        // scorer's own business to report (`s1-relevance.ts` counts its failures and `S1_DEFERRED` refusals).
-        answers = undefined;
-      }
-      for (const [i, row] of rows.entries()) {
-        const weights = answers?.[i];
+      const processed = new Set        ();
+      const accept = (i        , weights                               )       => {
+        const row = rows[i];
+        if (row === undefined || processed.has(i)) return;
+        processed.add(i);
         // A short or over-long list is a caller bug and is treated exactly like no answer rather than guessed at:
         // `scoreNew` throws here, and a walk cannot afford to - see the note above.
         if (weights === undefined || weights.length !== row.candidates.length ||
@@ -1162,7 +1184,9 @@ export class AssociationGraph {
           level.missed += 1;
           level.missedPairs += row.candidates.length;
           this.#miss(row.index, row.candidates.length);
-          continue;
+          this.#release(row.index);
+          settledAt.add(row.index);
+          return;
         }
         this.#record(row.current, row.candidates, weights, true, windowN, opts.threshold);
         this.#settle(row.index);
@@ -1171,7 +1195,15 @@ export class AssociationGraph {
         this.#judgedPairs += row.candidates.length;
         this.#demandPairs += row.candidates.length;
         level.judged += row.candidates.length;
+      };
+      let answers                                                        ;
+      try {
+        answers = await scorer(rows, accept);
+      } catch {
+        // Preserve rows already published; release unanswered rows for a later walk.
+        answers = undefined;
       }
+      for (let i = 0; i < rows.length; i += 1) accept(i, answers?.[i]);
       return level;
     } finally {
       for (const row of rows) if (!settledAt.has(row.index)) this.#release(row.index);

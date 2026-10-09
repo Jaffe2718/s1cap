@@ -20,13 +20,13 @@ const messages = [
   { id: 'b', role: 'user', content: [{ type: 'text', text: 'Preserve rollback semantics.' }] },
 ];
 
-test('fully visible history costs no S1 calls; compaction activates demand scoring', async () => {
+test('fully visible history still receives S1 selection; scored pairs are reused after compaction', async () => {
   const { observer, calls } = fixture();
   await observer.observe({ messages, step: 2 }, { visibleMessages: messages });
-  assert.equal(calls(), 0);
-  assert.equal(observer.stats().recallVisibleSkips, 1);
+  assert.equal(calls(), 1);
+  assert.equal(observer.stats().recallVisibleSkips, 0);
   await observer.observe({ messages: [], step: 3 }, { visibleMessages: messages.slice(-1) });
-  assert.equal(calls(), 1, 'the missing history requires the anchor row again');
+  assert.equal(calls(), 1, 'the same anchor reuses its already scored row');
 });
 
 test('missing or incomplete visibility never suppresses scoring', async () => {

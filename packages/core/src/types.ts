@@ -45,6 +45,9 @@ export interface Segment {
   text: string;
   ts: number;
   taskTag?: string;
+  /** Tool-result identity/status for evidence-based state updates. */
+  toolCallId?: string;
+  toolError?: boolean;
   /** set when this segment is a chunk of a larger original segment */
   chunkOf?: string;
 }
@@ -211,10 +214,13 @@ export interface AssemblyPolicy {
      * records what T cost as a measurement rather than as a deduction.
      */
     tMaxChars: number;
-    /** perTask keeps T byte-stable within a task (cache-friendly) */
-    updatePolicy: 'perTask' | 'perTurn';
+    /** perTask freezes T; perTurn refreshes it; milestone updates only on extracted progress evidence. */
+    updatePolicy: 'perTask' | 'perTurn' | 'milestone';
   };
   recall: {
+    /** Delivery-only caps; zero preserves legacy delivery. BFS/scoring are unchanged. */
+    deliveryMaxTokens?: number;
+    deliveryMaxSegments?: number;
     /** relevance threshold τ */
       /** relevance threshold (recall.threshold, 0..1) */
       threshold: number;
@@ -805,6 +811,8 @@ export function defaultPolicy(): AssemblyPolicy {
     cache: { reselectPolicy: 'perTask', blockTokens: 64 },
     tas: { on: true, tMaxChars: 50_000, updatePolicy: 'perTask' },
     recall: {
+      deliveryMaxTokens: 0,
+      deliveryMaxSegments: 0,
       threshold: 0.55,
       // 16, not 1024: the window does nothing until it is below the session's segment count, and on the round the
       // lane was measured against (`20261004-1239`, 228 segments) `1024` offered every pair while costing 26.7 min

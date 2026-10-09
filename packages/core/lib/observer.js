@@ -19,6 +19,8 @@ import { adaptMessages } from './harness-adapter.js';
                                                           
 import { TELEMETRY_SCHEMA_VERSION } from './telemetry.js';
 import { buildStateProxy } from './state-proxy.js';
+import { milestoneState } from './milestone-state.js';
+                                                           
                                                     
 
 /**
@@ -123,7 +125,7 @@ export function isInputEvent(segment         )          {
                                                                                                                 
                                                                          
      
-                                            
+                              
      
                                                                                                               
                                                                                                        
@@ -546,7 +548,9 @@ export async function observeStep(
   // policy means and is not free.
   const reuseProxy = input.policy.tas.updatePolicy === 'perTask' && proxyCache.id === taskSegment.id &&
     proxyCache.text !== '';
-  const proxyText = reuseProxy
+  const proxyText = input.policy.tas.updatePolicy === 'milestone'
+    ? (input.policy.tas.on ? milestoneState(window, taskSegment.id, input.policy.tas.tMaxChars, proxyCache) : '')
+    : reuseProxy
     ? proxyCache.text
     : buildStateProxy({
         segments: window,

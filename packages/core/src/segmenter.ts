@@ -36,6 +36,8 @@ export interface RawEvent {
   text: string;
   ts: number;
   taskTag?: string;
+  toolCallId?: string;
+  toolError?: boolean;
 }
 
 /**
@@ -81,6 +83,8 @@ export function segmentEvent(ev: RawEvent, opts: SegmenterOptions = {}): Segment
     ts: ev.ts,
     ...(ev.role !== undefined ? { role: ev.role } : {}),
     ...(ev.taskTag !== undefined ? { taskTag: ev.taskTag } : {}),
+    ...(ev.toolCallId !== undefined ? { toolCallId: ev.toolCallId } : {}),
+    ...(ev.toolError !== undefined ? { toolError: ev.toolError } : {}),
   };
 
   const total = estimateTokens(ev.text);

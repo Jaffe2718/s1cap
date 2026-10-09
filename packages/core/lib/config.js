@@ -38,6 +38,8 @@ const CELLS                  = ['C0', 'C1', 'C2'];
 
 /** Numeric bounds: thresholds, budgets, caps and timings. */
 export const NUMBER_RULES                        = [
+  { path: 'recall.deliveryMaxTokens', min: 0, max: 65536, integer: true },
+  { path: 'recall.deliveryMaxSegments', min: 0, max: 64, integer: true },
   // NOT ENFORCED. The type calls this "hard deadline for the synchronous per-call assembly hook; on expiry the
   // call passes through unmodified", and nothing enforces a deadline: the value is read once, to print on `/s1`
   // and in the status route's `effective` block. The documented entry comment beside it says 250 ms, and the
@@ -147,7 +149,7 @@ export const NUMBER_RULES                        = [
 
 export const ENUM_RULES                                                         = [
   { path: 'cell', values: CELLS },
-  { path: 'tas.updatePolicy', values: ['perTask', 'perTurn'] },
+  { path: 'tas.updatePolicy', values: ['perTask', 'perTurn', 'milestone'] },
   // The implemented tier-1 values, and only those. `embed` is the designed third mode and this build does not have
   // it: no embedder exists, `source: 'embed'` is never assigned to an edge, `recall.embedModel` is read by nothing,
   // and the only behavioural read of the field anywhere is `assembler.ts`'s `!== 'off'` - so a cell that declared
