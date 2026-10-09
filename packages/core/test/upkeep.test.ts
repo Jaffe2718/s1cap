@@ -11,7 +11,7 @@ import { createUpkeepQueue, extractSystemPrompt } from '../src/index.ts';
 
 test('the queue drains in bounded ticks and keeps arrival order', () => {
   const seen: number[] = [];
-  const queue = createUpkeepQueue<number>({ maxPerFlush: 2, onEvent: (n) => seen.push(n) });
+  const queue = createUpkeepQueue<number>({ maxPerFlush: 2, onEvent: (n) => { seen.push(n); } });
   for (const n of [1, 2, 3, 4, 5]) queue.enqueue(n);
 
   assert.equal(queue.stats().pending, 5);
@@ -37,7 +37,7 @@ test('a full queue drops the oldest events and says so exactly once', () => {
   const queue = createUpkeepQueue<number>({
     capacity: 3,
     maxPerFlush: 10,
-    onEvent: (n) => seen.push(n),
+    onEvent: (n) => { seen.push(n); },
     onWarn: (m) => warnings.push(m),
   });
   for (const n of [1, 2, 3, 4, 5]) queue.enqueue(n);
@@ -122,7 +122,7 @@ test('the handler is not awaited between events: the queue bounds a tick, not co
 
 test('drain() is not bounded by maxPerFlush, and that is what makes it usable at a turn boundary', () => {
   const seen: number[] = [];
-  const queue = createUpkeepQueue<number>({ maxPerFlush: 2, onEvent: (n) => seen.push(n) });
+  const queue = createUpkeepQueue<number>({ maxPerFlush: 2, onEvent: (n) => { seen.push(n); } });
   for (const n of [1, 2, 3, 4, 5]) queue.enqueue(n);
 
   assert.equal(queue.drain(), 5, 'the live caller drains everything it has, in one call');

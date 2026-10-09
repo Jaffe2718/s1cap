@@ -1,3 +1,4 @@
+                                                  
 /**
  * PLAN GATE — candidate plans, scored by one System-1 choice call, in an advisory order.
  *

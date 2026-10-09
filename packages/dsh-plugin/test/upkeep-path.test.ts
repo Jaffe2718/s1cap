@@ -232,7 +232,7 @@ test('a scorer that defers its rows is counted, not scored, and the graph holds 
     lambdaMs: 36 * 60 * 60 * 1000,
     maxLagTurns: 2,
     schedule: (tick) => ticks.push(tick),
-    scoreBatch: async () => {
+    scoreBatch: async (): Promise<typeof S1_DEFERRED> => {
       calls += 1;
       return S1_DEFERRED;
     },

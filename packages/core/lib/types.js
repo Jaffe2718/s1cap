@@ -483,6 +483,10 @@ export const CORE_SCHEMA_VERSION = 1         ;
                                 
     
                       
+                                                                                  
+                                                               
+                                                                          
+                                                   
      
                                                                                                              
                                                                                                                   
@@ -829,6 +833,8 @@ export function defaultPolicy()                 {
       minRecalledSegments: 1,
     },
     tail: { k: 3 },
+    segmentation: { chunkTokens: 512, overlapTokens: 64 },
+    contextSelection: { shortContextTokens: 32_768 },
     // **The method under test, and therefore the default — and the only layout axis.** `'trace-as-state'` is
     // `M([T, x, q])` — the trace in front of the long context, which is what "Trace as State" names and what the
     // project exists to measure. `'trace-append'` is the paper's own control (`M([x, T, q])`, the same two elements

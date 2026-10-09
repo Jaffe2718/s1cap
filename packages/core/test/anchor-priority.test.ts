@@ -30,7 +30,7 @@ import { AssociationGraph, S1_DEFERRED } from '../src/assoc-graph.ts';
 import type { Segment } from '../src/types.ts';
 
 function segment(id: string, seq: number): Segment {
-  return { id, sessionId: 's', kind: 'user', text: `text of ${id}`, ts: seq, seq };
+  return { id, sessionId: 's', kind: 'user', text: `text of ${id}`, tokens: 4, ts: seq, seq };
 }
 
 /** A graph of `n` segments, added in order, with its cursor at 0. */

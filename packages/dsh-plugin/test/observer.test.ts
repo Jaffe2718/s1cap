@@ -590,7 +590,7 @@ test('under every-step an empty decision is given the block, and the per-session
   const list = (returned as { messages: unknown[] }).messages;
   assert.equal(list.length, 1, 'an empty increment becomes the one injected message');
   assert.match(
-    (list[0] as { content: { text: string }[] }).content[0].text,
+    (list[0] as { content: { text: string }[] }).content[0]!.text,
     /package\.json scripts: build, test, dsh:add/,
     'and it carries the recalled text, which only exists because the walk ran',
   );

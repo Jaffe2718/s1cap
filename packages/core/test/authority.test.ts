@@ -156,10 +156,12 @@ test('a cell preset is what the runtime actually starts from, and an override st
       'assemblyDeadlineMs',
       'assemblyTrigger',
       'cache',
+      'contextSelection',
       'deliver',
       'recall',
       'rgMaintenance',
       's1',
+      'segmentation',
       'tail',
       'tas',
       'termination',
@@ -245,7 +247,7 @@ test('the gate never invents a plan: an empty model plan list stays empty', () =
 });
 
 test('the gate only reorders what the model produced', () => {
-  const plans = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const plans = [{ id: 'a', summary: 'a' }, { id: 'b', summary: 'b' }, { id: 'c', summary: 'c' }];
   const decision = orderPlans(
     plans,
     [

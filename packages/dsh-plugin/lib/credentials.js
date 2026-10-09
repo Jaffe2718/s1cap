@@ -122,6 +122,9 @@ export const TUNING_REF = 's1cap/tuning';
  
 
                          
+                       
+                         
+                              
      
                                                                                                                
     
@@ -412,6 +415,18 @@ export function parseTuningArgs(input                    )         {
   const notes           = [];
   const assign = (key        , raw        )       => {
     const value = Number(raw);
+    if (key === 'chunkTokens' || key === 'c') {
+      if (raw.trim() !== '' && Number.isInteger(value) && value >= 64 && value <= 8192) out.chunkTokens = value;
+      return;
+    }
+    if (key === 'overlapTokens' || key === 'omega' || key === 'ω') {
+      if (raw.trim() !== '' && Number.isInteger(value) && value >= 0 && value <= 4096) out.overlapTokens = value;
+      return;
+    }
+    if (key === 'shortContextTokens' || key === 's') {
+      if (raw.trim() !== '' && Number.isInteger(value) && value >= 0 && value <= 1048576) out.shortContextTokens = value;
+      return;
+    }
     if (key === 'depth' || key === 'd') {
       if (Number.isInteger(value) && value >= 1 && value <= 16) out.depth = value;
       return;
@@ -479,7 +494,7 @@ export function parseTuningArgs(input                    )         {
     // The value runs to the end of the token, not to the next space: `tokenize` has already made a quoted path
     // one token, and a `(\S+)` here would silently store `D:/Program` out of `D:/Program Files/...`.
     const match =
-      /^(depth|d|relevanceThreshold|r|window|w|anchorWaitMs|wait|tracePlacement|trace|questionPlacement|q|xFirst|xf|layaPythonPath|laya|py|layaWeightsCacheDir|weights|layaWeightsEnvVar|weightsEnv|provider)\s*=\s*(.+)$/.exec(
+      /^(chunkTokens|c|overlapTokens|omega|ω|shortContextTokens|s|depth|d|relevanceThreshold|r|window|w|anchorWaitMs|wait|tracePlacement|trace|questionPlacement|q|xFirst|xf|layaPythonPath|laya|py|layaWeightsCacheDir|weights|layaWeightsEnvVar|weightsEnv|provider)\s*=\s*(.+)$/.exec(
         token,
       );
     if (match && match[1] !== undefined && match[2] !== undefined) assign(match[1], match[2]);

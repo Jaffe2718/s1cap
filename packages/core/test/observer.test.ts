@@ -58,11 +58,9 @@ const BASE = {
 async function run(policyOverrides: Record<string, unknown> = {}) {
   const policy = { ...defaultPolicy(), ...policyOverrides };
   const graph = new AssociationGraph();
-  return {
-    policy,
-    graph,
-    observation: await observeStep({ ...BASE, policy, graph }),
-  };
+  const observation = await observeStep({ ...BASE, policy, graph });
+  assert.ok(observation.kind === 'assembled');
+  return { policy, graph, observation };
 }
 
 test('an observation is deterministic: the same step replayed produces the same record', async () => {
@@ -118,6 +116,7 @@ test('a message with no text is reported as empty, and an unknown part keeps its
   const graph = new AssociationGraph();
   const observation = await observeStep({ ...BASE, messages, policy: defaultPolicy(), graph });
 
+  assert.ok(observation.kind === 'assembled');
   assert.equal(observation.report.empty, 1);
   assert.deepEqual(observation.report.unknownPartTypes, ['image']);
   assert.equal(observation.report.rawParts, 1);
@@ -131,7 +130,7 @@ test('the control-plane record carries the frozen schema and the full C0/C2 cont
   assert.equal(c2.event.type, 'assembly');
   assert.equal(c2.event.schema, TELEMETRY_SCHEMA_VERSION);
   assert.equal(c2.event.seq, BASE.seq);
-  assert.deepEqual(Object.keys(c2.event.blocks).sort(), ['anchor', 'pinned', 'recalled', 'stateProxy', 'tail']);
+  assert.deepEqual(Object.keys(c2.event.blocks ?? {}).sort(), ['anchor', 'pinned', 'recalled', 'stateProxy', 'tail']);
   // The accounting identity, not `budgetUsed <= budgetTotal`. That inequality held *because* the removed
   // `recall.budgetRatio` cap dropped candidates that did not fit the allowance; selection is decided by `r` and `d`
   // now, so `budgetUsed` may legitimately exceed `budgetTotal` (see `AssemblyResult.budget` and
@@ -168,6 +167,7 @@ test('the control-plane record carries the frozen schema and the full C0/C2 cont
   const c0Policy = cellPolicyOf('C0');
   const graph = new AssociationGraph();
   const c0 = await observeStep({ ...BASE, policy: c0Policy, graph });
+  assert.ok(c0.kind === 'assembled');
   assert.equal(c0.event.selected, 0);
   assert.deepEqual(c0.selectedIds, []);
   assert.equal(c0.event.candidates, 0);
@@ -188,6 +188,7 @@ test('the graph accumulates across steps, so a later step can recall an earlier 
   const first = await observeStep({ ...BASE, policy, graph, messages: MESSAGES.slice(0, 2), step: 1 });
   const second = await observeStep({ ...BASE, policy, graph, step: 2 });
 
+  assert.ok(first.kind === 'assembled' && second.kind === 'assembled');
   assert.equal(first.segments.length, 2);
   assert.ok(graph.stats().segments >= MESSAGES.length, 'segments from both steps live in one graph');
   assert.ok(second.segments.length === MESSAGES.length);
@@ -434,7 +435,7 @@ test('the walk is rooted on the current question, not on the segment that index 
   // run inherited whichever turn-1 chunk that index happened to name.
   assert.ok(obs.layout.tail.some((s) => s.id === 'a1'), 'the newest turns are still the pool the tail is drawn from');
   assert.ok(
-    obs.event.recallTree !== undefined && Object.keys(obs.event.recallTree).length === 1,
+    obs.event.recallTree !== undefined && Object.keys(obs.event.recallTree ?? {}).length === 1,
     'one root, and it is the current question rather than a chunk of turn 1',
   );
 
@@ -702,7 +703,7 @@ test('a chunk of the current question is never recalled as history', async () =>
   const otherSiblings = siblings.filter((id) => id !== anchor.id);
   assert.ok(otherSiblings.length > 0, 'sanity: there is at least one sibling for the guard to exclude');
   assert.ok(
-    Object.keys(observation.event.recallTree).length > 0,
+    Object.keys(observation.event.recallTree ?? {}).length > 0,
     'sanity: the walk ran, so an empty result here would be evidence of something else',
   );
   // The sibling was *offered* to the walk - the tree records what recall returned, and it came back with a hit on
@@ -831,7 +832,7 @@ test('the walk is seeded from the newest input event, and the seed advances thro
     rows.push({
       anchor: anchorId,
       newestUser: newestUserOf(graph.orderedSegments()),
-      root: Object.keys(obs.event.recallTree)[0] ?? '(no hits)',
+      root: Object.keys(obs.event.recallTree ?? {})[0] ?? '(no hits)',
     });
 
     // The current event is never offered back as history: it is the anchor, and neither the recalled block nor the
@@ -913,7 +914,7 @@ test('a step whose newest event is the user\'s own question is still anchored th
 
   assert.equal(obs.layout.anchor.id, 'q2', 'the user\'s question is the newest input event, and the anchor');
   assert.equal(obs.layout.anchor.kind, 'user');
-  assert.deepEqual(Object.keys(obs.event.recallTree), ['q2'], 'and the walk is rooted on the question');
+  assert.deepEqual(Object.keys(obs.event.recallTree ?? {}), ['q2'], 'and the walk is rooted on the question');
   assert.ok(!obs.selectedIds.includes('q2'), 'the anchor is not also offered back as a recalled earlier turn');
   assert.ok(!obs.layout.tail.some((seg) => seg.id === 'q2'), 'nor as one of the k most recent turns');
 });

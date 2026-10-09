@@ -195,8 +195,8 @@ test('the walk buys the anchor row the cursor cannot reach, so the step is not e
   await h.walkCompleted;
   const demand = h.probes.find((probe) => probe.kind === 'recall-demand');
   assert.ok(demand !== undefined, 'the walk reports what it asked for');
-  assert.equal(demand['rows'] >= 1, true, `at least the anchor's row: ${JSON.stringify(demand)}`);
-  assert.equal(demand['judged'] >= SEED, true, `the anchor's ${String(SEED)} pairs were judged`);
+  assert.equal(Number(demand['rows']) >= 1, true, `at least the anchor's row: ${JSON.stringify(demand)}`);
+  assert.equal(Number(demand['judged']) >= SEED, true, `the anchor's ${String(SEED)} pairs were judged`);
 
   // **The cursor invariant, and it changed meaning with the design.** It used to read 1 here because the eager
   // sweep settled entry 0 (a segment with no window) on its way to the anchor. Nothing walks the cursor now, so

@@ -232,7 +232,7 @@ import { createDemandScheduler, scoreDemandRows } from './demand-scheduler.js';
                                                                                                                 
                                                                                                             
      
-                                                                     
+                                                                                                                                    
                            
  
 
@@ -395,10 +395,12 @@ export function createStepObserver(opts                     )               {
   // The store, when one is supplied, makes a session's graph survive a restart. Without it the behaviour is the
   // same per-session isolation, just in memory only — so the store is an optional surface, not a dependency.
   const graphs = new Map                          ();
+  const segmentationBySession = new Map                                                        ();
   const graphFor = (sessionId        )                   => {
     const known = graphs.get(sessionId);
     if (known !== undefined) return known;
     const resumed = opts.rgStore?.load(sessionId);
+    segmentationBySession.set(sessionId, { ...(resumed === undefined ? opts.policy.segmentation : resumed.segmentation ?? { chunkTokens: 512, overlapTokens: 64 }) });
     const created = AssociationGraph.fromSnapshot(resumed);
     graphs.set(sessionId, created);
     if (resumed !== undefined) {
@@ -413,7 +415,7 @@ export function createStepObserver(opts                     )               {
   const persistGraph = (sessionId        )       => {
     if (opts.rgStore === undefined) return;
     const graph = graphs.get(sessionId);
-    if (graph !== undefined) opts.rgStore.persist(sessionId, graph.snapshot());
+    if (graph !== undefined) opts.rgStore.persist(sessionId, { ...graph.snapshot(), segmentation: segmentationBySession.get(sessionId) });
   };
   /** Per-session T memos; forked sessions may share the same task event id. */
   const proxyCaches = new Map                                      ();
@@ -874,7 +876,8 @@ export function createStepObserver(opts                     )               {
         (event                      ).type === 'tool/result' &&
         typeof (event                           ).surfaceOp === 'object';
       const ingestable = replacement ? [] : originalContent;
-      const segments = ingestable.flatMap((ev) => segmentEvent(ev));
+      graphFor(sessionId);
+      const segments = ingestable.flatMap((ev) => segmentEvent(ev, segmentationBySession.get(sessionId)));
       graph.addSegments(segments);
       // The session-content stream, written from the same RawEvents that just entered the graph, so the file and
       // the graph can never disagree about what the session said. A throw here costs the stream line, not the
@@ -974,6 +977,7 @@ export function createStepObserver(opts                     )               {
         // graph scores each segment only once. A step that scored here would do it with the local lexical scorer
         // and leave upkeep nothing to ask the System-1 backend about, which is how a session ended up with a
         // populated graph, zero `assoc` calls and every edge labelled as if a model had scored it.
+        graphFor(sessionId);
         const observation = await observeStep({
           sessionId,
           scoreOnStepPath: false,
@@ -981,7 +985,7 @@ export function createStepObserver(opts                     )               {
           seq,
           messages,
           systemPrompt,
-          policy: opts.policy,
+          policy: { ...opts.policy, segmentation: segmentationBySession.get(sessionId) ?? opts.policy.segmentation },
           now: started,
           contextWindow: opts.contextWindow,
           reserveOutputTokens: opts.reserveOutputTokens,
@@ -1238,6 +1242,7 @@ export function createStepObserver(opts                     )               {
         graphEdges: edges,
         sessions: [...graphs.entries()].map(([id, g]) => ({
           sessionId: id,
+          segmentation: segmentationBySession.get(id),
           segments: g.segmentCount,
           edges: g.edgeCount,
         })),

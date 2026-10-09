@@ -94,6 +94,7 @@
 
 import { adaptMessages, adaptSessionEvent, segmentEvent, estimateTokens, S1CAP_INJECTED_ID_PREFIX } from '@s1cap/core';
 import type { RawEvent } from '@s1cap/core';
+import type { SegmenterOptions } from '@s1cap/core';
 import type { AssemblyTrigger } from '@s1cap/core';
 import { createHash } from 'node:crypto';
 
@@ -118,6 +119,7 @@ import { createHash } from 'node:crypto';
  * a silent delivery into an empty step.
  */
 export interface ContextDeliveryInput {
+  segmentation?: SegmenterOptions;
   /** `policy.deliver`: the cells that own context management deliver, the baseline does not */
   enabled: boolean;
   /** the assembler's block order, e.g. ['pinned','stateProxy','anchor','recalled','tail'] */
@@ -250,7 +252,7 @@ export function visibleMessagesOf(payload: unknown): readonly unknown[] | undefi
 }
 
 /** Exact-content evidence shared by scoring admission and delta delivery. */
-export function contextVisibility(messages: readonly unknown[]): {
+export function contextVisibility(messages: readonly unknown[], segmentation: SegmenterOptions = {}): {
   containsSegment(segment: DeliverableSegment): boolean;
   containsTrace(trace: string): boolean;
 } {
@@ -302,7 +304,7 @@ export function contextVisibility(messages: readonly unknown[]): {
       if (segment.chunkOf !== undefined && eventsById.has(parent)) {
         let chunks = chunksByParent.get(parent);
         if (chunks === undefined) {
-          chunks = new Map(segmentEvent(eventsById.get(parent)!).map((chunk) => [chunk.id, chunk.text]));
+          chunks = new Map(segmentEvent(eventsById.get(parent)!, segmentation).map((chunk) => [chunk.id, chunk.text]));
           chunksByParent.set(parent, chunks);
         }
         if (segment.text !== '' && chunks.get(segment.id) === segment.text) return true;
@@ -436,7 +438,7 @@ export function deliverContext(input: ContextDeliveryInput): ContextDeliveryResu
   const proxy = renderStateProxy(typeof input.stateProxy === 'string' ? input.stateProxy : '');
   const parts: string[] = [];
   const blocks: string[] = [];
-  const visibility = contextVisibility(input.visibleMessages === undefined ? [] : [...input.visibleMessages, ...input.messages]);
+  const visibility = contextVisibility(input.visibleMessages === undefined ? [] : [...input.visibleMessages, ...input.messages], input.segmentation);
   const emitted = new Set<string>();
   const emittedContent = new Set<string>();
   const cap=(n:number|undefined):number=>typeof n==='number'&&Number.isFinite(n)?Math.max(0,Math.floor(n)):0;

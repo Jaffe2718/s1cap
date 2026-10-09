@@ -483,6 +483,10 @@ export interface AssemblyPolicy {
     minRecalledSegments: number;
   };
   tail: { k: number };
+  /** Segmentation tuning; c and omega are fixed for a running plugin instance. */
+  segmentation: { chunkTokens: number; overlapTokens: number };
+  /** s: protect short visible histories before tool-result write-back. */
+  contextSelection: { shortContextTokens: number };
   /**
    * Which of the paper's second-pass arms the layout is: `'trace-as-state'` (`M([T, x, q])`, the method, the
    * default) or `'trace-append'` (`M([x, T, q])`, the control). **The only layout axis.** The question is last by
@@ -829,6 +833,8 @@ export function defaultPolicy(): AssemblyPolicy {
       minRecalledSegments: 1,
     },
     tail: { k: 3 },
+    segmentation: { chunkTokens: 512, overlapTokens: 64 },
+    contextSelection: { shortContextTokens: 32_768 },
     // **The method under test, and therefore the default — and the only layout axis.** `'trace-as-state'` is
     // `M([T, x, q])` — the trace in front of the long context, which is what "Trace as State" names and what the
     // project exists to measure. `'trace-append'` is the paper's own control (`M([x, T, q])`, the same two elements

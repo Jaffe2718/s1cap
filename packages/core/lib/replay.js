@@ -148,7 +148,7 @@ export async function replayTape(tape      , opts               )               
     seq += step.messages.length;
     // A step that produced no segment has no record to replay. Counted rather than dropped silently, because a
     // tape that assembled nothing is a finding about the tape, not a gap in the report.
-    if (observation.kind === 'empty') {
+    if (observation.kind !== 'assembled') {
       emptySteps += 1;
       continue;
     }

@@ -174,6 +174,9 @@ window.__ModuleLoader__.load({
         const [tau, setTau] = React.useState('');
         const [win, setWin] = React.useState('');
         const [wait, setWait] = React.useState('');
+        const [chunk, setChunk] = React.useState('512');
+        const [omega, setOmega] = React.useState('64');
+        const [shortContext, setShortContext] = React.useState('32768');
         /** the paper's variable: which of its two second-pass arms this session lays out — and the only axis */
         const [trace, setTrace] = React.useState(DEFAULT_TRACE);
         /**
@@ -245,6 +248,7 @@ window.__ModuleLoader__.load({
             let nextTau = String(DEFAULT_TAU);
             let nextWin = String(DEFAULT_WINDOW);
             let nextWait = String(DEFAULT_WAIT);
+            let nextChunk = '512', nextOmega = '64', nextShort = '32768';
             let nextTrace = DEFAULT_TRACE;
             /** `null` means "the host did not name a backend I offer": leave the radio where the user left it. */
             let nextProvider = null;
@@ -258,6 +262,11 @@ window.__ModuleLoader__.load({
               const response = await fetch('/s1cap-7340/tuning');
               const answer = await response.json();
               const eff = answer?.effective ?? {};
+              const pending = answer?.pending ?? {};
+              if (Number.isInteger(pending.chunkTokens ?? eff.chunkTokens)) nextChunk = String(pending.chunkTokens ?? eff.chunkTokens);
+              if (Number.isInteger(pending.overlapTokens ?? eff.overlapTokens)) nextOmega = String(pending.overlapTokens ?? eff.overlapTokens);
+              if (Number.isInteger(eff.shortContextTokens)) nextShort = String(eff.shortContextTokens);
+              if (answer.restartRequired) note = 'c / omega saved; restart DeepSeek Harness to apply';
               if (Number.isInteger(eff.depth) && eff.depth >= MIN_DEPTH && eff.depth <= MAX_DEPTH) nextDepth = String(eff.depth);
               if (Number.isFinite(eff.relevanceThreshold) && eff.relevanceThreshold >= 0 && eff.relevanceThreshold <= 1) {
                 nextTau = String(eff.relevanceThreshold);
@@ -364,6 +373,7 @@ window.__ModuleLoader__.load({
             setTau(nextTau);
             setWin(nextWin);
             setWait(nextWait);
+            setChunk(nextChunk); setOmega(nextOmega); setShortContext(nextShort);
             setTrace(nextTrace);
             if (nextProvider !== null) setProvider(nextProvider);
             setLayaPath(nextLayaPath);
@@ -440,6 +450,10 @@ window.__ModuleLoader__.load({
             const w = Number(win);
             const waitMs = Number(wait);
             const problems = [];
+            const c = Number(chunk), om = Number(omega), s = Number(shortContext);
+            if (chunk.trim() === '' || !Number.isInteger(c) || c < 64 || c > 8192) problems.push('c must be an integer 64..8192 tokens');
+            if (omega.trim() === '' || !Number.isInteger(om) || om < 0 || om > 4096 || om >= c) problems.push('omega must be 0..4096 and smaller than c');
+            if (shortContext.trim() === '' || !Number.isInteger(s) || s < 0 || s > 1048576) problems.push('s must be an integer 0..1048576 tokens');
             if (depth.trim() === '' || !Number.isInteger(d) || d < MIN_DEPTH || d > MAX_DEPTH) {
               problems.push('depth d must be an integer between ' + MIN_DEPTH + ' and ' + MAX_DEPTH);
             }
@@ -492,6 +506,7 @@ window.__ModuleLoader__.load({
             d + ' ' + r + ' ' + w,
             'trace=' + trace,
             'wait=' + waitMs,
+            'c=' + c, 'omega=' + om, 's=' + s,
             'provider=' + provider,
           ]
             .concat(layaFields)
@@ -509,6 +524,10 @@ window.__ModuleLoader__.load({
               return;
             }
             const eff = answer.effective ?? {};
+            const pending = answer.pending ?? {};
+            if (Number.isInteger(pending.chunkTokens ?? eff.chunkTokens)) setChunk(String(pending.chunkTokens ?? eff.chunkTokens));
+            if (Number.isInteger(pending.overlapTokens ?? eff.overlapTokens)) setOmega(String(pending.overlapTokens ?? eff.overlapTokens));
+            if (Number.isInteger(eff.shortContextTokens)) setShortContext(String(eff.shortContextTokens));
             // Trust the host, not the form: whatever it stored becomes what the panel shows.
             if (Number.isInteger(eff.depth) && eff.depth >= MIN_DEPTH && eff.depth <= MAX_DEPTH) setDepth(String(eff.depth));
             if (Number.isFinite(eff.relevanceThreshold)) setTau(String(eff.relevanceThreshold));
@@ -525,6 +544,8 @@ window.__ModuleLoader__.load({
             const summary =
               'saved: provider=' + eff.provider + ' d=' + eff.depth + ' r=' + eff.relevanceThreshold + ' w=' + eff.window +
                 ' wait=' + eff.anchorWaitMs + ' trace=' + eff.tracePlacement +
+                ' c=' + (pending.chunkTokens ?? eff.chunkTokens ?? c) + ' omega=' + (pending.overlapTokens ?? eff.overlapTokens ?? om) + ' s=' + (eff.shortContextTokens ?? s) +
+                (answer.restartRequired ? ' — restart DeepSeek Harness to apply c / omega' : '') +
                 (layaFields.length > 0 ? ' + ' + layaFields.length + ' Laya field(s)' : '') +
                 (answer.persisted ? '' : ' (in effect, not persisted: ' + (answer.persistError ?? 'unknown') + ')') +
                 (saveNotes.length > 0 ? ' — ' + saveNotes.join(' ') : '');
@@ -537,7 +558,7 @@ window.__ModuleLoader__.load({
           } catch (err) {
             setState((s) => ({ ...s, message: 'tuning save failed: ' + String(err) }));
           }
-        }, [depth, tau, win, wait, trace, provider, layaPath, layaWeights, layaEnvVar, load]);
+        }, [depth, tau, win, wait, chunk, omega, shortContext, trace, provider, layaPath, layaWeights, layaEnvVar, load]);
 
         const clear = React.useCallback(async () => {
           try {
@@ -816,6 +837,19 @@ window.__ModuleLoader__.load({
             }),
           ),
           // The save button gets a row of its own. It used to sit at the end of the knob row, which at this panel's
+          e('h3', { style: S.subtitle }, 'Segmentation and context protection'),
+          e('p', { style: S.note }, 'c: chunkTokens; omega (ω): overlapTokens; s: shortContextTokens. Natural paragraphs first, sentence boundaries next, length as a fallback. Below min(s, half the input budget), original tool evidence is preserved; s=0 disables short-context protection. Compression still requires at least 1024 tokens and 5% net savings. S1 scoring continues. Changes to c / omega require restarting DeepSeek Harness; s applies immediately.'),
+          e('div', { style: S.rowWrap },
+            ...[
+              ['s1cap-chunk', 'c', chunk, setChunk, 64, 8192],
+              ['s1cap-omega', 'ω', omega, setOmega, 0, 4096],
+              ['s1cap-short-context', 's', shortContext, setShortContext, 0, 1048576],
+            ].flatMap(([id, label, value, setter, min, max]) => [
+              e('label', { style: S.label, htmlFor: id }, label),
+              e('input', { id, style: S.number, type: 'number', min: String(min), max: String(max), step: '1', value,
+                onChange: event => setter(event.target.value) }),
+            ]),
+          ),
           // width pushed it past the edge of the panel - cut off in the user's screenshot, on a row that had no room
           // to give. The row above also wraps now, so a narrower panel degrades to two lines instead of losing a
           // control.

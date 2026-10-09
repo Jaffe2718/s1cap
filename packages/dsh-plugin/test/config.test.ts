@@ -1112,7 +1112,7 @@ test('every path a cell preset writes has a field on the wiring record', () => {
       const plain = (o: Record<string, unknown>, p: string): unknown =>
         p.split('.').reduce<unknown>((acc, k) => (acc as Record<string, unknown>)?.[k], o);
       assert.deepEqual(
-        read(record_),
+        read!(record_),
         plain(preset, path),
         `${cell}: the wiring record's value for \`${path}\` must be the one its file wrote`,
       );

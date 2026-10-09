@@ -148,6 +148,7 @@ export function adaptSessionEvent(event         , opts              )           
                      
                    
                         
+                   
    ;
   const type = typeof record.type === 'string' ? record.type : '';
   if (type !== '' && !CONTENT_EVENT_TYPES.includes(type)) {

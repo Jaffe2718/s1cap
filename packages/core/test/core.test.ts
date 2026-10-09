@@ -670,7 +670,7 @@ test('prefixTokensStable never moves, and the question never joins the stable he
     assert.equal(res.cacheStability.prefixTokensStable, res.budget.byBlock.pinned, 'the prefix keeps its meaning');
     assert.equal(
       res.cacheStability.layoutStableTokens,
-      res.budget.byBlock.pinned +
+      (res.budget.byBlock.pinned ?? 0) +
         (res.budget.byBlock.tail ?? 0) +
         (res === tas ? (res.budget.byBlock.stateProxy ?? 0) : 0),
       'the head is pinned and the tail, plus T only while the arm keeps T in front',

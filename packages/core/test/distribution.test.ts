@@ -20,7 +20,7 @@ test('a fresh checkout contains every shipped runtime module and its relative im
       const code = readFileSync(output, 'utf8');
       const imports = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)['"](\.{1,2}\/[^'"\r\n]+)['"]/g;
       for (const [, specifier] of code.matchAll(imports)) {
-        assert.ok(existsSync(resolve(dirname(output), specifier)), `Unresolved runtime import ${specifier} in ${output}`);
+        assert.ok(existsSync(resolve(dirname(output), specifier!)), `Unresolved runtime import ${specifier} in ${output}`);
       }
     }
   }

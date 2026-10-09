@@ -405,10 +405,10 @@ test('models: a black-holed socket is a timeout at the probe bound, not a hang',
   await drain();
   // A deadline keeps the type `decide` gives it: a caller that already branches on `S1TimeoutError` reads the same
   // class here, and the message carries the bound that fired rather than one nobody can look up from the log.
-  if (!(failure instanceof S1TimeoutError)) {
+  if (!((failure as unknown) instanceof S1TimeoutError)) {
     throw new Error(`expected S1TimeoutError, got ${String(failure)}`);
   }
-  assert.ok(failure.message.includes(String(S1_PROBE_TIMEOUT_MS)));
+  assert.ok((failure as unknown as S1TimeoutError).message.includes(String(S1_PROBE_TIMEOUT_MS)));
 });
 
 test('the probes arm a timer for the probe bound, and the happy path is untouched', async () => {

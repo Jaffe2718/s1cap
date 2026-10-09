@@ -20,10 +20,11 @@ test('no config means the defaults, and every documented path exists on the poli
   assert.deepEqual(result.issues, []);
   // every advertised path must resolve on the default policy (no doc/code drift)
   for (const path of KNOWN_PATHS) {
-    let cursor = result.policy;
+    let cursor: unknown = result.policy;
     for (const part of path.split('.')) {
       assert.equal(typeof cursor, 'object', `path ${path} breaks at ${part}`);
-      cursor = cursor[part];
+      assert.ok(cursor !== null && typeof cursor === 'object');
+      cursor = (cursor as Record<string, unknown>)[part];
     }
     assert.notEqual(cursor, undefined, `path ${path} is documented but missing`);
   }
@@ -73,7 +74,7 @@ test('the two design invariants cannot be configured away', () => {
     ['termination', 'harness-owned'],
     ['rgMaintenance.mode', 'sync'],
   ] as const) {
-    const result = validatePolicy({ [path.split('.')[0]]: path.includes('.') ? { mode: value } : value });
+    const result = validatePolicy({ [path.split('.')[0]!]: path.includes('.') ? { mode: value } : value });
     assert.equal(result.ok, false, `${path} must be rejected`);
     assert.match(result.errors[0]?.message ?? '', /fixed by design/);
   }
@@ -641,6 +642,7 @@ test('recall selection without the state proxy warns: that pairing measured wors
   assert.notEqual(warning, undefined, `the pairing must be reported: ${JSON.stringify(pairing.issues)}`);
   // Both sides of both pairs, because a warning that says "this is worse" and not "worse by how much" is the
   // kind of claim this project keeps having to retract.
+  assert.ok(warning);
   for (const [what, needle] of [
     ['the pairing hit rate', '79.2%'],
     ['the baseline hit rate', '86.7%'],

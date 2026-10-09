@@ -60,7 +60,7 @@ function makeChild(): FakeChild {
 
 interface Harness {
   deps: LaunchDeps;
-  plan: { command?: string; args?: string[]; env?: Record<string, string> };
+  plan: { command?: string; args?: string[]; env?: NodeJS.ProcessEnv };
   fake: FakeChild;
   fetched: string[];
   /** `init` is handed to the mock as well, so a mock can watch whatever the launcher passes alongside the URL. */
@@ -332,7 +332,7 @@ test('LayaServer.start gives up on a socket that accepts and never answers', asy
   assert.equal(hole.aborted, 1, 'the silent poll was cut off at the budget rather than left open');
   assert.equal(hole.armed, hole.calls, 'every poll carried the guard signal');
   assert.deepEqual(h.fetched, ['http://127.0.0.1:8008/health'], 'the spent budget left nothing for /v1/models');
-  assert.equal(settled?.ok, false);
+  assert.equal((settled as StartResult | undefined)?.ok, false);
   assert.equal(server.status, 'failed');
   assert.match(String(server.error), /timed out after 1000ms/);
 });

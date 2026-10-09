@@ -104,7 +104,7 @@ export interface ObserveStepInput {
   scoreBatch?: (
     current: Segment,
     candidates: readonly Segment[],
-  ) => readonly number[] | Promise<readonly number[]>;
+  ) => readonly number[] | undefined | Promise<readonly number[] | undefined>;
   /**
    * Default true. Pass false on a synchronous path whose system has an asynchronous scoring path: the graph scores
    * each new segment once, from whichever caller reaches `scoreNew` first, so a step that scores lexically does not
@@ -205,6 +205,7 @@ export interface ObserveStepInput {
 
 /** a step that produced an assembly and a control-plane record */
 export interface StepObservation {
+  segmentation?: { chunkTokens: number; overlapTokens: number };
   kind: 'assembled';
   /** the control-plane record (frozen telemetry schema v1) */
   event: AssemblyEvent;
@@ -297,7 +298,7 @@ export async function observeStep(
   // The host keeps its copy in the log and builds the request from the log, so the model still reads what was
   // delivered; what stops is S1CAP measuring, recalling or re-delivering it.
   const ingestable = events.filter((ev) => !isS1capInjected(ev.id));
-  const segments: Segment[] = ingestable.flatMap((ev) => segmentEvent(ev));
+  const segments: Segment[] = ingestable.flatMap((ev) => segmentEvent(ev, input.policy.segmentation));
   input.graph.addSegments(segments);
   // The pinned prefix, built before the skip below rather than after it.
   //
@@ -657,6 +658,7 @@ export async function observeStep(
 
   return {
     kind: 'assembled',
+    segmentation: input.policy.segmentation,
     event,
     layout: result.layout,
     segments,

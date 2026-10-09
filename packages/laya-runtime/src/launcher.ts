@@ -16,7 +16,7 @@ export interface SpawnedProcess {
 }
 
 export interface LaunchDeps {
-  spawn(command: string, args: string[], options: { env: Record<string, string>; cwd?: string }): SpawnedProcess;
+  spawn(command: string, args: string[], options: { env: NodeJS.ProcessEnv; cwd?: string }): SpawnedProcess;
   fetchImpl: typeof fetch;
   sleep(ms: number): Promise<void>;
   now(): number;

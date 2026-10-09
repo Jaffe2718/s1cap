@@ -38,6 +38,9 @@ interface NumberRule {
 
 /** Numeric bounds: thresholds, budgets, caps and timings. */
 export const NUMBER_RULES: readonly NumberRule[] = [
+  { path: 'segmentation.chunkTokens', min: 64, max: 8192, integer: true },
+  { path: 'segmentation.overlapTokens', min: 0, max: 4096, integer: true },
+  { path: 'contextSelection.shortContextTokens', min: 0, max: 1048576, integer: true },
   { path: 'recall.deliveryMaxTokens', min: 0, max: 65536, integer: true },
   { path: 'recall.deliveryMaxSegments', min: 0, max: 64, integer: true },
   // NOT ENFORCED. The type calls this "hard deadline for the synchronous per-call assembly hook; on expiry the
@@ -572,6 +575,8 @@ export const KNOWN_PATHS: readonly string[] = [
 ];
 
 const KNOWN_TOP_LEVEL: readonly string[] = [
+  'segmentation',
+  'contextSelection',
   'cell',
   'termination',
   'assemblyDeadlineMs',
@@ -668,6 +673,10 @@ export function validatePolicy(raw: unknown, extraAllowedKeys: readonly string[]
   const target = policy as unknown as Record<string, unknown>;
 
   const finish = (): ValidationResult => {
+    if (policy.segmentation.overlapTokens >= policy.segmentation.chunkTokens) {
+      issues.push({ path: 'segmentation.overlapTokens', severity: 'error', message: 'overlapTokens must be smaller than chunkTokens; segmentation defaults restored' });
+      policy.segmentation = { ...defaultPolicy().segmentation };
+    }
     const errors = issues.filter((i) => i.severity === 'error');
     const warnings = issues.filter((i) => i.severity === 'warning');
     return { ok: errors.length === 0, issues, errors, warnings, policy };

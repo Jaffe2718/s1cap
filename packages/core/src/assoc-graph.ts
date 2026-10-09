@@ -170,6 +170,7 @@ export interface ScoredPair {
 }
 
 export interface RgSnapshot {
+  segmentation?: { chunkTokens: number; overlapTokens: number };
   schema: number;
   /**
    * Written by the store, and checked by it on read: a snapshot is only ever valid for the session whose graph

@@ -93,6 +93,7 @@ test('a raw true/false distribution is read by its true-side mass', async () => 
     }),
   });
   const weights = await relevance(current, [candidates[0] as Segment]);
+  assert.ok(weights !== undefined && typeof weights !== 'symbol');
   assert.equal(weights?.length, 1);
   assert.equal(weights?.[0], 0.75, 'the true-side mass, normalized');
 });
@@ -498,6 +499,7 @@ test('the retry budget is the guard schedule it bounds, so a bigger batch cannot
 
     const many = Array.from({ length: perCall }, (_unused, i) => segment(`h${i}`, `candidate ${i}`));
     const weights = await relevance(current, many);
+    assert.ok(weights !== undefined && typeof weights !== 'symbol');
     assert.equal(weights?.length, perCall, `at ${perCall} questions a timeout costs a retry, not the window`);
     assert.ok(weights?.every((w) => w === 0.5), 'and every candidate is judged by the backend');
     assert.deepEqual(

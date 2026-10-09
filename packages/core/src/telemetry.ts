@@ -79,6 +79,7 @@ export interface LlmCallEvent {
 }
 
 export interface S1CallEvent {
+  sessionId?: string;
   type: 's1_call';
   schema: typeof TELEMETRY_SCHEMA_VERSION;
   ts: number;

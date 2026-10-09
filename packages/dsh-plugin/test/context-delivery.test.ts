@@ -89,9 +89,9 @@ test('the block lands after the last claimed message, where the question is alre
   assert.equal(injected.role, 'user');
   assert.equal(injected.source.kind, 'system-prompt', 'the injected-context kind the adapter already enumerates');
   assert.equal(injected.id, result.payloadId, 'the id carries the payload digest, so it cannot collide');
-  assert.ok(injected.content[0].text.includes('scripts: build, test, dsh:add'), 'the recalled text is in there');
+  assert.ok(injected.content[0]!.text.includes('scripts: build, test, dsh:add'), 'the recalled text is in there');
   assert.ok(
-    injected.content[0].text.includes(TAS_TRACE_TEXT),
+    injected.content[0]!.text.includes(TAS_TRACE_TEXT),
     'and so is the state proxy: `tas.on` implies T is delivered, which is the whole of the method',
   );
 });
@@ -189,7 +189,7 @@ test('the block carries quoted session content and no S1CAP prose of its own', (
   const result = deliverContext(input());
   const messages = result.messages ?? [];
   const injected = messages[2] as { content: { text: string }[] };
-  const text = injected.content[0].text;
+  const text = injected.content[0]!.text;
 
   // The rule: S1CAP manages which of the harness's own context is in the prompt, and introduces nothing of its own.
   // An earlier version opened with "the blocks below were selected by relevance to the current task, they
@@ -222,7 +222,7 @@ test('the delivered block respects trace placement within the injection', () => 
   const textOf = (r: ReturnType<typeof deliverContext>): string => {
     const messages = r.messages ?? [];
     const last = messages[messages.length - 1] as { content: { text: string }[] };
-    return last.content[0].text;
+    return last.content[0]!.text;
   };
 
   // Insertion cannot reorder the harness history, but the blocks it does send
@@ -388,12 +388,12 @@ test('under every-step an empty decision is delivered at the end, which the defa
   assert.equal(injected.id, result.payloadId, 'the id still carries the payload digest');
   assert.equal(injected.role, 'user');
   assert.equal(injected.source.kind, 'system-prompt');
-  assert.ok(injected.content[0].text.includes('scripts: build, test, dsh:add'), 'and the recalled text is in it');
+  assert.ok(injected.content[0]!.text.includes('scripts: build, test, dsh:add'), 'and the recalled text is in it');
   assert.ok(
-    injected.content[0].text.includes(TAS_TRACE_TEXT),
+    injected.content[0]!.text.includes(TAS_TRACE_TEXT),
     'and so is the trace: the permissive trigger decides *where* the block goes, not *what* it carries',
   );
-  assert.ok(injected.content[0].text.startsWith(TRACE_START), 'the trace still opens the message on this path');
+  assert.ok(injected.content[0]!.text.startsWith(TRACE_START), 'the trace still opens the message on this path');
   // The end of an empty increment is index 0, and the record says which of the two insertions this was: a round
   // that flips the switch reads deliveries by reason, and "after the last claimed message" would be a false
   // description of a step that claimed nothing.

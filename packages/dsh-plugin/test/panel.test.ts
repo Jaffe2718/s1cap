@@ -309,6 +309,26 @@ test('the backend radio offers Off, and every value it offers is a name the host
   }
 });
 
+test('the panel exposes c, omega and s and saves them through the host parser', async () => {
+  const panel = await mountPanel();
+  try {
+    const inputs = findAll(panel.view(), element => element.type === 'input');
+    for (const id of ['s1cap-chunk', 's1cap-omega', 's1cap-short-context']) assert.ok(inputs.some(input => input.props['id'] === id));
+    await panel.press('Save tuning');
+    const body = panel.state.calls.filter(call => call.method === 'PUT').at(-1)!.body;
+    const parsed = parseTuningArgs(body);
+    assert.equal(parsed.chunkTokens, 512);
+    assert.equal(parsed.overlapTokens, 64);
+    assert.equal(parsed.shortContextTokens, 32768);
+    const omega = inputs.find(input => input.props['id'] === 's1cap-omega')!;
+    (omega.props['onChange'] as (event: unknown) => void)({ target: { value: '512' } });
+    const before = panel.state.calls.filter(call => call.method === 'PUT').length;
+    await panel.press('Save tuning');
+    assert.equal(panel.state.calls.filter(call => call.method === 'PUT').length, before);
+    assert.match(textOf(panel.view()), /omega.*smaller than c/);
+  } finally { panel.restore(); }
+});
+
 test('Off is a selectable block: the other two stay mounted and dim, and the knobs stay below', async () => {
   const panel = await mountPanel();
   try {

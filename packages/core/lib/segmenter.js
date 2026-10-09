@@ -231,7 +231,7 @@ function splitSentences(text        , chunkTokens        , overlapTokens        
   const pieces           = [];
   let start = 0;
   while (start < text.length) {
-    let end = cuts.find((c) => c > start && estimateTokens(text.slice(start, c)) <= chunkTokens) ?? -1;
+    let end = cuts.filter((c) => c > start && estimateTokens(text.slice(start, c)) <= chunkTokens).at(-1) ?? -1;
     if (end === -1) {
       // Nothing single fits. Take the last cut that at least makes progress, else hard-split the remainder.
       const fitting = cuts.filter((c) => c > start);
@@ -240,14 +240,20 @@ function splitSentences(text        , chunkTokens        , overlapTokens        
         pieces.push(...hardSplit(rest, chunkTokens, overlapTokens));
         return pieces;
       }
-      end = fitting[0]          ;
+      const first = fitting[0]          ;
+      if (estimateTokens(text.slice(start, first)) > chunkTokens) {
+        pieces.push(...hardSplit(text.slice(start, first), chunkTokens, overlapTokens));
+        start = first;
+        continue;
+      }
+      end = first;
     }
     pieces.push(text.slice(start, end).trim());
     // Overlap: rewind to roughly `overlapTokens` of the previous piece, snapped forward to a sentence start.
     let next = end;
     if (overlapTokens > 0 && pieces.length > 0) {
-      const back = end - Math.max(0, end - overlapTokens * 4);
-      const snapped = cuts.find((c) => c > back && c < end);
+      const back = end - suffixCharsForTokens(text.slice(start, end), overlapTokens);
+      const snapped = cuts.find((c) => c >= back && c > start && c < end);
       if (snapped !== undefined) next = snapped;
     }
     if (next <= start) next = end;
@@ -261,11 +267,37 @@ function hardSplit(text        , chunkTokens        , overlapTokens        )    
   const pieces           = [];
   let rest = text;
   while (estimateTokens(rest) > chunkTokens && rest.length > chunkTokens) {
-    pieces.push(rest.slice(0, chunkTokens));
-    rest = rest.slice(Math.max(0, chunkTokens - overlapTokens));
+    const end = prefixCharsForTokens(rest, chunkTokens);
+    const piece = rest.slice(0, end);
+    pieces.push(piece);
+    const overlap = suffixCharsForTokens(piece, Math.min(overlapTokens, chunkTokens - 1));
+    rest = rest.slice(Math.max(1, end - overlap));
   }
   if (rest !== '') pieces.push(rest);
   return pieces;
+}
+
+/** Convert token budgets to Unicode-safe character spans only at the fallback. */
+function prefixCharsForTokens(text        , budget        )         {
+  let cost = 0, chars = 0;
+  for (const ch of text) {
+    const next = CJK.test(ch) ? 1 : 0.25;
+    if (cost + next > budget) break;
+    cost += next;
+    chars += ch.length;
+  }
+  return chars;
+}
+
+function suffixCharsForTokens(text        , budget        )         {
+  let cost = 0, chars = 0;
+  for (const ch of Array.from(text).reverse()) {
+    const next = CJK.test(ch) ? 1 : 0.25;
+    if (cost + next > budget) break;
+    cost += next;
+    chars += ch.length;
+  }
+  return chars;
 }
 
 /**
@@ -301,7 +333,7 @@ function packBlocks(blocks         , chunkTokens        , overlapTokens        )
       carryTokens += t;
     }
     current = carry;
-    currentTokens = carry.reduce((sum, b) => sum + estimateTokens(b), 0);
+    currentTokens = current.length === 0 ? 0 : estimateTokens(current.join('\n\n'));
   };
 
   for (const block of blocks) {
@@ -312,15 +344,17 @@ function packBlocks(blocks         , chunkTokens        , overlapTokens        )
       const pieces = splitSentences(block.text, chunkTokens, overlapTokens);
       for (const piece of pieces) {
         const pt = estimateTokens(piece);
-        if (currentTokens + pt > chunkTokens && current.length > 0) flush();
+        if (currentTokens + pt + (current.length > 0 ? 1 : 0) > chunkTokens && current.length > 0) flush();
+        if (currentTokens + pt + (current.length > 0 ? 1 : 0) > chunkTokens) { current = []; currentTokens = 0; }
         current.push(piece);
-        currentTokens += pt;
+        currentTokens = estimateTokens(current.join('\n\n'));
       }
       continue;
     }
-    if (currentTokens + t > chunkTokens && current.length > 0) flush();
+    if (currentTokens + t + (current.length > 0 ? 1 : 0) > chunkTokens && current.length > 0) flush();
+    if (currentTokens + t + (current.length > 0 ? 1 : 0) > chunkTokens) { current = []; currentTokens = 0; }
     current.push(block.text);
-    currentTokens += t;
+    currentTokens = estimateTokens(current.join('\n\n'));
   }
   if (current.length > 0) chunks.push(current.join('\n\n'));
   return chunks;
@@ -347,7 +381,7 @@ function packLines(lines          , chunkTokens        , overlapTokens        ) 
       carryTokens += t;
     }
     current = carry;
-    currentTokens = carryTokens;
+    currentTokens = current.length === 0 ? 0 : estimateTokens(current.join('\n'));
   };
 
   for (const line of lines) {
@@ -355,14 +389,16 @@ function packLines(lines          , chunkTokens        , overlapTokens        ) 
     // Pathological single line longer than the budget: hard-split by characters.
     while (estimateTokens(piece) > chunkTokens && piece.length > chunkTokens) {
       if (current.length > 0) flush();
-      const head = piece.slice(0, chunkTokens);
+      const end = prefixCharsForTokens(piece, chunkTokens);
+      const head = piece.slice(0, end);
       chunks.push([head]);
-      piece = piece.slice(Math.max(0, chunkTokens - overlapTokens));
+      piece = piece.slice(Math.max(1, end - suffixCharsForTokens(head, Math.min(overlapTokens, chunkTokens - 1))));
     }
     const t = estimateTokens(piece);
-    if (currentTokens + t > chunkTokens && current.length > 0) flush();
+    if (currentTokens + t + (current.length > 0 ? 1 : 0) > chunkTokens && current.length > 0) flush();
+    if (currentTokens + t + (current.length > 0 ? 1 : 0) > chunkTokens) { current = []; currentTokens = 0; }
     current.push(piece);
-    currentTokens += t;
+    currentTokens = estimateTokens(current.join('\n'));
   }
   if (current.length > 0) chunks.push(current);
 

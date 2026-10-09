@@ -35,7 +35,7 @@ function segment(id: string, seq: number): Segment {
   // The text is the id: the graph's local lexical scorer is the fallback everywhere a backend is absent, and a
   // fixture whose texts are identical would make every pair equally relevant, which is the one graph shape that
   // cannot tell an expanding walk from a dead end.
-  return { id, sessionId: 's', kind: 'user', text: `segment ${id}`, ts: seq, seq };
+  return { id, sessionId: 's', kind: 'user', text: `segment ${id}`, tokens: 4, ts: seq, seq };
 }
 
 /** A graph of `n` segments in append order, and nothing scored. */

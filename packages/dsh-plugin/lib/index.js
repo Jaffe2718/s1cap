@@ -161,7 +161,7 @@ export function lastCellPreset()                                                
  *   `defaultPolicy()` < cell preset < explicit config in the profile patch.
  */
 export function resolvePluginConfig(
-  raw                             ,
+  raw                    ,
   preset                                           ,
 )                       {
   const source = (raw ?? {})                           ;
@@ -263,7 +263,7 @@ export function resolvePluginConfig(
 
 /** Kept for callers that only want the merged config.
  */
-export function resolveConfig(raw                             )                    {
+export function resolveConfig(raw                    )                    {
   return resolvePluginConfig(raw).config;
 }
 
@@ -294,8 +294,11 @@ export function commandError(text        )                                  {
   return { kind: 'error', text: text.trim() === '' ? 'no reason given' : text };
 }
 
+/** Profile overrides may supply individual fields of nested sections. */
+                                                                                                                                                                                          
+
                                 
-                                                                                                     
+                                                                                                 
                                                                                            
    
                                       
@@ -530,6 +533,9 @@ export function readTuningFile()         {
     const raw = readFileSync(resolveTelemetryPath(TUNING_FILE), 'utf8');
     const parsed = JSON.parse(raw)                           ;
     const out         = {};
+    const extra = parseTuningArgs(['chunkTokens', 'overlapTokens', 'shortContextTokens']
+      .filter(key => typeof parsed[key] === 'number').map(key => `${key}=${parsed[key]}`).join(' '));
+    Object.assign(out, extra);
     // The panel's bound mirrors `NUMBER_RULES` for `recall.depth` (1..16) rather than being "an integer > 0": the
     // core validator caps the path, so a file writing 17 would be applied by this reader and refused by the next
     // profile validation — two surfaces disagreeing about the same knob is the drift this check exists to stop.
@@ -612,6 +618,9 @@ function writeTuningFile(values        )                                  {
   try {
     mkdirSync(dirname(path), { recursive: true });
     const stored         = {
+      ...(values.chunkTokens !== undefined ? { chunkTokens: values.chunkTokens } : {}),
+      ...(values.overlapTokens !== undefined ? { overlapTokens: values.overlapTokens } : {}),
+      ...(values.shortContextTokens !== undefined ? { shortContextTokens: values.shortContextTokens } : {}),
       ...(values.depth !== undefined ? { depth: values.depth } : {}),
       ...(values.relevanceThreshold !== undefined ? { relevanceThreshold: values.relevanceThreshold } : {}),
       ...(values.window !== undefined ? { window: values.window } : {}),
@@ -1089,7 +1098,7 @@ function findService   (ctx               , name        )                {
   return undefined;
 }
 
-export function apply(ctx               , raw                             )       {
+export function apply(ctx               , raw                    )       {
   try {
     applyInner(ctx, raw);
   } catch (err) {
@@ -1101,7 +1110,7 @@ export function apply(ctx               , raw                             )     
   }
 }
 
-function applyInner(ctx               , raw                             )       {
+function applyInner(ctx               , raw                    )       {
   const source = (raw ?? {})                           ;
   if (source.enabled !== true) {
     ctx.logger?.info?.('[s1cap] not enabled (config.enabled !== true) — inert: no hooks, no commands, no System-1 calls');
@@ -1129,6 +1138,14 @@ function applyInner(ctx               , raw                             )       
   if (cellPreset.error !== undefined) ctx.logger?.error?.(`[s1cap] ${cellPreset.error}`);
   const resolved = resolvePluginConfig(raw, { file: cellPreset.file, value: cellPreset.value });
   const config = resolved.config;
+  // Freeze chunk geometry at activation: changing it while a graph exists would
+  // reuse chunk ids for different text. Saved c/omega take effect after restart.
+  const startupTuning = readTuningFile();
+  const startupChunk = startupTuning.chunkTokens ?? config.segmentation.chunkTokens;
+  const startupOverlap = startupTuning.overlapTokens ?? config.segmentation.overlapTokens;
+  if (startupOverlap < startupChunk) config.segmentation = { chunkTokens: startupChunk, overlapTokens: startupOverlap };
+  else ctx.logger?.warn?.('[s1cap] saved overlap must be smaller than chunk size; keeping configured segmentation');
+  if (startupTuning.shortContextTokens !== undefined) config.contextSelection.shortContextTokens = startupTuning.shortContextTokens;
   const layaConfig = config.laya ?? defaultLayaConfig();
   // The checkpoint cache is anchored, not relative. `./.s1cap/laya-cache` resolves against whatever directory the
   // host happens to have as its working directory, so the same profile put the weights in one place when a person
@@ -1141,17 +1158,17 @@ function applyInner(ctx               , raw                             )       
   }
   const runtime = new LayaRuntime(layaConfig);
 
-  for (const issue of resolved.policy.warnings) ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message}`);
-  for (const issue of resolved.laya.warnings) ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message}`);
+  for (const issue of resolved.policy.warnings) ctx.logger?.warn?.(`[s1cap] config ${issue.path}: ${issue.message}`);
+  for (const issue of resolved.laya.warnings) ctx.logger?.warn?.(`[s1cap] config ${issue.path}: ${issue.message}`);
   for (const issue of [...resolved.policy.errors, ...resolved.laya.errors]           ) {
-    ctx.logger?.warn(`[s1cap] config ${issue.path}: ${issue.message} (default kept)`);
+    ctx.logger?.warn?.(`[s1cap] config ${issue.path}: ${issue.message} (default kept)`);
   }
-  for (const message of resolved.telemetryErrors) ctx.logger?.warn(`[s1cap] config telemetry: ${message}`);
-  for (const message of resolved.observationErrors) ctx.logger?.warn(`[s1cap] config observation: ${message}`);
+  for (const message of resolved.telemetryErrors) ctx.logger?.warn?.(`[s1cap] config telemetry: ${message}`);
+  for (const message of resolved.observationErrors) ctx.logger?.warn?.(`[s1cap] config observation: ${message}`);
 
   // One S1 backend at a time (docs/AGENT_BRIEF.md §0.9). A conflict is reported and the session
   // degrades to observation mode rather than silently picking a governor.
-  for (const conflict of resolved.conflicts) ctx.logger?.warn(`[s1cap] ${conflict}`);
+  for (const conflict of resolved.conflicts) ctx.logger?.warn?.(`[s1cap] ${conflict}`);
   // Re-resolvable, because the panel's Laya fields are read on the first step rather than at activation (the
   // interpreter must be in place before the first observation, and the host may not have the credential service
   // yet when it activates a plugin). A session that started with an empty path therefore *resolves* the conflict
@@ -1192,20 +1209,20 @@ function applyInner(ctx               , raw                             )       
   let backend                    = initial.backend;
   let client                       = initial.client;
 
-  ctx.logger?.info(
+  ctx.logger?.info?.(
     `[s1cap] cell=${config.cell} tas=${String(config.tas.on)} tier1=${config.recall.tier1} admissionLimit=${config.s1.admissionLimit} laya=${String(layaConfig.enabled)}`,
   );
-  ctx.logger?.info(`[s1cap] s1 backend: ${describeS1Backend(backend)}`);
-  if (resolved.conflicts.length > 0) ctx.logger?.warn('[s1cap] this session makes no System-1 calls (provider=none)');
+  ctx.logger?.info?.(`[s1cap] s1 backend: ${describeS1Backend(backend)}`);
+  if (resolved.conflicts.length > 0) ctx.logger?.warn?.('[s1cap] this session makes no System-1 calls (provider=none)');
 
   if (layaConfig.enabled && layaConfig.autoStart) {
     void runtime
       .start()
       .then((state) => {
-        if (state.status === 'ready') ctx.logger?.info(`[s1cap] laya-serve ready at ${state.baseUrl} (python: ${state.pythonPath ?? 'unknown'})`);
-        else ctx.logger?.warn(`[s1cap] laya-serve not ready: ${state.error ?? state.status} — System-1 calls fall back to tier-0`);
+        if (state.status === 'ready') ctx.logger?.info?.(`[s1cap] laya-serve ready at ${state.baseUrl} (python: ${state.pythonPath ?? 'unknown'})`);
+        else ctx.logger?.warn?.(`[s1cap] laya-serve not ready: ${state.error ?? state.status} — System-1 calls fall back to tier-0`);
       })
-      .catch((err         ) => ctx.logger?.warn(`[s1cap] laya startup failed: ${String(err)}`));
+      .catch((err         ) => ctx.logger?.warn?.(`[s1cap] laya startup failed: ${String(err)}`));
   }
 
   // M1 observation mode. Real SEGMENTER + RECALL + ASSEMBLER on every LLM call, recorded in the
@@ -1679,6 +1696,9 @@ function applyInner(ctx               , raw                             )       
       // confused again by a reader who only has the run.
       recall: {
         d: config.recall.depth,
+        c: config.segmentation.chunkTokens,
+        omega: config.segmentation.overlapTokens,
+        s: config.contextSelection.shortContextTokens,
         r: config.recall.threshold,
         w: config.recall.window,
         wait: config.recall.anchorWaitMs,
@@ -1751,6 +1771,9 @@ function applyInner(ctx               , raw                             )       
         // round's reader had the cell's recipe and not the value an instance resolved (F6).
         recall: {
           d: config.recall.depth,
+          c: config.segmentation.chunkTokens,
+          omega: config.segmentation.overlapTokens,
+          s: config.contextSelection.shortContextTokens,
           r: config.recall.threshold,
           w: config.recall.window,
           wait: config.recall.anchorWaitMs,
@@ -1828,6 +1851,9 @@ function applyInner(ctx               , raw                             )       
       if (fromFile.depth !== undefined) appliedTuning.depth = fromFile.depth;
       if (fromFile.relevanceThreshold !== undefined) appliedTuning.relevanceThreshold = fromFile.relevanceThreshold;
       if (fromFile.window !== undefined) appliedTuning.window = fromFile.window;
+      if (fromFile.chunkTokens !== undefined) appliedTuning.chunkTokens = fromFile.chunkTokens;
+      if (fromFile.overlapTokens !== undefined) appliedTuning.overlapTokens = fromFile.overlapTokens;
+      if (fromFile.shortContextTokens !== undefined) appliedTuning.shortContextTokens = fromFile.shortContextTokens;
       if (fromFile.anchorWaitMs !== undefined) appliedTuning.anchorWaitMs = fromFile.anchorWaitMs;
       if (fromFile.tracePlacement !== undefined) appliedTuning.tracePlacement = fromFile.tracePlacement;
       if (fromFile.layaPythonPath !== undefined) appliedTuning.layaPythonPath = fromFile.layaPythonPath;
@@ -1849,6 +1875,7 @@ function applyInner(ctx               , raw                             )       
       if (appliedTuning.depth !== undefined) config.recall.depth = appliedTuning.depth;
       if (appliedTuning.relevanceThreshold !== undefined) config.recall.threshold = appliedTuning.relevanceThreshold;
       if (appliedTuning.window !== undefined) config.recall.window = appliedTuning.window;
+      if (appliedTuning.shortContextTokens !== undefined) config.contextSelection.shortContextTokens = appliedTuning.shortContextTokens;
       if (appliedTuning.anchorWaitMs !== undefined) config.recall.anchorWaitMs = appliedTuning.anchorWaitMs;
       // The arm itself, and the only layout setting a stored file can carry. No cell preset carries a
       // `tracePlacement` (see `cellPolicy`), so this line is the only way a live session can be moved to the paper's
@@ -1916,10 +1943,12 @@ function applyInner(ctx               , raw                             )       
         }
       }
       probeSink?.write(JSON.stringify({ schema: 0, kind: 'tuning-file', read: fromFile, effective: { depth: config.recall.depth, relevanceThreshold: config.recall.threshold, window: config.recall.window, anchorWaitMs: config.recall.anchorWaitMs, tracePlacement: config.tracePlacement, provider: config.s1.provider } }) + '\n');
+      const primedObserver = observer;
+      if (!primedObserver) return;
       await primeSystemPrompt({
         service: (ctx                                       ).get?.('systemPrompt'),
-        observer,
-        onText: (text, tokens) => observer.setSystemPrompt(text, tokens),
+        observer: primedObserver,
+        onText: (text, tokens) => primedObserver.setSystemPrompt(text, tokens),
         write: (line) => probeSink?.write(line),
         onWarn: (message) => ctx.logger?.warn?.(`[s1cap] ${message}`),
       });
@@ -1990,13 +2019,17 @@ function applyInner(ctx               , raw                             )       
       assemblyTrigger: config.assemblyTrigger,
       selectContext: (built, payload) => {
         if (!config.deliver || config.recall.tier1 !== 's1' || observer === undefined) return;
-        const rejected = observer.rejectedChunks?.(built.event.sessionId, built.layout.anchor.id) ?? [];
-        const result = selectToolContext(payload, built, rejected, config.tail.k);
+        const sessionId = built.event.sessionId;
+        const anchorId = built.layout.anchor.id;
+        if (sessionId === undefined || anchorId === undefined) return;
+        const rejected = observer.rejectedChunks?.(sessionId, anchorId) ?? [];
+        const result = selectToolContext(payload, built, rejected, config.tail.k, { ...(built.segmentation ?? config.segmentation), ...config.contextSelection });
         observer.probe({ schema: 0, kind: 'context-selection', sessionId: built.event.sessionId,
           anchor: built.layout.anchor.id, rejectedChunks: rejected.length, ...result });
       },
       deliver: (built, decision, payload, visibleMessages) =>
         deliverContext({
+          segmentation: built.segmentation ?? config.segmentation,
           visibleMessages,
           recallMaxTokens: config.recall.deliveryMaxTokens,
           recallMaxSegments: config.recall.deliveryMaxSegments,
@@ -2028,7 +2061,7 @@ function applyInner(ctx               , raw                             )       
    * answer with the effective triple. The `/s1-tune` command and the panel's Save button share it, so the command
    * line and the button cannot drift apart in what they accept or what they report.
  */
-  const applyTuning = (parsed        )                                                                                                                                            => {
+  const applyTuning = (parsed        )                                                                                                                                                                                         => {
     // **A refusal is answered before anything is applied.** `parseTuningArgs` returns `refused` when a spelling asked
     // for the question in front of the long context — the deleted layout axis — and a save carrying one is refused
     // whole: coercing it would run a layout nobody asked for, and ignoring it would leave a command line that asks
@@ -2049,6 +2082,9 @@ function applyInner(ctx               , raw                             )       
       parsed.depth === undefined &&
       parsed.relevanceThreshold === undefined &&
       parsed.window === undefined &&
+      parsed.chunkTokens === undefined &&
+      parsed.overlapTokens === undefined &&
+      parsed.shortContextTokens === undefined &&
       parsed.anchorWaitMs === undefined &&
       parsed.tracePlacement === undefined &&
       parsed.provider === undefined &&
@@ -2062,6 +2098,9 @@ function applyInner(ctx               , raw                             )       
     }
     // The readings (`refused`/`notes`) are replaced rather than merged: they describe the command line that was just
     // parsed, and a save that says nothing about the question must clear the sentence an earlier save earned.
+    const nextChunk = parsed.chunkTokens ?? appliedTuning.chunkTokens ?? config.segmentation.chunkTokens;
+    const nextOverlap = parsed.overlapTokens ?? appliedTuning.overlapTokens ?? config.segmentation.overlapTokens;
+    if (nextOverlap >= nextChunk) return { ok: false, reason: 'omega must be smaller than c' };
     appliedTuning = { ...appliedTuning, ...parsed, refused: parsed.refused, notes: parsed.notes };
     // A panel value has to take effect now, not at the next start: the field the user just filled in is the one
     // that decides whether System-1 calls happen at all, and a backend that waits for a restart to pick it up
@@ -2104,6 +2143,7 @@ function applyInner(ctx               , raw                             )       
     if (parsed.depth !== undefined) config.recall.depth = parsed.depth;
     if (parsed.relevanceThreshold !== undefined) config.recall.threshold = parsed.relevanceThreshold;
     if (parsed.window !== undefined) config.recall.window = parsed.window;
+    if (parsed.shortContextTokens !== undefined) config.contextSelection.shortContextTokens = parsed.shortContextTokens;
     if (parsed.anchorWaitMs !== undefined) config.recall.anchorWaitMs = parsed.anchorWaitMs;
     // The arm, and the only layout setting this path can change. `questionPlacement` is deleted, not merely
     // unsettable here: the spellings that used to write it are refused at the parser (`refused`, above) or noted.
@@ -2118,6 +2158,8 @@ function applyInner(ctx               , raw                             )       
       ok: true,
       effective: {
         depth: config.recall.depth,
+        ...config.segmentation,
+        ...config.contextSelection,
         relevanceThreshold: config.recall.threshold,
         window: config.recall.window,
         anchorWaitMs: config.recall.anchorWaitMs,
@@ -2125,6 +2167,8 @@ function applyInner(ctx               , raw                             )       
         provider: config.s1.provider,
       },
       persisted,
+      pending: { chunkTokens: nextChunk, overlapTokens: nextOverlap },
+      restartRequired: nextChunk !== config.segmentation.chunkTokens || nextOverlap !== config.segmentation.overlapTokens,
       ...(persist.ok ? {} : { persistError: persist.error }),
       ...((parsed.notes?.length ?? 0) > 0 ? { notes: parsed.notes } : {}),
     };
@@ -2162,7 +2206,7 @@ function applyInner(ctx               , raw                             )       
             // The retirement notes ride on the answer rather than only in the log: they are about the token the user
             // just typed (`q=last`, `xFirst=off`), and a note in a log the command line cannot show would be the
             // silent reinterpretation it exists to prevent.
-            ((outcome.notes?.length ?? 0) > 0 ? ` — ${outcome.notes.join(' ')}` : ''),
+            ((outcome.notes?.length ?? 0) > 0 ? ` — ${outcome.notes?.join(' ')}` : ''),
         );
       },
     },
@@ -2329,8 +2373,7 @@ function applyInner(ctx               , raw                             )       
                   ...state.logTail,
                   '',
                 ].join('\n'),
-                'utf8',
-                { flag: 'a' },
+                { encoding: 'utf8', flag: 'a' },
               );
             } catch (err) {
               ctx.logger?.warn?.(`[s1cap] could not write ${path}: ${(err         ).message}`);
@@ -2465,6 +2508,8 @@ function applyInner(ctx               , raw                             )       
                 stored: { ...readTuningFile(), ...appliedTuning },
                 effective: {
                   depth: config.recall.depth,
+                  ...config.segmentation,
+                  ...config.contextSelection,
                   relevanceThreshold: config.recall.threshold,
                   window: config.recall.window,
                   anchorWaitMs: config.recall.anchorWaitMs,
@@ -2473,6 +2518,8 @@ function applyInner(ctx               , raw                             )       
                   // panel can fill the radio from the same place it fills the knobs.
                   provider: config.s1.provider,
                 },
+                pending: { chunkTokens: appliedTuning.chunkTokens ?? config.segmentation.chunkTokens, overlapTokens: appliedTuning.overlapTokens ?? config.segmentation.overlapTokens },
+                restartRequired: (appliedTuning.chunkTokens ?? config.segmentation.chunkTokens) !== config.segmentation.chunkTokens || (appliedTuning.overlapTokens ?? config.segmentation.overlapTokens) !== config.segmentation.overlapTokens,
                 status: {
                   cell: config.cell,
                   tas: effective.tas.on,

@@ -289,6 +289,8 @@ export class S1TimeoutError extends Error {
  * back to the lexical scorer.
  */
 export class S1CancelledError extends Error {
+  attempts         ;
+  waitedMs         ;
   constructor() {
     super('systemone request cancelled by the caller');
     this.name = 'S1CancelledError';

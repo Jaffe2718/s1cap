@@ -104,7 +104,7 @@ export function isInputEvent(segment         )          {
                 
                      
                                    
-                                                      
+                                                                              
      
                                                                                                                    
                                                                                                                     
@@ -205,6 +205,7 @@ export function isInputEvent(segment         )          {
 
 /** a step that produced an assembly and a control-plane record */
                                   
+                                                                
                     
                                                               
                        
@@ -297,7 +298,7 @@ export async function observeStep(
   // The host keeps its copy in the log and builds the request from the log, so the model still reads what was
   // delivered; what stops is S1CAP measuring, recalling or re-delivering it.
   const ingestable = events.filter((ev) => !isS1capInjected(ev.id));
-  const segments            = ingestable.flatMap((ev) => segmentEvent(ev));
+  const segments            = ingestable.flatMap((ev) => segmentEvent(ev, input.policy.segmentation));
   input.graph.addSegments(segments);
   // The pinned prefix, built before the skip below rather than after it.
   //
@@ -657,6 +658,7 @@ export async function observeStep(
 
   return {
     kind: 'assembled',
+    segmentation: input.policy.segmentation,
     event,
     layout: result.layout,
     segments,
